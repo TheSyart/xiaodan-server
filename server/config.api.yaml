@@ -1,0 +1,21 @@
+# 小智服务端在 api 模式下的配置模板。
+#
+# 用法:复制到服务端的 data/.config.yaml,把 secret 换成控制台里的那一串
+# (控制台「设置」页可看可复制,或在控制台容器里跑 `node console/dist/cli.js show-secret`)。
+#
+# 这个文件【只能】有这几段。若同时保留 selected_module 等本地配置,
+# 服务端启动时会直接报错拒绝运行,提示"既包含智控台的配置又包含本地配置"。
+
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  vision_explain: https://你的域名/mcp/vision/explain
+
+manager-api:
+  # 同一个 compose 网络里用服务名;分开部署就写控制台的实际地址。
+  url: http://xiaodan-console:8002/xiaozhi
+  secret: 在控制台的设置页复制过来
+
+# 服务端不返回该字段时会回落到本地,所以保留。
+prompt_template: xiaodan-base-prompt.txt

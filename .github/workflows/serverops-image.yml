@@ -1,0 +1,136 @@
+name: ServerOps image
+run-name: ServerOps image ${{ inputs.commit || github.sha }}
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact lowercase 40-character commit SHA (empty uses event SHA)
+        required: false
+        type: string
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: serverops-image-${{ inputs.commit || github.sha }}
+  cancel-in-progress: false
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Validate requested commit
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit || github.sha }}
+        run: |
+          [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "Expected full lowercase commit SHA"; exit 1; }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - name: Record checked-out source
+        id: source
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$REQUESTED_COMMIT"
+          source_url="$(git remote get-url origin)"
+          source_url="${source_url%.git}"
+          echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          echo "url=$source_url" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.22.0
+      - name: Install and check
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish console image
+        id: image_console
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          target: console
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/thesyart/xiaodan-server:sha-${{ steps.source.outputs.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.source=${{ steps.source.outputs.url }}
+          build-args: |
+            SERVEROPS_UID=${{ vars.SERVEROPS_UID || '1000' }}
+            SERVEROPS_GID=${{ vars.SERVEROPS_GID || '1000' }}
+
+      # 先把镜像真正跑起来确认它能就绪,再产出可信构建凭证。
+      # 只验证"构建出来的东西能启动并回 2xx",不验证任何生产配置。
+      - name: Verify the published image starts and is ready
+        env:
+          IMAGE: ghcr.io/thesyart/xiaodan-server@${{ steps.image_console.outputs.digest }}
+        run: |
+          docker pull "$IMAGE"
+          trap 'docker rm --force xiaodan-console-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name xiaodan-console-smoke --user 1000:1000 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /app/data:uid=1000,gid=1000,mode=0700 \
+            --publish 127.0.0.1:18002:8002 "$IMAGE"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18002/health; then
+              echo
+              # 顺带确认小智服务端要用的那个接口确实在,并且要求鉴权
+              code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18002/xiaozhi/config/server-base)"
+              test "$code" = "200" || { echo "manager-api 未就绪,收到 $code"; exit 1; }
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' xiaodan-console-smoke)" != true ]; then break; fi
+            sleep 2
+          done
+          docker logs --tail 80 xiaodan-console-smoke
+          exit 1
+
+      - name: Record trusted build proof (console)
+        shell: bash
+        env:
+          SERVICE: console
+          EXPECTED_SHA: ${{ steps.source.outputs.sha }}
+          IMAGE: ghcr.io/thesyart/xiaodan-server
+          DIGEST: ${{ steps.image_console.outputs.digest }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const e = process.env;
+          const checkoutSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          if (!/^[a-f0-9]{40}$/.test(checkoutSha) || checkoutSha !== e.EXPECTED_SHA ||
+              !/^[a-f0-9]{40}$/.test(e.GITHUB_SHA) || !/^sha256:[a-f0-9]{64}$/.test(e.DIGEST) ||
+              !/^[a-z][a-z0-9-]*$/.test(e.SERVICE)) throw new Error('Invalid build proof identity');
+          for (const key of ['GITHUB_RUN_ID', 'GITHUB_RUN_NUMBER', 'GITHUB_RUN_ATTEMPT']) {
+            if (!/^[1-9][0-9]*$/.test(e[key]) || !Number.isSafeInteger(Number(e[key]))) throw new Error('Invalid run identity');
+          }
+          const proof = { version: 1, repository: e.GITHUB_REPOSITORY, workflow: 'serverops-image.yml',
+            runId: Number(e.GITHUB_RUN_ID), runNumber: Number(e.GITHUB_RUN_NUMBER), runAttempt: Number(e.GITHUB_RUN_ATTEMPT),
+            headSha: e.GITHUB_SHA, checkoutSha, service: e.SERVICE, image: e.IMAGE, digest: e.DIGEST };
+          const directory = path.join(e.RUNNER_TEMP, 'serverops-proof-' + e.SERVICE);
+          fs.mkdirSync(directory, { recursive: true });
+          fs.writeFileSync(path.join(directory, 'release.json'), JSON.stringify(proof) + '\n', { mode: 0o600 });
+          NODE
+
+      - name: Upload trusted build proof (console)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serverops-image-console-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/serverops-proof-console/release.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90

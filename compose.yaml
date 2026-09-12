@@ -1,0 +1,55 @@
+# 手工部署用的编排。
+#
+# 运维面板走镜像发布时【不读这个文件】—— 它用 root 批准的策略自己生成一份。
+# 这里是给"还没纳管进面板"或"本地起一套试试"的场合用的。
+#
+# 与被替换掉的官方智控台相比,这里少了 MySQL 与 Redis 两个容器:
+# 控制台的全部状态就是一个 SQLite 文件,备份它就够了。
+services:
+  xiaodan-console:
+    image: ${XIAODAN_CONSOLE_IMAGE:-ghcr.io/thesyart/xiaodan-server:latest}
+    container_name: xiaodan-console
+    restart: unless-stopped
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "${XIAODAN_UID:-1000}:${XIAODAN_GID:-1000}"
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      # 只绑回环。公网入口一律经宿主 nginx。
+      - "127.0.0.1:${XIAODAN_CONSOLE_PORT:-8002}:8002"
+    mem_limit: 256m
+    volumes:
+      - type: bind
+        source: ${XIAODAN_DATA_DIR:?请指定控制台数据目录的绝对路径}
+        target: /app/data
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # 小智服务端。镜像来自上游,配置改由控制台提供(api 模式)。
+  xiaodan-server:
+    image: ${XIAODAN_SERVER_IMAGE:?请指定小智服务端镜像}
+    container_name: xiaodan-server
+    restart: unless-stopped
+    depends_on: [xiaodan-console]
+    security_opt:
+      - seccomp:unconfined      # 上游镜像需要,否则部分音频库调用被拦
+      - no-new-privileges:true
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "127.0.0.1:8000:8000"   # 设备 WebSocket
+      - "127.0.0.1:8003:8003"   # 视觉分析接口
+    mem_limit: 800m
+    volumes:
+      - ${XIAODAN_SERVER_DATA:?请指定服务端配置目录}:/opt/xiaozhi-esp32-server/data
+      - ./server/providers/gateway_chat.py:/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py:ro
+      - ./server/providers/gateway_omni_tts.py:/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py:ro
+      - ./server/prompts/xiaodan-base-prompt.txt:/opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

@@ -1,0 +1,23 @@
+{
+  "name": "xiaodan-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "小单智能体的服务端控制台:替代小智官方智控台的轻量实现",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "workspaces": [
+    "console",
+    "console/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@xiaodan/console-web && npm run build --workspace=@xiaodan/console",
+    "dev": "npm run dev --workspace=@xiaodan/console",
+    "start": "node console/dist/server.js",
+    "test": "npm run test --workspace=@xiaodan/console",
+    "typecheck": "npm run typecheck --workspace=@xiaodan/console && npm run typecheck --workspace=@xiaodan/console-web",
+    "check": "npm run typecheck && npm test"
+  }
+}
