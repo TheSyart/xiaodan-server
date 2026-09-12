@@ -25,7 +25,7 @@ running on this server.
 | | Official console | This console |
 | --- | --- | --- |
 | Containers | 3 (Java + MySQL + Redis) | 1 |
-| Memory | about 630 MB | about 60 MB measured |
+| Memory | 665 MB measured | **21.8 MB** measured |
 | Tables | 30 | 10 |
 | Backup | needs mysqldump | copy one file |
 | Panel-manageable | no | yes |
@@ -143,6 +143,23 @@ On `SIGTERM` the process stops accepting connections and then checkpoints the WA
 archiving the data directory at shutdown cannot lose the last few writes.
 
 **It contains model API keys.** Do not commit the data directory; `.gitignore` excludes it.
+
+## Measured in production (2026-09-13)
+
+The replacement was carried out on the existing deployment; these numbers are from the
+real server:
+
+| | Before | After |
+| --- | --- | --- |
+| Console memory | 473 MB (Java) + 179 MB (MySQL) + 13 MB (Redis) | 21.8 MB |
+| Containers | 3 | 1 |
+| Data directory | a MySQL volume | a single 124 KB file |
+| Server fetching per-device config | — | **8 ms** |
+
+Chain verified end to end: a device with its real MAC connected, received a binding code,
+was bound from the console, reconnected and received its full configuration (voice
+injection, VAD/ASR elision, persona and keys all correct), and the server logged
+"大模型收到用户消息".
 
 ## Tests
 
