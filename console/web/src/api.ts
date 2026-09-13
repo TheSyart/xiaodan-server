@@ -32,6 +32,8 @@ export const api = {
 // ---- 后端返回的数据形状 ----
 
 export interface SetupStatus {
+  /** proxy = 鉴权由运维面板负责;local = 控制台自己管一个管理员账号 */
+  mode: 'proxy' | 'local';
   initialized: boolean;
   authenticated: boolean;
 }

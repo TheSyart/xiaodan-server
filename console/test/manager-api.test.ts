@@ -16,6 +16,8 @@ let app: ReturnType<typeof createApp>;
 let secret: string;
 
 beforeEach(() => {
+  // 这些接口用 Bearer 而非会话,与鉴权模式无关;显式设一下免得将来默认值变化时漂移。
+  process.env.XIAODAN_AUTH_MODE = 'local';
   conn = openMemoryDb();
   seed(conn);
   app = createApp(conn);

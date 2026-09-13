@@ -1,8 +1,20 @@
-// 单管理员的登录与会话。
+// 访问控制。
 //
-// 刻意不做注册、找回密码、多用户、图形验证码、短信 —— 这是一个只有机主一个人
-// 会打开的内网风格页面,那些东西只会增加攻击面。密码用 scrypt 派生,
-// 会话只存 token 的 SHA-256,数据库泄露也无法反推出可用的 Cookie。
+// 有两种模式,由 XIAODAN_AUTH_MODE 决定:
+//
+//   proxy(默认)——【本部署实际使用的】把鉴权完全交给前面的运维面板。
+//     面板在 nginx 层用 auth_request 拦截,未登录的请求根本到不了这里;
+//     通过的请求里不带任何身份信息,应用只需知道"它已经被放行"。
+//     所以控制台自己不再有账号、密码、会话、登录页 —— 一套凭据总比两套好记,
+//     也少一处可以被撞库的入口。
+//
+//   local —— 控制台自己管一个管理员账号。给"还没接进面板"或本地开发用。
+//     密码 scrypt 派生,会话只存 token 的 SHA-256。
+//
+// proxy 模式的安全前提有两条,缺一不可:
+//   1. 容器只发布回环端口(compose 里是 127.0.0.1:8002);
+//   2. nginx 是唯一公网入口,且该站点已被面板接管并启用统一 Auth。
+// 这两条也正是运维面板对所有受管应用的假设。
 
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { Context, Next } from 'hono';
@@ -13,6 +25,12 @@ import { one, run } from './db.ts';
 const COOKIE = 'xiaodan_session';
 const SESSION_HOURS = 12;
 const SCRYPT_KEYLEN = 64;
+
+export type AuthMode = 'proxy' | 'local';
+
+export function authMode(): AuthMode {
+  return process.env.XIAODAN_AUTH_MODE === 'local' ? 'local' : 'proxy';
+}
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16);
@@ -46,6 +64,12 @@ export function setAdmin(conn: Db, username: string, password: string): void {
     hashPassword(password),
   );
   // 改密码即注销所有会话:否则旧 Cookie 还能继续用,改密码就失去了意义。
+  run(conn, 'DELETE FROM sessions');
+}
+
+/** 清除本地账号与全部会话。切到 proxy 模式后用它把残留凭据擦掉。 */
+export function clearLocalAdmin(conn: Db): void {
+  run(conn, 'DELETE FROM admin');
   run(conn, 'DELETE FROM sessions');
 }
 
@@ -98,10 +122,16 @@ export function sessionToken(c: Context): string | undefined {
   return getCookie(c, COOKIE);
 }
 
-/** 管理接口的守卫。未登录返回 401(这里用真的 HTTP 状态码,前端据此跳登录页)。 */
+/** 当前请求是否已获授权。proxy 模式下恒为真 —— 判断发生在 nginx 那一层。 */
+export function authorized(conn: Db, c: Context): boolean {
+  if (authMode() === 'proxy') return true;
+  return validSession(conn, sessionToken(c));
+}
+
+/** 管理接口的守卫。未授权返回 401(真的 HTTP 状态码,前端据此跳登录页)。 */
 export function requireAuth(conn: Db) {
   return async (c: Context, next: Next) => {
-    if (!validSession(conn, sessionToken(c))) {
+    if (!authorized(conn, c)) {
       return c.json({ error: 'unauthorized' }, 401);
     }
     await next();

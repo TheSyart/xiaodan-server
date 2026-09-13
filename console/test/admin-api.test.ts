@@ -14,6 +14,9 @@ const USER = 'admin';
 const PASS = 'correct-horse-battery';
 
 beforeEach(async () => {
+  // 本文件测的是 local 模式(控制台自管账号)。默认是 proxy 模式,
+  // 那种模式下所有请求都放行,这里的权限用例就没有意义了。
+  process.env.XIAODAN_AUTH_MODE = 'local';
   conn = openMemoryDb();
   seed(conn);
   app = createApp(conn);

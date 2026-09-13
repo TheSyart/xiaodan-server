@@ -10,7 +10,8 @@ import { MODEL_TYPES, PLUGINS, PROVIDERS, providerDef, type ModelType } from './
 import { DEFAULT_SETTINGS, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
 import {
-  clearCookie, isInitialized, issueCookie, login, logout, requireAuth, sessionToken, setAdmin, validSession,
+  authMode, authorized, clearCookie, isInitialized, issueCookie, login, logout, requireAuth,
+  sessionToken, setAdmin,
 } from './auth.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
@@ -51,11 +52,17 @@ export function adminApi(conn: Db): Hono {
   // ---- 无需登录 ----
 
   app.get('/setup/status', (c) =>
-    c.json({ initialized: isInitialized(conn), authenticated: validSession(conn, sessionToken(c)) }),
+    c.json({
+      mode: authMode(),
+      // proxy 模式下没有本地账号概念:前端据此直接进主界面,不显示登录页。
+      initialized: authMode() === 'proxy' ? true : isInitialized(conn),
+      authenticated: authorized(conn, c),
+    }),
   );
 
   // 首次设置管理员。只在还没有管理员时可用 —— 否则就成了任何人都能改密码的后门。
   app.post('/setup', async (c) => {
+    if (authMode() === 'proxy') return c.json({ error: '本部署由运维面板统一鉴权,控制台不再管理账号' }, 404);
     if (isInitialized(conn)) return c.json({ error: '已经初始化过了' }, 409);
     const parsed = z
       .object({ username: z.string().min(1).max(64), password: z.string().min(8).max(256) })
@@ -69,6 +76,7 @@ export function adminApi(conn: Db): Hono {
   });
 
   app.post('/login', async (c) => {
+    if (authMode() === 'proxy') return c.json({ error: '本部署由运维面板统一鉴权,无需在此登录' }, 404);
     const parsed = z
       .object({ username: z.string().min(1), password: z.string().min(1) })
       .safeParse(await c.req.json().catch(() => ({})));

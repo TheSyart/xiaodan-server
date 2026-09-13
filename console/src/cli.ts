@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import { closeDb, one, openDb, run } from './db.ts';
 import { seed, SECRET_KEY } from './seed.ts';
-import { setAdmin } from './auth.ts';
+import { authMode, clearLocalAdmin, setAdmin } from './auth.ts';
 import { getSetting, setSetting } from './settings.ts';
 import { providerDef, type ModelType } from './catalog.ts';
 
@@ -150,6 +150,16 @@ function main(): void {
       return;
     }
 
+    case 'clear-local-admin': {
+      // 切到面板统一鉴权后,把控制台自己的账号与会话擦掉,不留第二套凭据。
+      const conn = openDb();
+      seed(conn);
+      clearLocalAdmin(conn);
+      closeDb();
+      console.log('本地管理员与全部会话已清除。当前鉴权模式:' + authMode());
+      return;
+    }
+
     case 'show-secret': {
       const conn = openDb();
       seed(conn);
@@ -181,7 +191,8 @@ function main(): void {
 
     default:
       console.log('可用命令:');
-      console.log('  set-password <用户名> <密码>          设置管理员');
+      console.log('  set-password <用户名> <密码>          设置管理员(仅 local 模式需要)');
+      console.log('  clear-local-admin                      清除本地账号与会话(切到面板鉴权后用)');
       console.log('  import-single-config <配置路径>        从单模块 .config.yaml 导入模型与密钥');
       console.log('  show-secret                            打印服务端接入密钥');
       console.log('  set <参数名> <值>                      修改一个系统参数');

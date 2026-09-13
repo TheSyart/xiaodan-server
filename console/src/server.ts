@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { closeDb, dataDir, dbPath, openDb } from './db.ts';
 import { seed } from './seed.ts';
 import { createApp } from './app.ts';
-import { isInitialized } from './auth.ts';
+import { authMode, isInitialized } from './auth.ts';
 import { getSetting } from './settings.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,8 +27,12 @@ function main(): void {
     console.log(`[小单控制台] 监听 ${hostname}:${info.port}`);
     console.log(`[小单控制台] 数据库 ${dbPath()}`);
     console.log(`[小单控制台] 数据目录 ${dataDir()}`);
-    if (!isInitialized(conn)) {
-      console.log('[小单控制台] 尚未设置管理员,请打开页面完成初始化');
+    if (authMode() === 'proxy') {
+      console.log('[小单控制台] 鉴权模式:proxy —— 由前面的运维面板负责,控制台不做登录检查');
+      console.log('[小单控制台] 前提:本进程只监听回环,且该站点已被面板接管并启用统一 Auth');
+    } else {
+      console.log('[小单控制台] 鉴权模式:local —— 控制台自己管一个管理员账号');
+      if (!isInitialized(conn)) console.log('[小单控制台] 尚未设置管理员,请打开页面完成初始化');
     }
     const ws = getSetting(conn, 'server.websocket');
     if (!ws) {
