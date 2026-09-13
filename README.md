@@ -125,6 +125,65 @@ code, or you bind them directly from the pending list.
 Rolling back is swapping `.config.yaml` back to the single-module version and restarting;
 the console can keep running.
 
+## Onboarding into the ServerOps panel
+
+This repository publishes two images, the two components of one panel application:
+
+| Component | Image | Container port | Health | Data |
+|---|---|---|---|---|
+| `console` | `ghcr.io/thesyart/xiaodan-server-console` | 8002 | `/health` | `/app/data` |
+| `engine` | `ghcr.io/thesyart/xiaodan-server-engine` | 8000 | `/` | `/opt/xiaozhi-esp32-server/data` |
+
+The engine reaches the console by component name on the project network, so
+`manager-api.url` in `.config.yaml` must be `http://console:8002/xiaozhi`. Port 8003
+is no longer published: the console serves OTA, and the vision endpoint never had an
+nginx route.
+
+**The panel does not read this repository's `compose.yaml`.** It renders its own from a
+root-approved policy, always as a non-root user with `cap_drop: ALL`,
+`no-new-privileges`, the default seccomp profile, loopback-only ports and bind mounts
+with `create_host_path:false` — no memory limit and no `depends_on`. Upstream's
+`seccomp:unconfined` cannot be expressed there, and measurement says it is not needed:
+the whole audio path works under the default profile.
+
+Startup ordering does not rely on `depends_on`. With the console unreachable the engine
+retries six times ten seconds apart and then exits, and `restart: unless-stopped`
+brings it back.
+
+### What root has to approve on the server
+
+```
+/etc/serverops/image-policies/<application UUID>.json   ports, UID/GID, env files, data dirs
+/etc/serverops/apps/xiaodan-server-console.env          root 0600, XIAODAN_AUTH_MODE=proxy
+/srv/serverops/data/xiaodan/{console,engine}            1000:1000 0750, parent root 0750
+```
+
+The data directories must exist with the right owner **before the first release**: the
+pull step verifies ownership, long before any cutover. The helper unit also needs
+`/srv/serverops/data/xiaodan` in `ReadWritePaths`, or it cannot take the stop-the-world
+backup or restore a failed switch. Pre-create the compose project network with the
+`com.docker.compose.project` and `com.docker.compose.network` labels.
+
+### First adoption
+
+An ordinary release refuses to activate without a previously confirmed version, so the
+first one goes through the root-local adopt command: maintenance page, stop the old
+containers, consistent backup, copy the data, start the panel-rendered compose, verify
+readiness, restore the ingress, stop the helper, run
+`node helper/dist/image-bootstrap.js adopt …`, start the helper. After that, updating is
+one click.
+
+### About the engine image size
+
+The upstream image is 10.5 GB, and 6.4 GB of that single pip layer exists to run ASR
+models locally: 2.8 GB of nvidia CUDA libraries, 1.5 GB of torch, 419 MB of triton and
+so on. Our ASR goes through the model gateway and the VAD reads one 7.5 MB onnx file, so
+none of it is ever loaded — confirmed by reading `/proc/<pid>/maps` of the production
+process. The Dockerfile therefore prunes inside a build stage and copies the result into
+a clean system layer, landing near 1 GB. Package versions and binaries are exactly
+upstream's; nothing is reinstalled, which would introduce version drift that typically
+only surfaces on a cold path.
+
 ## CLI
 
 ```bash

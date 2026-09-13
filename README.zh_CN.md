@@ -116,6 +116,57 @@ docker compose restart xiaodan-server
 
 回滚就是把 `.config.yaml` 换回单模块那份再重启,控制台可以继续开着。
 
+## 接入 ServerOps 面板
+
+本仓库产出两个镜像,对应面板里同一个应用的两个组件:
+
+| 组件 | 镜像 | 容器端口 | 健康检查 | 数据目录 |
+|---|---|---|---|---|
+| `console` | `ghcr.io/thesyart/xiaodan-server-console` | 8002 | `/health` | `/app/data` |
+| `engine` | `ghcr.io/thesyart/xiaodan-server-engine` | 8000 | `/` | `/opt/xiaozhi-esp32-server/data` |
+
+engine 在项目网络里用组件名访问控制台,所以 `.config.yaml` 的
+`manager-api.url` 要写 `http://console:8002/xiaozhi`。8003 不再对外发布:
+OTA 由控制台提供,视觉分析接口本来就没有 nginx 路由。
+
+**面板不读本仓库的 `compose.yaml`**。它按 root 批准的策略自己渲染一份,固定为
+非 root、`cap_drop: ALL`、`no-new-privileges`、默认 seccomp、仅回环端口、
+bind 挂载 `create_host_path:false`,没有内存上限也没有 `depends_on`。
+上游编排里那条 `seccomp:unconfined` 面板无法表达 —— 实测也不需要,
+默认 seccomp 下音频链路全部正常。
+
+engine 的启动顺序不靠 `depends_on`:取不到控制台时它会重试六次(每次 10 秒)
+后退出,由 `restart: unless-stopped` 拉起来重来。
+
+### 服务器侧需要 root 先批准的东西
+
+```
+/etc/serverops/image-policies/<应用UUID>.json   端口、UID/GID、env 文件、数据目录
+/etc/serverops/apps/xiaodan-server-console.env  root 0600,内容 XIAODAN_AUTH_MODE=proxy
+/srv/serverops/data/xiaodan/{console,engine}    1000:1000 0750,父目录 root 0750
+```
+
+数据目录必须**在第一次发布之前**就存在且属主正确:面板拉镜像那一步就会校验,
+远早于任何切换。helper 的 unit 还要把 `/srv/serverops/data/xiaodan` 加进
+`ReadWritePaths`,否则它做不了停机备份与失败恢复。compose 项目网络需要预先建好,
+带上 `com.docker.compose.project` 与 `com.docker.compose.network` 两个标签。
+
+### 首次接管
+
+常规发布要求已经存在一份确认过的旧版本,所以第一次必须走 root 本地的 adopt:
+维护页 → 停旧容器 → 一致性备份 → 拷数据 → 用面板渲染的 compose 起容器 →
+验就绪 → 恢复入口 → 停 helper → `node helper/dist/image-bootstrap.js adopt …` → 起 helper。
+之后"更新并上线"就是一键的了。
+
+### 关于引擎镜像的体积
+
+上游镜像 10.5G,其中 pip 层的 6.4G 几乎全是本地跑 ASR 模型用的
+(nvidia CUDA 2.8G、torch 1.5G、triton 419M 等)。我们 ASR 走网关、
+VAD 只读一个 7.5M 的 onnx,这些从未被加载 —— 在生产进程的
+`/proc/<pid>/maps` 里确认过。所以 Dockerfile 分两段:先在上游镜像里删,
+再把结果拷进干净的系统层,成品约 1G。包的版本与二进制完全沿用上游那批,
+不重新 `pip install`,避免引入版本差异带来的、往往只在冷路径上才暴露的风险。
+
 ## 命令行
 
 ```bash

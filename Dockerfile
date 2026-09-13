@@ -62,13 +62,22 @@ CMD ["node", "console/dist/server.js"]
 # ---------------------------------------------------------------------------
 # 设备直连的 WebSocket 服务端
 # ---------------------------------------------------------------------------
-# 按 digest 固定上游镜像:tag 会飘,而面板要求"提交 → 镜像 → 运行"整条链路可复核,
-# 基底也必须是确定的一份。换上游版本时连同这里一起改,并重跑联调冒烟。
-FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server@sha256:1be29c11c8a1971ef93390d9bf383cf8f7a484376a7c691e85cee3fc0666e07a AS engine
-ARG SERVEROPS_UID=1000
-ARG SERVEROPS_GID=1000
-
-# 上游镜像的 WORKDIR 就是这里;写全是为了让下面的相对路径一眼可读。
+# 上游镜像 10.5G,其中 pip 那一层就占 6.4G,而绝大部分是为"在本地跑 ASR 模型"
+# 准备的:nvidia 的 CUDA 库 2.8G、torch 1.5G、triton 419M,再加 funasr / vosk /
+# sherpa_onnx / sklearn / scipy 等。我们的 ASR 走模型网关、VAD 用 onnxruntime 读
+# 一个 7.5M 的 onnx,这些一个都用不上 —— 在生产进程的 /proc/<pid>/maps 里确认过,
+# torch 与 nvidia 从未被加载。provider 是按名字动态导入的(core/utils/asr.py 的
+# create_instance),只有 fun_local / sherpa_onnx_local / vosk 三个文件引用它们,
+# 而我们永远走不到那三个。
+#
+# 分层是累加的,在成品里 rm 掉并不会让它变小,所以这里分两段:先在上游镜像里删,
+# 再把删完的结果拷进一个干净的系统层。构建阶段不会被推送。
+# 不重新 pip install 是刻意的:包的版本与二进制完全沿用上游那批,只是不带没用的,
+# 避免引入"版本不同导致的行为差异"这类无法在构建期发现的风险。
+#
+# 按 digest 固定上游:tag 会飘,而面板要求"提交 → 镜像 → 运行"整条链路可复核。
+# 换上游版本时连同这里一起改,并重跑联调冒烟。
+FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server@sha256:1be29c11c8a1971ef93390d9bf383cf8f7a484376a7c691e85cee3fc0666e07a AS engine-prune
 WORKDIR /opt/xiaozhi-esp32-server
 
 # 自写的两个 provider:模型网关只代理 chat 接口,没有转写/合成端点,
@@ -79,9 +88,54 @@ COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
 RUN set -eux; \
-    test "$SERVEROPS_UID" -gt 0; test "$SERVEROPS_GID" -gt 0; \
+    cd /usr/local/lib/python3.10/site-packages; \
+    # 删之前先确认这些包确实只被那三个用不到的 provider 引用。漏掉一个依赖会在
+    # 运行期才炸,而下面的联调冒烟未必覆盖得到,所以在构建期就断言一次。
+    for module in torch funasr modelscope sherpa_onnx vosk numba sklearn scipy jieba; do \
+      ! grep -rl --include='*.py' -E "^[[:space:]]*(import|from)[[:space:]]+${module}\b" \
+        /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/config \
+        /opt/xiaozhi-esp32-server/plugins_func /opt/xiaozhi-esp32-server/app.py \
+        | grep -vE "providers/asr/(fun_local|sherpa_onnx_local|vosk)\.py$" | grep -q . \
+        || { echo "还有代码依赖 ${module},不能删"; exit 1; }; \
+    done; \
+    rm -rf nvidia torch torchaudio torchgen functorch torch_complex triton llvmlite numba \
+           sympy funasr modelscope sherpa_onnx vosk jieba sklearn scipy \
+           nvidia_* torch-* torchaudio-* triton-* llvmlite-* numba-* sympy-* \
+           funasr-* modelscope-* sherpa_onnx-* vosk-* jieba-* scikit_learn-* scipy-*; \
+    # __pycache__ 要在这里清掉再重新生成:成品里以非 root 运行,写不进去。
+    find /opt/xiaozhi-esp32-server -name __pycache__ -type d -prune -exec rm -rf {} +; \
+    python -m compileall -q /opt/xiaozhi-esp32-server/app.py /opt/xiaozhi-esp32-server/config \
+      /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/plugins_func || true; \
+    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py']]"; \
+    test -s /opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt
+
+FROM debian:trixie-slim AS engine
+ARG SERVEROPS_UID=1000
+ARG SERVEROPS_GID=1000
+
+# 系统层只留运行真正需要的:libopus 解设备音频,ffmpeg 是 pydub 的后端而且
+# core/utils/util.py 启动时会执行 `ffmpeg -version` 检查,缺了直接抛错。
+# locale 沿用上游的 zh_CN.UTF-8,免得日志与文本处理出现编码差异。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libopus0 ffmpeg locales ca-certificates tzdata; \
+    sed -i 's/^# *\(zh_CN.UTF-8\)/\1/' /etc/locale.gen; \
+    locale-gen; \
+    rm -rf /var/lib/apt/lists/*; \
     groupadd --gid "$SERVEROPS_GID" xiaodan; \
-    useradd --uid "$SERVEROPS_UID" --gid "$SERVEROPS_GID" --create-home --shell /usr/sbin/nologin xiaodan; \
+    useradd --uid "$SERVEROPS_UID" --gid "$SERVEROPS_GID" --create-home --shell /usr/sbin/nologin xiaodan
+
+# 整个 /usr/local 搬过来:Python 3.10.20 本身就装在这里(含 libpython3.10.so)。
+# 不换解释器是关键 —— 站点包里有几十个编译好的扩展,重新找一个"版本相近"的
+# Python 会把 ABI 风险引进来,而那种问题往往只在运行期的某条冷路径上才暴露。
+COPY --from=engine-prune /usr/local /usr/local
+COPY --from=engine-prune /opt/xiaozhi-esp32-server /opt/xiaozhi-esp32-server
+RUN ldconfig
+
+WORKDIR /opt/xiaozhi-esp32-server
+
+RUN set -eux; \
+    test "$SERVEROPS_UID" -gt 0; test "$SERVEROPS_GID" -gt 0; \
     # 运行期要写的三个目录。上游把它们散落在包目录里,而我们以非 root 运行,
     # 必须预先把属主设对 —— 少一个,进程在【导入阶段】就会 PermissionError 退出。
     #   data                       面板挂载进来的数据目录(只有 .config.yaml)
@@ -90,16 +144,16 @@ RUN set -eux; \
     #   config/assets/wakeup_words 每个设备的唤醒词音频。WakeupWordsConfig 在 import
     #                              core.handle.helloHandle 时就会创建它,躲不过去
     install -d -o "$SERVEROPS_UID" -g "$SERVEROPS_GID" -m 0750 data tmp config/assets/wakeup_words; \
-    # 非 root 写不了 __pycache__,预先编译省下每次启动的开销。写不进去时 Python
-    # 只是不缓存而非报错,所以这一步失败不该让构建失败。
-    python -m compileall -q app.py config core plugins_func || true; \
-    # 提前暴露"文件放错位置"这类低级错误,别等到生产才发现。
-    python -c "import ast,sys; [ast.parse(open(p,encoding='utf-8').read()) for p in ['core/providers/asr/gateway_chat.py','core/providers/tts/gateway_omni_tts.py']]"; \
-    test -s xiaodan-base-prompt.txt
+    # 换了系统层,先确认解释器与那批编译扩展在新 glibc 上仍然能用。
+    python -c "import onnxruntime, opuslib_next, numpy, aiohttp, websockets, openai; print('runtime ok')"
 
-# TZ 让日志时间戳与服务器一致;HOME 是因为某些库会往 ~/.cache 写东西,
+# TZ 让日志时间戳与服务器一致;LANG 沿用上游;HOME 是因为某些库会往 ~/.cache 写东西,
 # 而 uid 1000 原本在这个镜像里没有家目录。
 ENV TZ=Asia/Shanghai \
+    LANG=zh_CN.UTF-8 \
+    LANGUAGE=zh_CN:zh \
+    LC_ALL=zh_CN.UTF-8 \
+    PYTHONIOENCODING=utf-8 \
     HOME=/home/xiaodan
 
 # 同样不声明 VOLUME:面板逐个比对容器挂载,匿名卷会多出一项导致校验失败。
@@ -112,6 +166,10 @@ EXPOSE 8000
 # 但取不到控制台配置时会重试(6 次 × 10 秒),给它一次完整重试周期的余量。
 HEALTHCHECK --interval=10s --timeout=4s --start-period=75s --retries=3 \
   CMD ["python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3).status == 200 else 1)"]
+
+# 换了系统层就继承不到上游的 CMD 了,这里补回原样。面板的启动前校验要求容器的
+# Cmd/Entrypoint 与镜像自身完全一致,所以编排里不要覆盖它。
+CMD ["python", "app.py"]
 
 # CMD 沿用上游的 ["python", "app.py"]。面板的启动前校验要求容器的 Cmd/Entrypoint
 # 与镜像自身完全一致,这里不要覆盖。
