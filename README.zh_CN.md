@@ -125,6 +125,27 @@ node console/dist/cli.js show-secret                      # 打印服务端接�
 node console/dist/cli.js set <参数名> <值>                # 改一个系统参数
 ```
 
+## 鉴权
+
+控制台默认**不自己管账号**(`XIAODAN_AUTH_MODE=proxy`),鉴权交给前面的运维面板:
+它在 nginx 层用 `auth_request` 拦截,未登录的请求根本到不了这里。一套凭据比两套好记,
+也少一处可以被撞库的入口。
+
+这个模式的安全前提有两条,缺一不可:
+
+1. 控制台只发布回环端口(compose 里是 `127.0.0.1:8002`);
+2. nginx 是唯一公网入口,且该站点已被面板接管并启用统一 Auth。
+
+**第 2 条没满足时,前面必须有别的东西挡着**(例如 nginx 的 Basic Auth),
+否则任何能到达该端口的请求都能管理这个控制台。启动日志会把当前模式和前提打出来。
+
+需要控制台自管账号时(还没接进面板、或本地开发),设 `XIAODAN_AUTH_MODE=local`,
+再用 `cli set-password` 建一个管理员。反过来切到 proxy 后,用
+`cli clear-local-admin` 把残留的账号与会话擦掉,别留第二套凭据。
+
+**给服务端用的 Bearer 鉴权不受模式影响** —— proxy 放行的只是浏览器来的管理请求。
+否则任何能碰到这个端口的东西都能读出全部模型密钥。
+
 ## 数据与备份
 
 所有状态都在 `$XIAODAN_DATA_DIR/console.db` 一个文件里。备份就是拷贝它。

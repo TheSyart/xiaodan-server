@@ -134,6 +134,33 @@ node console/dist/cli.js show-secret                          # print the server
 node console/dist/cli.js set <key> <value>                    # change one system setting
 ```
 
+## Authentication
+
+By default the console **does not manage its own accounts** (`XIAODAN_AUTH_MODE=proxy`):
+authentication belongs to the operations panel in front of it, which intercepts at the
+nginx layer with `auth_request` so unauthenticated requests never arrive here. One set of
+credentials is easier to keep track of than two, and it removes a login form that nobody
+would remember to rotate.
+
+This mode rests on two preconditions, both required:
+
+1. the console publishes a loopback port only (`127.0.0.1:8002` in the compose file);
+2. nginx is the only public entrance, and the site is managed by the panel with unified
+   auth enabled.
+
+**If the second does not hold, something else must stand in front** (such as nginx basic
+auth); otherwise anything that can reach the port can administer the console. The startup
+log prints the current mode and these preconditions.
+
+Set `XIAODAN_AUTH_MODE=local` when the console must manage its own account (not yet
+onboarded, or local development), then create an administrator with `cli set-password`.
+Going the other way, run `cli clear-local-admin` after switching to proxy so no second set
+of credentials is left behind.
+
+**The Bearer authentication used by the server is unaffected by the mode** — proxy mode
+only waives the check for browser-originated management requests. Otherwise anything
+reaching this port could read every model API key.
+
 ## Data and backups
 
 All state lives in a single file, `$XIAODAN_DATA_DIR/console.db`. Backing up means copying
