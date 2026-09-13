@@ -64,7 +64,7 @@ jobs:
           target: console
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/thesyart/xiaodan-server:sha-${{ steps.source.outputs.sha }}
+          tags: ghcr.io/thesyart/xiaodan-server-console:sha-${{ steps.source.outputs.sha }}
           labels: |
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
             org.opencontainers.image.source=${{ steps.source.outputs.url }}
@@ -72,38 +72,120 @@ jobs:
             SERVEROPS_UID=${{ vars.SERVEROPS_UID || '1000' }}
             SERVEROPS_GID=${{ vars.SERVEROPS_GID || '1000' }}
 
-      # 先把镜像真正跑起来确认它能就绪,再产出可信构建凭证。
-      # 只验证"构建出来的东西能启动并回 2xx",不验证任何生产配置。
-      - name: Verify the published image starts and is ready
+      - name: Build and publish engine image
+        id: image_engine
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          target: engine
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/thesyart/xiaodan-server-engine:sha-${{ steps.source.outputs.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.source=${{ steps.source.outputs.url }}
+          build-args: |
+            SERVEROPS_UID=${{ vars.SERVEROPS_UID || '1000' }}
+            SERVEROPS_GID=${{ vars.SERVEROPS_GID || '1000' }}
+
+      # 把两个镜像按生产的样子接起来跑一遍,再产出可信构建凭证。
+      #
+      # 用面板渲染 compose 时会施加的那组约束启动:非 root、丢掉全部 capability、
+      # no-new-privileges,并且【不加 seccomp:unconfined】—— 上游自带的编排写死了
+      # 那一条,而面板无法表达它,所以这里必须在默认 seccomp 下证明引擎能跑。
+      #
+      # 注意这只是构建期证据。runner 的内核比生产机宽松,真正的判定在服务器上
+      # 用同一批 digest 再跑一次(见 README 的接入步骤)。
+      - name: Verify both images work together
         env:
-          IMAGE: ghcr.io/thesyart/xiaodan-server@${{ steps.image_console.outputs.digest }}
+          CONSOLE: ghcr.io/thesyart/xiaodan-server-console@${{ steps.image_console.outputs.digest }}
+          ENGINE: ghcr.io/thesyart/xiaodan-server-engine@${{ steps.image_engine.outputs.digest }}
         run: |
-          docker pull "$IMAGE"
-          trap 'docker rm --force xiaodan-console-smoke >/dev/null 2>&1 || true' EXIT
-          docker run --detach --name xiaodan-console-smoke --user 1000:1000 \
+          set -euo pipefail
+          cleanup() {
+            docker rm --force xiaodan-console-smoke xiaodan-engine-smoke >/dev/null 2>&1 || true
+            docker network rm xiaodan-smoke >/dev/null 2>&1 || true
+            rm -rf "$RUNNER_TEMP/engine-data" || true
+          }
+          trap cleanup EXIT
+          docker pull "$CONSOLE"
+          docker pull "$ENGINE"
+          docker network create xiaodan-smoke
+
+          docker run --detach --name xiaodan-console-smoke --network xiaodan-smoke \
+            --network-alias console --user 1000:1000 --init \
             --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /app/data:uid=1000,gid=1000,mode=0700 \
-            --publish 127.0.0.1:18002:8002 "$IMAGE"
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:18002/health; then
-              echo
-              # 顺带确认小智服务端要用的那个接口确实在,并且要求鉴权
-              code="$(curl --silent -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18002/xiaozhi/config/server-base)"
-              test "$code" = "200" || { echo "manager-api 未就绪,收到 $code"; exit 1; }
-              exit 0
-            fi
-            if [ "$(docker inspect --format '{{.State.Running}}' xiaodan-console-smoke)" != true ]; then break; fi
+            --publish 127.0.0.1:18002:8002 "$CONSOLE"
+          for _ in $(seq 30); do
+            curl --fail --silent http://127.0.0.1:18002/health >/dev/null && break
+            test "$(docker inspect --format '{{.State.Running}}' xiaodan-console-smoke)" = true \
+              || { docker logs --tail 80 xiaodan-console-smoke; exit 1; }
             sleep 2
           done
-          docker logs --tail 80 xiaodan-console-smoke
-          exit 1
+          curl --fail --silent http://127.0.0.1:18002/health
+
+          # 没有 Bearer 时 manager-api 必须拒绝。HTTP 状态码一直是 200,业务错误在
+          # 响应体的 code 里 —— 从前这里断言状态码,等于什么都没断言。
+          code="$(curl --silent -X POST http://127.0.0.1:18002/xiaozhi/config/server-base \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{process.stdout.write(String(JSON.parse(s).code))})")"
+          test "$code" = "401" || { echo "无凭据访问 manager-api 应回 401,实际 $code"; exit 1; }
+
+          # 用控制台自己的密钥拼出引擎的配置,走的就是生产那条路。
+          secret="$(docker exec xiaodan-console-smoke node console/dist/cli.js show-secret | tr -d '\r\n')"
+          test -n "$secret"
+          mkdir -p "$RUNNER_TEMP/engine-data"
+          cat > "$RUNNER_TEMP/engine-data/.config.yaml" <<YAML
+          server:
+            ip: 0.0.0.0
+            port: 8000
+            http_port: 8003
+          manager-api:
+            url: http://console:8002/xiaozhi
+            secret: $secret
+          prompt_template: xiaodan-base-prompt.txt
+          YAML
+          # 先改权限再改属主:换主之后 runner 用户就不是属主了,chmod 会被拒。
+          chmod 0600 "$RUNNER_TEMP/engine-data/.config.yaml"
+          sudo chown -R 1000:1000 "$RUNNER_TEMP/engine-data"
+
+          docker run --detach --name xiaodan-engine-smoke --network xiaodan-smoke \
+            --user 1000:1000 --init --cap-drop ALL --security-opt no-new-privileges \
+            --volume "$RUNNER_TEMP/engine-data:/opt/xiaozhi-esp32-server/data" \
+            --publish 127.0.0.1:18000:8000 "$ENGINE"
+          for _ in $(seq 45); do
+            curl --fail --silent http://127.0.0.1:18000/ >/dev/null && break
+            test "$(docker inspect --format '{{.State.Running}}' xiaodan-engine-smoke)" = true \
+              || { docker logs --tail 120 xiaodan-engine-smoke; exit 1; }
+            sleep 2
+          done
+          curl --fail --silent -o /dev/null http://127.0.0.1:18000/
+
+          # 真正要证明的是它拿到了控制台的配置并把 provider 装载起来了,
+          # 而不是只有一个端口在监听。
+          logs="$(docker logs xiaodan-engine-smoke 2>&1)"
+          echo "$logs" | grep -q '从API读取配置' || { echo "引擎没有走 api 模式:"; echo "$logs" | tail -120; exit 1; }
+          # 只认无歧义的崩溃信号。上游在正常设备交互里也会打 ]-ERROR- 行(比如网关暂时不可用),
+          # 拿它当失败条件会让这条流水线时好时坏。
+          echo "$logs" | grep -q 'Traceback (most recent call last)' && { echo "引擎启动时抛了异常:"; echo "$logs" | tail -120; exit 1; }
+
+          # 默认 seccomp 下把音频相关的原生库真正加载一次:onnxruntime 是 VAD 的,
+          # opuslib_next 是解码设备音频的,它们才是会被 seccomp 拦的那类代码。
+          docker exec xiaodan-engine-smoke python -c "
+          import onnxruntime, opuslib_next, numpy
+          import core.providers.asr.gateway_chat as a, core.providers.tts.gateway_omni_tts as t
+          onnxruntime.InferenceSession('/opt/xiaozhi-esp32-server/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx', providers=['CPUExecutionProvider'])
+          opuslib_next.Decoder(16000, 1)
+          print('audio stack ok', numpy.__version__)
+          "
+          test "$(docker exec xiaodan-engine-smoke id -u)" = "1000"
 
       - name: Record trusted build proof (console)
         shell: bash
         env:
           SERVICE: console
           EXPECTED_SHA: ${{ steps.source.outputs.sha }}
-          IMAGE: ghcr.io/thesyart/xiaodan-server
+          IMAGE: ghcr.io/thesyart/xiaodan-server-console
           DIGEST: ${{ steps.image_console.outputs.digest }}
         run: |
           node <<'NODE'
@@ -131,6 +213,43 @@ jobs:
         with:
           name: serverops-image-console-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/serverops-proof-console/release.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Record trusted build proof (engine)
+        shell: bash
+        env:
+          SERVICE: engine
+          EXPECTED_SHA: ${{ steps.source.outputs.sha }}
+          IMAGE: ghcr.io/thesyart/xiaodan-server-engine
+          DIGEST: ${{ steps.image_engine.outputs.digest }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const e = process.env;
+          const checkoutSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          if (!/^[a-f0-9]{40}$/.test(checkoutSha) || checkoutSha !== e.EXPECTED_SHA ||
+              !/^[a-f0-9]{40}$/.test(e.GITHUB_SHA) || !/^sha256:[a-f0-9]{64}$/.test(e.DIGEST) ||
+              !/^[a-z][a-z0-9-]*$/.test(e.SERVICE)) throw new Error('Invalid build proof identity');
+          for (const key of ['GITHUB_RUN_ID', 'GITHUB_RUN_NUMBER', 'GITHUB_RUN_ATTEMPT']) {
+            if (!/^[1-9][0-9]*$/.test(e[key]) || !Number.isSafeInteger(Number(e[key]))) throw new Error('Invalid run identity');
+          }
+          const proof = { version: 1, repository: e.GITHUB_REPOSITORY, workflow: 'serverops-image.yml',
+            runId: Number(e.GITHUB_RUN_ID), runNumber: Number(e.GITHUB_RUN_NUMBER), runAttempt: Number(e.GITHUB_RUN_ATTEMPT),
+            headSha: e.GITHUB_SHA, checkoutSha, service: e.SERVICE, image: e.IMAGE, digest: e.DIGEST };
+          const directory = path.join(e.RUNNER_TEMP, 'serverops-proof-' + e.SERVICE);
+          fs.mkdirSync(directory, { recursive: true });
+          fs.writeFileSync(path.join(directory, 'release.json'), JSON.stringify(proof) + '\n', { mode: 0o600 });
+          NODE
+
+      - name: Upload trusted build proof (engine)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serverops-image-engine-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/serverops-proof-engine/release.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 90

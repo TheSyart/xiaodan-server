@@ -9,12 +9,15 @@
 server:
   ip: 0.0.0.0
   port: 8000
+  # 8003 上是 OTA 与视觉分析接口。被面板纳管后这个端口不再对外发布:
+  # OTA 由控制台提供,视觉分析没有对应的 nginx 路由。留着不碍事。
   http_port: 8003
   vision_explain: https://你的域名/mcp/vision/explain
 
 manager-api:
-  # 同一个 compose 网络里用服务名;分开部署就写控制台的实际地址。
-  url: http://xiaodan-console:8002/xiaozhi
+  # 同一个 compose 项目里用组件名。被面板纳管后组件叫 console,
+  # 手工用本仓库的 compose.yaml 起则是 xiaodan-console。分开部署就写实际地址。
+  url: http://console:8002/xiaozhi
   secret: 在控制台的设置页复制过来
 
 # 服务端不返回该字段时会回落到本地,所以保留。

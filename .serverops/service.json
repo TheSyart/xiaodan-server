@@ -9,13 +9,25 @@
     "services": [
       {
         "name": "console",
-        "image": "ghcr.io/thesyart/xiaodan-server",
+        "image": "ghcr.io/thesyart/xiaodan-server-console",
         "port": 8002,
         "healthPath": "/health",
         "data": [
           {
             "name": "data",
             "target": "/app/data"
+          }
+        ]
+      },
+      {
+        "name": "engine",
+        "image": "ghcr.io/thesyart/xiaodan-server-engine",
+        "port": 8000,
+        "healthPath": "/",
+        "data": [
+          {
+            "name": "data",
+            "target": "/opt/xiaozhi-esp32-server/data"
           }
         ]
       }
