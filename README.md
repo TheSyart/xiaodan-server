@@ -247,6 +247,22 @@ was bound from the console, reconnected and received its full configuration (voi
 injection, VAD/ASR elision, persona and keys all correct), and the server logged
 "大模型收到用户消息".
 
+### After moving to the panel (2026-09-14)
+
+With the whole deployment on ServerOps' image release channel, measured on the same
+server:
+
+| | Result |
+| --- | --- |
+| Engine image | 10.5 GB down to 1.86 GB |
+| Console memory | 37 MB |
+| Engine memory | 365 MB |
+| Runtime identity | both containers run as UID 1000, no longer as root |
+| New containers ready during cutover | 6 s |
+
+Upstream's hard-coded `seccomp:unconfined` turned out to be unnecessary: Opus decoding
+and onnxruntime both work under the default profile.
+
 ## Tests
 
 ```bash
