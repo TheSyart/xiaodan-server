@@ -41,7 +41,7 @@
 ```
 
 契约的每个字段都对照过上游 Java 实现与服务端消费它的 Python 代码,
-并有 56 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
+并有 117 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
 里面写了每条断言对应服务端的哪一行。
 
 ## 绑定设备:只有拿着设备的人能绑定
@@ -91,7 +91,8 @@ npm run build
 XIAODAN_DATA_DIR=./data node console/dist/server.js
 ```
 
-打开 http://127.0.0.1:8002,第一次会让你设置管理员账号。之后不再开放注册。
+打开 http://127.0.0.1:8002。默认是 proxy 鉴权模式,控制台不做登录检查(见下面「鉴权」);
+本地想要登录页就加上 `XIAODAN_AUTH_MODE=local`,第一次打开会让你设置管理员账号,之后不再开放注册。
 
 开发时前后端分开跑:
 
@@ -173,13 +174,14 @@ engine 的启动顺序不靠 `depends_on`:取不到控制台时它会重试六�
 (nvidia CUDA 2.8G、torch 1.5G、triton 419M 等)。我们 ASR 走网关、
 VAD 只读一个 7.5M 的 onnx,这些从未被加载 —— 在生产进程的
 `/proc/<pid>/maps` 里确认过。所以 Dockerfile 分两段:先在上游镜像里删,
-再把结果拷进干净的系统层,成品约 1G。包的版本与二进制完全沿用上游那批,
+再把结果拷进干净的系统层,成品 1.86G。包的版本与二进制完全沿用上游那批,
 不重新 `pip install`,避免引入版本差异带来的、往往只在冷路径上才暴露的风险。
 
 ## 命令行
 
 ```bash
-node console/dist/cli.js set-password <用户名> <密码>     # 忘记密码时用
+node console/dist/cli.js set-password <用户名> <密码>     # 设置管理员(仅 local 模式需要)
+node console/dist/cli.js clear-local-admin                # 清除本地账号与会话(切到 proxy 后用)
 node console/dist/cli.js import-single-config <配置路径>  # 导入旧配置与密钥
 node console/dist/cli.js show-secret                      # 打印服务端接入密钥
 node console/dist/cli.js set <参数名> <值>                # 改一个系统参数
@@ -248,9 +250,9 @@ Opus 解码和 onnxruntime 都工作正常。
 ## 测试
 
 ```bash
-npm test        # 56 个测试:接口契约、权限边界、绑定流程
+npm test        # 117 个测试:接口契约、权限边界、设备身份与绑定、数据库迁移
 npm run check   # 类型检查 + 测试
 ```
 
-契约测试用的是真实的请求形状(从运行中的官方智控台抓取比对过),
+契约测试断言的是服务端真正消费的响应形状,每条都在注释里写明对应服务端的哪段代码,
 不是"我写的代码符合我写的规格"那种自证。

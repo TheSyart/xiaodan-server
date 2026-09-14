@@ -128,7 +128,8 @@ export function adminApi(conn: Db): Hono {
       'SELECT key, value, value_type, label, internal FROM settings ORDER BY key',
     );
     return c.json({
-      items: rows.filter((row) => row.internal === 0 && !internalKeys.has(row.key)),
+      // 密钥不进通用列表:列表里的值是明文渲染的输入框
+      items: rows.filter((row) => row.internal === 0 && !internalKeys.has(row.key) && row.key !== SECRET_KEY),
       // 密钥单独给,前端用不同的控件展示(默认打码 + 复制按钮)
       secret: one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', SECRET_KEY)?.value ?? '',
     });
@@ -180,8 +181,23 @@ export function adminApi(conn: Db): Hono {
     const def = providerDef(payload.model_type, payload.provider);
     if (!def) throw new Error(`${payload.model_type} 没有名为 ${payload.provider} 的供应商`);
 
+    // 表单只编辑目录里声明的字段,库里还可能有目录之外的键(比如命令行从旧配置导入的
+    // pcm_sample_rate)。整体覆盖会把它们悄悄抹掉,所以更新时先留下原配置里目录之外的键,
+    // 再叠加提交的值;目录字段没有提交就视为清除。
+    let base: Record<string, unknown> = {};
+    if (!creating) {
+      const row = one<{ config_json: string }>(conn, 'SELECT config_json FROM models WHERE id = ?', payload.id);
+      try {
+        const parsed = JSON.parse(row?.config_json ?? '{}') as unknown;
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) base = parsed as Record<string, unknown>;
+      } catch {
+        // 原配置损坏就当作空的
+      }
+      for (const field of def.fields) delete base[field.key];
+    }
+
     // type 必须写进 config:服务端就是靠它决定加载哪个 provider 模块的。
-    const config = { ...payload.config, type: payload.provider };
+    const config = { ...base, ...payload.config, type: payload.provider };
 
     if (creating) {
       run(

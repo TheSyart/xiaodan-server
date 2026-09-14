@@ -83,16 +83,8 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
         OUTPUT_DIR,
       ],
     },
-    {
-      provider: 'fun_local',
-      label: 'FunASR(本地)',
-      note: '完全离线,但要加载约 900MB 模型,内存占用高。',
-      fields: [
-        { key: 'model_dir', label: '模型目录', type: 'string', default: 'models/SenseVoiceSmall' },
-        { key: 'language', label: '语言', type: 'string', default: 'auto' },
-        OUTPUT_DIR,
-      ],
-    },
+    // 不提供 FunASR 本地识别:引擎镜像为了从 10.5GB 瘦身到约 1.9GB 去掉了它的依赖,
+    // 选了也只会在设备连上来时报"不支持的 ASR 类型"。
   ],
 
   LLM: [

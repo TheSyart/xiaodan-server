@@ -57,7 +57,8 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
   },
   { key: 'tts_timeout', value: '15', type: 'number', label: '语音合成超时(秒)' },
   { key: 'tool_call_timeout', value: '30', type: 'number', label: '工具调用超时(秒)' },
-  { key: 'enable_greeting', value: 'true', type: 'boolean', label: '连接后主动打招呼' },
+  // 引擎只在唤醒词路径读它(listenMessageHandler),按键说话的设备上开关没有任何效果,所以不在设置页展示。
+  { key: 'enable_greeting', value: 'true', type: 'boolean', label: '唤醒后主动打招呼', internal: true },
   {
     key: 'delete_audio',
     value: 'true',

@@ -99,6 +99,8 @@ export interface Agent {
   memory_model_id: string | null;
   intent_model_id: string | null;
   tts_voice_id: string | null;
+  /** 合成语言;为空时取所选音色支持列表里的第一个 */
+  tts_language: string | null;
   chat_history_conf: number;
   is_default: number;
   plugins: { plugin_code: string; params_json: string }[];

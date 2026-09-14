@@ -18,6 +18,7 @@
       output_dir: tmp/
 """
 
+import asyncio
 import base64
 import os
 import time
@@ -98,7 +99,10 @@ class ASRProvider(ASRProviderBase):
             }
 
             start = time.time()
-            resp = requests.post(
+            # 识别在引擎共享的事件循环里被 await(asr/base.py)。同步的 requests 会把整个循环
+            # 卡住一到数秒,期间所有连接的收发都停摆,所以放到线程里执行。
+            resp = await asyncio.to_thread(
+                requests.post,
                 self.api_url,
                 json=payload,
                 headers={

@@ -45,7 +45,7 @@ device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Consol
 ```
 
 Every field of that contract was checked against the upstream Java implementation and
-against the Python code that consumes it, and 56 tests hold it in place
+against the Python code that consumes it, and 117 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
@@ -106,8 +106,10 @@ npm run build
 XIAODAN_DATA_DIR=./data node console/dist/server.js
 ```
 
-Open http://127.0.0.1:8002 and create the administrator on first visit. Registration is
-closed afterwards.
+Open http://127.0.0.1:8002. The default authentication mode is proxy, in which the console
+performs no login check (see **Authentication** below). For a local login page add
+`XIAODAN_AUTH_MODE=local`: the first visit asks you to create the administrator, and
+registration is closed afterwards.
 
 For development, run the two halves separately:
 
@@ -198,14 +200,15 @@ models locally: 2.8 GB of nvidia CUDA libraries, 1.5 GB of torch, 419 MB of trit
 so on. Our ASR goes through the model gateway and the VAD reads one 7.5 MB onnx file, so
 none of it is ever loaded — confirmed by reading `/proc/<pid>/maps` of the production
 process. The Dockerfile therefore prunes inside a build stage and copies the result into
-a clean system layer, landing near 1 GB. Package versions and binaries are exactly
+a clean system layer, landing at 1.86 GB. Package versions and binaries are exactly
 upstream's; nothing is reinstalled, which would introduce version drift that typically
 only surfaces on a cold path.
 
 ## CLI
 
 ```bash
-node console/dist/cli.js set-password <username> <password>   # when the password is lost
+node console/dist/cli.js set-password <username> <password>   # create the administrator (local mode only)
+node console/dist/cli.js clear-local-admin                     # wipe local account and sessions (after switching to proxy)
 node console/dist/cli.js import-single-config <config path>   # import old config and keys
 node console/dist/cli.js show-secret                          # print the server API secret
 node console/dist/cli.js set <key> <value>                    # change one system setting
@@ -284,9 +287,10 @@ and onnxruntime both work under the default profile.
 ## Tests
 
 ```bash
-npm test        # 56 tests: API contract, authorisation boundaries, binding flow
+npm test        # 117 tests: API contract, authorisation boundaries, device identity and binding, migrations
 npm run check   # typecheck plus tests
 ```
 
-The contract tests use real request shapes, compared against responses captured from the
-running official console, rather than asserting that the code matches its own spec.
+The contract tests assert the response shapes the server actually consumes, and each one
+notes in a comment which server code it protects, rather than asserting that the code
+matches its own spec.

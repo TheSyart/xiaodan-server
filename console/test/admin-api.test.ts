@@ -116,6 +116,29 @@ describe('模型', () => {
     assert.equal((defaults[0] as any).id, 'LLM_B');
   });
 
+  test('编辑模型只替换目录里的字段,库里目录之外的配置键保留', async () => {
+    // 命令行从旧配置导入的模型常带目录里没有的键(如 pcm_sample_rate)。
+    // 表单只提交目录字段,整体覆盖会把它们悄悄抹掉,合成就会用错采样率。
+    run(conn,
+      `INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Keep', 'TTS', '合成', 'gateway_omni_tts', ?)`,
+      JSON.stringify({ type: 'gateway_omni_tts', base_url: 'https://old/v1', api_key: 'k-old', voice: 'Ethan', pcm_sample_rate: 24000 }));
+    const response = await api('PUT', '/models/TTS_Keep', {
+      model_type: 'TTS', name: '合成', provider: 'gateway_omni_tts',
+      config: { base_url: 'https://new/v1', api_key: 'k-new', model_name: 'omni' },
+    });
+    assert.equal(response.status, 200);
+    const config = JSON.parse(one<{ config_json: string }>(conn, "SELECT config_json FROM models WHERE id = 'TTS_Keep'")!.config_json);
+    assert.equal(config.pcm_sample_rate, 24000, '目录之外的键要保留');
+    assert.equal(config.base_url, 'https://new/v1', '目录字段按提交值更新');
+    assert.equal(config.voice, undefined, '目录字段没有提交就是清除');
+    assert.equal(config.type, 'gateway_omni_tts');
+  });
+
+  test('目录里没有引擎镜像已经去掉的本地识别', async () => {
+    const catalog = await json(await api('GET', '/catalog'));
+    assert.ok(!catalog.providers.ASR.some((p: any) => p.provider === 'fun_local'));
+  });
+
   test('被智能体引用的模型不能删', async () => {
     // 删了会让设备连上来时拿到一份缺模块的配置,那种故障很难定位到这一步。
     const response = await api('DELETE', '/models/VAD_SileroVAD');
@@ -348,6 +371,9 @@ describe('系统参数', () => {
     const keys = body.items.map((item: any) => item.key);
     assert.ok(keys.includes('server.websocket'), '面向用户的参数要显示');
     assert.ok(!keys.includes('log.log_format'), '日志格式这类内部项不显示');
+    assert.ok(!keys.includes('server.secret'), '密钥不进通用列表,那里的值是明文输入框');
+    assert.ok(body.secret, '密钥仍单独给出,由专门的打码控件展示');
+    assert.ok(!keys.includes('enable_greeting'), '按键说话的设备上开场问候开关没有效果,不展示');
   });
 
   test('能改值', async () => {

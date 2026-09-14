@@ -65,14 +65,25 @@ function edit(agent: Agent) {
   saved.value = '';
 }
 
+/**
+ * 某类型标为默认的模型;没有默认项就留空。不能取列表第一个:排序靠 id,
+ * 意图模型里排在前面的是函数调用,新建的智能体会悄悄开启工具。
+ */
+const defaultOf = (type: string) => byType(type).find((m) => m.is_default === 1)?.id ?? null;
+
+/** 当前所选音色支持的语言。 */
+const voiceLanguages = computed(() => {
+  const voice = voices.value.find((v) => v.id === editing.value?.tts_voice_id);
+  return voice ? voice.languages.split('、').map((item) => item.trim()).filter(Boolean) : [];
+});
+
 function create() {
   editing.value = {
     id: '', name: '新的智能体', system_prompt: '',
-    vad_model_id: byType('VAD')[0]?.id ?? null,
-    asr_model_id: null, llm_model_id: null, vllm_model_id: null, tts_model_id: null,
-    memory_model_id: byType('Memory')[0]?.id ?? null,
-    intent_model_id: byType('Intent')[0]?.id ?? null,
-    tts_voice_id: null, chat_history_conf: 1, is_default: 0, plugins: [], device_count: 0,
+    vad_model_id: defaultOf('VAD'), asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'),
+    vllm_model_id: null, tts_model_id: defaultOf('TTS'),
+    memory_model_id: defaultOf('Memory'), intent_model_id: defaultOf('Intent'),
+    tts_voice_id: null, tts_language: null, chat_history_conf: 1, is_default: 0, plugins: [], device_count: 0,
   };
   pluginState.value = {};
   saved.value = '';
@@ -101,6 +112,8 @@ async function save() {
     llm_model_id: agent.llm_model_id, vllm_model_id: agent.vllm_model_id,
     tts_model_id: agent.tts_model_id, memory_model_id: agent.memory_model_id,
     intent_model_id: agent.intent_model_id, tts_voice_id: agent.tts_voice_id,
+    // 接口是整体覆盖,漏传这个字段会把已设的语言清空
+    tts_language: agent.tts_language ?? null,
     chat_history_conf: agent.chat_history_conf,
   };
   try {
@@ -211,11 +224,19 @@ const MODEL_LABELS: [keyof Agent, string, string, string][] = [
 
       <label v-if="voicesOfModel.length">
         <span>音色</span>
-        <select v-model="editing.tts_voice_id">
+        <select v-model="editing.tts_voice_id" @change="editing.tts_language = null">
           <option :value="null">用语音合成模型自带的默认音色</option>
           <option v-for="voice in voicesOfModel" :key="voice.id" :value="voice.id">
             {{ voice.name }}({{ voice.voice }})
           </option>
+        </select>
+      </label>
+
+      <label v-if="voiceLanguages.length">
+        <span>合成语言</span>
+        <select v-model="editing.tts_language">
+          <option :value="null">自动(取音色支持的第一个:{{ voiceLanguages[0] }})</option>
+          <option v-for="language in voiceLanguages" :key="language" :value="language">{{ language }}</option>
         </select>
       </label>
 

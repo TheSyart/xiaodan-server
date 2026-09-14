@@ -48,7 +48,9 @@ class TTSProvider(TTSProviderBase):
         self.api_url = base_url if base_url.endswith("/chat/completions") \
             else f"{base_url}/chat/completions"
         self.model = config.get("model_name", "bailian/qwen3.5-omni-flash")
-        self.voice = config.get("voice", "Ethan")
+        # 控制台把智能体选的音色放在 private_voice,模型自带的默认音色在 voice。
+        # 与上游各 TTS provider 一样优先读前者,否则在控制台换音色不会生效。
+        self.voice = config.get("private_voice") or config.get("voice") or "Ethan"
         self.audio_format = config.get("audio_format", "wav")
         # Omni 返回的是【裸 PCM16】而非带 RIFF 头的 WAV(实测首字节不是 "RIFF"),
         # 下游用 ffmpeg 解码会直接报 "Invalid data found"。故需自行封装 WAV 头。
