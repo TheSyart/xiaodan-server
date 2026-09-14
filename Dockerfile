@@ -87,6 +87,25 @@ COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
 # 上游自带的模板在示例里演示放歌报天气,会让模型承诺它没有的能力,故整份替换。
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
+# 上游在每条连接建立时把全部请求头打进 INFO 日志(core/connection.py)。其中 Client-Id 是设备密钥,
+# 控制塔据它核验设备身份;Authorization 是设备令牌 —— 两者都不能进 docker logs 与 tmp/server.log。
+# 打印前把这两项换成 <redacted>。只做这一行的精确替换:找不到恰好一处就让构建失败,
+# 免得换上游版本后这里悄悄失效、密钥又开始进日志。替换后的写法已在上游镜像的 Python 3.10 里验证过。
+RUN python - <<'PY'
+import pathlib
+import py_compile
+
+path = pathlib.Path("core/connection.py")
+source = path.read_text(encoding="utf-8")
+old = 'f"{self.client_ip} conn - Headers: {self.headers}"'
+new = ('f"{self.client_ip} conn - Headers: '
+       '{ {k: (\'<redacted>\' if k.lower() in (\'client-id\', \'authorization\') else v) for k, v in self.headers.items()} }"')
+if source.count(old) != 1:
+    raise SystemExit("core/connection.py 里找不到恰好一处请求头日志,上游可能改了写法,请重新确认脱敏方式")
+path.write_text(source.replace(old, new), encoding="utf-8")
+py_compile.compile(str(path), doraise=True)
+PY
+
 RUN set -eux; \
     cd /usr/local/lib/python3.10/site-packages; \
     # 删之前先确认这些包确实只被那三个用不到的 provider 引用。漏掉一个依赖会在
