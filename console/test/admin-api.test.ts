@@ -137,6 +137,11 @@ describe('模型', () => {
   test('目录里没有引擎镜像已经去掉的本地识别', async () => {
     const catalog = await json(await api('GET', '/catalog'));
     assert.ok(!catalog.providers.ASR.some((p: any) => p.provider === 'fun_local'));
+    const codes = catalog.plugins.map((p: any) => p.code);
+    assert.deepEqual(codes.slice(0, 3), ['show_calendar', 'get_weather', 'set_volume'], '自写的三个工具排在最前');
+    // 引擎里永远开启的两个,以及不对应任何函数的 get_time,都不应作为开关出现
+    for (const code of ['get_time', 'handle_exit_intent', 'get_lunar']) assert.ok(!codes.includes(code), code);
+    assert.equal(catalog.plugins.find((p: any) => p.code === 'get_weather').keyless, true, '天气不再需要密钥');
   });
 
   test('被智能体引用的模型不能删', async () => {
@@ -161,20 +166,23 @@ describe('智能体', () => {
 
   test('插件整体覆盖,且拒绝未知插件', async () => {
     const good = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [
-      { plugin_code: 'get_time', params: {} },
-      { plugin_code: 'get_weather', params: { api_key: 'k' } },
+      { plugin_code: 'show_calendar', params: {} },
+      { plugin_code: 'get_weather', params: { default_location: '杭州' } },
     ]);
     assert.equal(good.status, 200);
     assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM agent_plugins').get<any>()!.n, 2);
 
     // 再覆盖成一个
-    await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'get_time', params: {} }]);
+    await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'show_calendar', params: {} }]);
     assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM agent_plugins').get<any>()!.n, 1);
 
     const bad = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [
       { plugin_code: 'rm-rf-slash', params: {} },
     ]);
     assert.equal(bad.status, 400);
+    // 目录里已移除的旧插件同样按未知处理
+    const stale = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'get_time', params: {} }]);
+    assert.equal(stale.status, 400);
   });
 });
 

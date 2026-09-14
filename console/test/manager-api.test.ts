@@ -331,10 +331,10 @@ describe('agent-models:下发的配置', () => {
 
   test('nointent 模式下不下发插件', async () => {
     // 服务端会把 plugins 的键展开成可调函数列表。在 nointent 模式下送过去,
-    // 它会注册出一堆根本调不动的工具。
+    // 它会注册出一堆根本调不动的工具。新库的默认智能体勾着插件,这里显式切到 nointent。
+    run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_nointent', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:16');
-    run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
-      DEFAULT_AGENT_ID, 'get_time', '{}');
+    assert.ok(one(conn, 'SELECT 1 FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID), '前提:智能体勾选了插件');
     const { json } = await agentModels('aa:bb:cc:dd:ee:16');
     assert.equal((json.data as any)['plugins'], undefined);
   });
@@ -343,16 +343,38 @@ describe('agent-models:下发的配置', () => {
     // 服务端拿到后会自己 json.loads 一次(connection.py 的
     // `plugin_from_server[plugin] = json.loads(config_str)`)。
     // 如果这里直接给对象,那句会抛 TypeError,插件全部加载失败。
-    run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_function_call', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:17');
+    run(conn, 'DELETE FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID);
     run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
-      DEFAULT_AGENT_ID, 'get_weather', '{"api_key":"w-key","default_location":"广州"}');
+      DEFAULT_AGENT_ID, 'get_weather', '{"default_location":"广州","hold_s":"30"}');
 
     const { json } = await agentModels('aa:bb:cc:dd:ee:17');
     const plugins = (json.data as any)['plugins'];
     assert.ok(plugins, '应下发 plugins');
     assert.equal(typeof plugins['get_weather'], 'string', '值必须是字符串');
-    assert.deepEqual(JSON.parse(plugins['get_weather']), { api_key: 'w-key', default_location: '广州' });
+    assert.deepEqual(JSON.parse(plugins['get_weather']), { default_location: '广州', hold_s: '30' });
+  });
+
+  test('新库的默认智能体开启函数调用,并带三个会在屏幕上显示画面的插件', async () => {
+    // 不需要参数的插件也要下发 "{}":服务端用 plugins 的键决定开启哪些函数
+    // (connection.py 的 `functions = plugin_from_server.keys()`),漏掉键就等于没勾。
+    bindDevice('aa:bb:cc:dd:ee:19');
+    const { json } = await agentModels('aa:bb:cc:dd:ee:19');
+    const data = json.data as any;
+    assert.equal(data['selected_module']['Intent'], 'Intent_function_call');
+    assert.equal(data['Intent']['Intent_function_call']['type'], 'function_call');
+    assert.deepEqual(data['plugins'], { show_calendar: '{}', get_weather: '{}', set_volume: '{}' });
+  });
+
+  test('目录里已移除的旧插件行不下发', async () => {
+    // 早先的目录有个 get_time,它并不对应引擎里的任何函数,生产库里可能还留着这一行。
+    bindDevice('aa:bb:cc:dd:ee:1a');
+    run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
+      DEFAULT_AGENT_ID, 'get_time', '{}');
+    const { json } = await agentModels('aa:bb:cc:dd:ee:1a');
+    const plugins = (json.data as any)['plugins'];
+    assert.equal(plugins['get_time'], undefined);
+    assert.equal(plugins['show_calendar'], '{}');
   });
 
   test('Intent 的 functions 由分号串拆成数组', async () => {

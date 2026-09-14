@@ -36,7 +36,8 @@ It also fixes one upstream design problem; see **Binding codes** below.
 
 In **API mode** the xiaozhi server takes its configuration over HTTP instead of from a
 local YAML file. It depends on exactly seven endpoints, all implemented here, so **the
-server itself needs no changes at all**.
+server needs no code changes for the configuration interface** (the image separately carries plugins and two
+patches unrelated to it; see the tools section).
 
 ```
 device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Console ──> SQLite
@@ -45,7 +46,7 @@ device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Consol
 ```
 
 Every field of that contract was checked against the upstream Java implementation and
-against the Python code that consumes it, and 117 tests hold it in place
+against the Python code that consumes it, and 119 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
@@ -77,6 +78,47 @@ OTA always answers HTTP 200 with a top-level `status`: `bound`, `unbound`,
 `identity_mismatch`, `invalid_request`, `rate_limited` or `unavailable`. See
 `console/src/ota.ts`, `console/src/identity.ts` and `console/test/ota.test.ts`.
 
+## Tools: date, weather and volume
+
+When an agent's *tool calling* is set to *function call*, the engine offers the ticked plugins to the model as tools on
+every turn. This repository ships three plugins of its own (`server/plugins/`, copied over the engine's
+`plugins_func/functions/` when the image is built). Besides answering, they push a screen to the Xiaodan device:
+
+| Plugin | What it does | Data source | How it answers |
+|---|---|---|---|
+| `show_calendar` | date, weekday and lunar date; shows this month's calendar | server clock, lunar date from the bundled cnlunar | spoken directly, no second model call |
+| `get_weather` | current weather and tomorrow's forecast; shows a weather screen | Open-Meteo, or wttr.in when the place is uncertain or the call fails; neither needs a key | the model summarises it |
+| `set_volume` | louder, quieter, or a given percentage | none | spoken directly |
+
+Two upstream plugins are replaced as well: `get_weather` (upstream queries QWeather and then scrapes a web page with a
+hard-coded shared key) and `handle_exit_intent` (upstream closes the connection after saying goodbye, so a push-to-talk
+device has to reconnect and its button does nothing for a few seconds). Goodbye detection and the lunar lookup are always
+on inside the engine, so the page does not list them.
+
+The device receives one flat JSON message, and only if its hello declared `features.xiaodan`; stock xiaozhi firmware
+never sees it:
+
+```json
+{"type":"xiaodan","cmd":"calendar","year":2026,"month":9,"day":14,"weekday":1,"first_weekday":2,"days":30,"lunar":"<lunar date>","hold_s":20}
+{"type":"xiaodan","cmd":"weather","city":"<city>","icon":"rain","text":"<condition>","temp":27,"hi":30,"lo":22,"humidity":70,"tm_icon":"cloudy","tm_text":"<condition>","tm_hi":29,"tm_lo":23,"hold_s":20}
+{"type":"xiaodan","cmd":"volume","value":60}
+{"type":"xiaodan","cmd":"volume","delta":-20}
+```
+
+`weekday` counts Sunday as 0; `icon` is one of `sun`, `partly`, `cloudy`, `fog`, `rain`, `thunder`, `snow`;
+temperatures are integers from -40 to 60; `hold_s` is how long the screen stays after the answer ends. Ranges and
+truncation rules are documented at the top of `server/plugins/xiaodan_cards.py`, and the firmware validates the same ranges.
+
+The prompt template asks for one emoji at the start of every reply. The engine turns it into an emotion message for the
+device and strips it from subtitles and speech. The image also carries two exact patches to upstream
+`core/connection.py`, and the build fails if either anchor is missing: the device secret in the header log line becomes
+`<redacted>`, and replies that come through the `direct_answer` virtual tool now send an emotion message. With function
+calling on, most replies take that path, and upstream sends no emotion there at all.
+
+New installations default to function calling with these three plugins ticked. Existing installations are left alone:
+switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
+function calling (OpenAI `tools` with streamed `tool_calls`).
+
 ## Layout
 
 ```
@@ -94,6 +136,8 @@ console/            the console (Node + Vue)
   test/               contract tests
 server/             companion files for the xiaozhi server
   providers/          custom gateway ASR / TTS providers
+  plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
+  tests/              plugin unit tests (standard library only) and the image smoke script
   prompts/            prompt template
   config.api.yaml     API-mode configuration template
 ```
@@ -287,8 +331,9 @@ and onnxruntime both work under the default profile.
 ## Tests
 
 ```bash
-npm test        # 117 tests: API contract, authorisation boundaries, device identity and binding, migrations
+npm test        # 119 tests: API contract, authorisation boundaries, device identity and binding, migrations
 npm run check   # typecheck plus tests
+python3 -m unittest discover -s server/tests -v   # 29 plugin tests: card fields, weather parsing, dates, volume
 ```
 
 The contract tests assert the response shapes the server actually consumes, and each one

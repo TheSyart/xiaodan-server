@@ -32,7 +32,7 @@
 ## 与服务端的关系
 
 小智服务端在 **api 模式**下会把配置来源从本地 YAML 切换到 HTTP 接口。
-它只依赖七个接口,本控制台把它们全部实现了 —— **服务端一行代码都不用改**。
+它只依赖七个接口,本控制台把它们全部实现了 —— **接口层面服务端一行代码都不用改**(镜像里另有与接口无关的插件和两处修补,见「工具」一节)。
 
 ```
 设备 ──wss──> 小智服务端 ──HTTP(Bearer)──> 小单控制台 ──> SQLite
@@ -41,7 +41,7 @@
 ```
 
 契约的每个字段都对照过上游 Java 实现与服务端消费它的 Python 代码,
-并有 117 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
+并有 119 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
 里面写了每条断言对应服务端的哪一行。
 
 ## 绑定设备:只有拿着设备的人能绑定
@@ -62,6 +62,39 @@
 OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identity_mismatch`、`invalid_request`、
 `rate_limited`、`unavailable`。细节见 `console/src/ota.ts`、`console/src/identity.ts` 与 `console/test/ota.test.ts`。
 
+## 工具:查日期、查天气、调音量
+
+智能体的「工具调用」选「函数调用」后,引擎每轮都把勾选的插件作为工具交给模型。本仓库自写了三个插件
+(`server/plugins/`,构建镜像时覆盖进引擎的 `plugins_func/functions/`),它们除了回答,还把画面推给小单设备:
+
+| 插件 | 做什么 | 数据来源 | 回答方式 |
+|---|---|---|---|
+| `show_calendar` | 日期、星期、农历;屏幕显示当月日历 | 服务器时间,农历用镜像自带的 cnlunar | 直接播报,不再经过模型 |
+| `get_weather` | 实时天气与明天预报;屏幕显示天气画面 | Open-Meteo;地点不可信或出错时用 wttr.in。都不需要密钥 | 模型据此口语总结 |
+| `set_volume` | 调大、调小或调到某个百分比 | 无 | 直接播报 |
+
+同时覆盖了上游两个同名插件:`get_weather`(上游先查和风再抓网页,靠写死的共享密钥)与 `handle_exit_intent`
+(上游道别后断开连接,按键说话的设备随即要重连,几秒内按键没反应)。识别告别与查农历在引擎里永远开启,页面上不列开关。
+
+推给设备的是一条扁平 JSON,只发给在 hello 里声明了 `features.xiaodan` 的设备,原版小智固件收不到:
+
+```json
+{"type":"xiaodan","cmd":"calendar","year":2026,"month":9,"day":14,"weekday":1,"first_weekday":2,"days":30,"lunar":"七月廿三","hold_s":20}
+{"type":"xiaodan","cmd":"weather","city":"广州","icon":"rain","text":"小雨","temp":27,"hi":30,"lo":22,"humidity":70,"tm_icon":"cloudy","tm_text":"阴","tm_hi":29,"tm_lo":23,"hold_s":20}
+{"type":"xiaodan","cmd":"volume","value":60}
+{"type":"xiaodan","cmd":"volume","delta":-20}
+```
+
+`weekday` 以 0 表示星期日;`icon` 取 `sun`、`partly`、`cloudy`、`fog`、`rain`、`thunder`、`snow` 之一;温度为 −40 到 60 的整数;
+`hold_s` 是回答说完后画面停留的秒数。字段范围与截断规则见 `server/plugins/xiaodan_cards.py` 开头,固件按同样的范围校验。
+
+提示词模板要求每条回复开头放一个表情符号,引擎据此给设备发情绪消息,并从字幕与语音里去掉它。
+镜像还对上游 `core/connection.py` 做了两处精确修补,找不到原文就让构建失败:请求头日志里的设备密钥换成 `<redacted>`;
+模型经 `direct_answer` 虚拟工具回答时补发情绪消息 —— 开启函数调用后大多数回答走这条路,上游在这里一条情绪都不发。
+
+新装的实例默认就是函数调用并勾选这三个插件。已有实例不会被改动:在「智能体」页把工具调用切到「函数调用」并勾选即可。
+所用模型必须支持 function calling(OpenAI 的 `tools` 与流式 `tool_calls`)。
+
 ## 目录
 
 ```
@@ -79,6 +112,8 @@ console/            控制台(Node + Vue)
   test/               契约测试
 server/             小智服务端的配套文件
   providers/          自写的网关 ASR / TTS provider
+  plugins/            自写的插件:日历、天气、音量,以及覆盖上游的天气与告别插件
+  tests/              插件的单元测试(只用标准库)与镜像冒烟脚本
   prompts/            提示词模板
   config.api.yaml     api 模式的配置模板
 ```
@@ -250,8 +285,9 @@ Opus 解码和 onnxruntime 都工作正常。
 ## 测试
 
 ```bash
-npm test        # 117 个测试:接口契约、权限边界、设备身份与绑定、数据库迁移
+npm test        # 119 个测试:接口契约、权限边界、设备身份与绑定、数据库迁移
 npm run check   # 类型检查 + 测试
+python3 -m unittest discover -s server/tests -v   # 29 个插件测试:卡片字段、天气解析、日期与音量(只用标准库)
 ```
 
 契约测试断言的是服务端真正消费的响应形状,每条都在注释里写明对应服务端的哪段代码,

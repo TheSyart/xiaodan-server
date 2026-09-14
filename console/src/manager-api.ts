@@ -14,6 +14,7 @@ import type { Db } from './db.ts';
 import { all, one, run, tx } from './db.ts';
 import { nestSettings, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
+import { PLUGINS } from './catalog.ts';
 import {
   canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
 } from './identity.ts';
@@ -290,11 +291,14 @@ export function managerApi(conn: Db): Hono {
     const intentModel = loadModel(conn, agent.intent_model_id);
     const intentType = intentModel ? String(parseConfig(intentModel)['type'] ?? '') : 'nointent';
     if (intentType && intentType !== 'nointent') {
+      // 只下发目录里还有的插件。库里可能残留已移除的条目(比如早先不对应任何函数的 get_time),
+      // 送过去引擎会按模块名展开出意料之外的函数,或者注册出调不动的工具。
+      const known = new Set(PLUGINS.map((plugin) => plugin.code));
       const rows = all<{ plugin_code: string; params_json: string }>(
         conn,
         'SELECT plugin_code, params_json FROM agent_plugins WHERE agent_id = ?',
         agent.id,
-      );
+      ).filter((row) => known.has(row.plugin_code));
       if (rows.length > 0) {
         const plugins: Record<string, string> = {};
         // 值是【JSON 字符串】而不是对象:服务端拿到后会自己 json.loads 一次。

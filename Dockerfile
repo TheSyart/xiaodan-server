@@ -87,22 +87,60 @@ COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
 # 上游自带的模板在示例里演示放歌报天气,会让模型承诺它没有的能力,故整份替换。
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
-# 上游在每条连接建立时把全部请求头打进 INFO 日志(core/connection.py)。其中 Client-Id 是设备密钥,
-# 控制塔据它核验设备身份;Authorization 是设备令牌 —— 两者都不能进 docker logs 与 tmp/server.log。
-# 打印前把这两项换成 <redacted>。只做这一行的精确替换:找不到恰好一处就让构建失败,
-# 免得换上游版本后这里悄悄失效、密钥又开始进日志。替换后的写法已在上游镜像的 Python 3.10 里验证过。
+# 自写的服务端插件(server/plugins/):查日期并显示日历、查天气并显示天气卡片、调音量三个工具;
+# 另外覆盖上游两个同名插件:get_weather(上游抓网页、靠写死的共享密钥)与 handle_exit_intent(上游道别后断开连接)。
+# 引擎启动时自动导入 plugins_func/functions/ 下的全部模块,xiaodan_cards.py 是它们共用的纯逻辑。
+COPY server/plugins/xiaodan_cards.py plugins_func/functions/xiaodan_cards.py
+COPY server/plugins/show_calendar.py plugins_func/functions/show_calendar.py
+COPY server/plugins/get_weather.py plugins_func/functions/get_weather.py
+COPY server/plugins/set_volume.py plugins_func/functions/set_volume.py
+COPY server/plugins/handle_exit_intent.py plugins_func/functions/handle_exit_intent.py
+
+# 对上游 core/connection.py 的两处精确修补。每处都要求找到恰好一处原文,找不到就让构建失败:
+# 换上游版本后修补悄悄失效,比构建失败危险得多。修补后的代码已在上游同一提交的源码上编译验证。
+#
+# 1. 上游在每条连接建立时把全部请求头打进 INFO 日志。其中 Client-Id 是设备密钥,控制塔据它核验设备身份;
+#    Authorization 是设备令牌 —— 两者都不能进 docker logs 与 tmp/server.log。打印前把这两项换成 <redacted>。
+# 2. 开启工具调用(Intent 为 function_call)后,引擎给模型加了一个 direct_answer 虚拟工具,普通回答大多从它的参数里流出。
+#    上游只在模型直接输出正文时发情绪消息,走 direct_answer 就一条也不发,设备上的表情永远停在默认值。
+#    在提取 direct_answer 文本的地方补上与正文路径相同的一段:一轮只发一次,尊重设备在 hello 里声明的 emoji 开关。
 RUN python - <<'PY'
 import pathlib
 import py_compile
 
 path = pathlib.Path("core/connection.py")
 source = path.read_text(encoding="utf-8")
-old = 'f"{self.client_ip} conn - Headers: {self.headers}"'
-new = ('f"{self.client_ip} conn - Headers: '
-       '{ {k: (\'<redacted>\' if k.lower() in (\'client-id\', \'authorization\') else v) for k, v in self.headers.items()} }"')
-if source.count(old) != 1:
-    raise SystemExit("core/connection.py 里找不到恰好一处请求头日志,上游可能改了写法,请重新确认脱敏方式")
-path.write_text(source.replace(old, new), encoding="utf-8")
+
+
+def replace_once(text, old, new, what):
+    if text.count(old) != 1:
+        raise SystemExit(f"core/connection.py 里找不到恰好一处{what},上游可能改了写法,请重新确认修补方式")
+    return text.replace(old, new)
+
+
+source = replace_once(
+    source,
+    'f"{self.client_ip} conn - Headers: {self.headers}"',
+    ('f"{self.client_ip} conn - Headers: '
+     '{ {k: (\'<redacted>\' if k.lower() in (\'client-id\', \'authorization\') else v) for k, v in self.headers.items()} }"'),
+    "请求头日志",
+)
+
+anchor = '                            da_text = self._extract_direct_answer_response(tc["arguments"])\n'
+source = replace_once(
+    source,
+    anchor,
+    anchor
+    + '                            if emotion_flag and da_text and da_text.strip():\n'
+    + '                                if (self.features or {}).get("emoji", True):\n'
+    + '                                    asyncio.run_coroutine_threadsafe(\n'
+    + '                                        textUtils.get_emotion(self, da_text), self.loop\n'
+    + '                                    )\n'
+    + '                                emotion_flag = False\n',
+    " direct_answer 文本提取",
+)
+
+path.write_text(source, encoding="utf-8")
 py_compile.compile(str(path), doraise=True)
 PY
 

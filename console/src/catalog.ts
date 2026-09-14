@@ -225,17 +225,33 @@ export interface PluginDef {
 }
 
 export const PLUGINS: PluginDef[] = [
+  // 前三个是本仓库自写的插件(server/plugins/,构建时覆盖进引擎镜像),会在小单设备屏幕上显示对应画面;其余是上游自带的。
+  // 上游的 handle_exit_intent(识别告别)与 get_lunar(查农历)在引擎里永远开启(plugin_executor.py 的
+  // necessary_functions),勾不勾都一样,所以不列出来。从前列过的 get_time 其实不对应任何函数,也已移除;
+  // 库里残留的这类行不会再下发(见 manager-api.ts)。
   {
-    code: 'get_time',
-    label: '查询时间日期',
-    description: '回答"今天几号""现在几点""星期几"。用服务器时间,不联网。',
+    code: 'show_calendar',
+    label: '日期与日历',
+    description: '回答"今天几号""星期几""农历几号",并在设备屏幕上显示当月日历。用服务器时间,不联网。',
     keyless: true,
-    fields: [],
+    fields: [
+      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, hint: '回答说完后日历停留多久,5 到 60' },
+    ],
   },
   {
-    code: 'handle_exit_intent',
-    label: '识别告别意图',
-    description: '听懂"再见""拜拜"并主动结束对话,避免连接空转到超时。',
+    code: 'get_weather',
+    label: '天气',
+    description: '查实时天气与明天预报,并在设备屏幕上显示天气画面。数据来自 Open-Meteo,出错时改用 wttr.in,都不需要密钥。',
+    keyless: true,
+    fields: [
+      { key: 'default_location', label: '默认城市', type: 'string', default: '广州', hint: '用户没说地点时查这里' },
+      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, hint: '回答说完后天气画面停留多久,5 到 60' },
+    ],
+  },
+  {
+    code: 'set_volume',
+    label: '语音调音量',
+    description: '听懂"大声点""音量调到一半",直接调节设备音量。需要小单固件,原版小智固件会回答"请用按键调"。',
     keyless: true,
     fields: [],
   },
@@ -245,17 +261,6 @@ export const PLUGINS: PluginDef[] = [
     description: '让用户用一句话临时改变说话风格。',
     keyless: true,
     fields: [],
-  },
-  {
-    code: 'get_weather',
-    label: '天气预报',
-    description: '查询实时天气与未来几天预报。需要和风天气的密钥。',
-    keyless: false,
-    fields: [
-      { key: 'api_key', label: '和风天气 API 密钥', type: 'password', required: true },
-      { key: 'api_host', label: 'API 主机', type: 'string', hint: '在和风控制台可查到专属域名' },
-      { key: 'default_location', label: '默认城市', type: 'string', default: '广州' },
-    ],
   },
   {
     code: 'web_search',

@@ -51,7 +51,10 @@ const toolsEnabled = computed(() => {
 function edit(agent: Agent) {
   editing.value = JSON.parse(JSON.stringify(agent)) as Agent;
   const state: Record<string, Record<string, string>> = {};
+  // 库里可能残留目录已移除的插件(比如早先的 get_time)。不带进表单:保存时接口会拒绝未知插件。
+  const known = new Set((catalog.value?.plugins ?? []).map((plugin) => plugin.code));
   for (const item of agent.plugins) {
+    if (!known.has(item.plugin_code)) continue;
     try {
       const params = JSON.parse(item.params_json) as Record<string, unknown>;
       state[item.plugin_code] = Object.fromEntries(
@@ -66,8 +69,8 @@ function edit(agent: Agent) {
 }
 
 /**
- * 某类型标为默认的模型;没有默认项就留空。不能取列表第一个:排序靠 id,
- * 意图模型里排在前面的是函数调用,新建的智能体会悄悄开启工具。
+ * 某类型标为默认的模型;没有默认项就留空。不能取列表第一个:排序靠 id 而不是用户的选择,
+ * 新建的智能体会拿到一个谁也没选过的模型。新库里工具调用(函数调用)本身就是默认项。
  */
 const defaultOf = (type: string) => byType(type).find((m) => m.is_default === 1)?.id ?? null;
 
@@ -252,7 +255,7 @@ const MODEL_LABELS: [keyof Agent, string, string, string][] = [
 
     <div class="card">
       <h2>插件</h2>
-      <p>勾选后它就能调用这些能力。</p>
+      <p>勾选后它就能调用这些能力。识别告别与查农历由服务端始终开启,不在这里列出。</p>
       <div v-if="!toolsEnabled" class="notice warn">
         当前的「工具调用」选的是不启用工具,插件不会下发给设备。
         要让插件生效,请把上面的工具调用改成函数调用。

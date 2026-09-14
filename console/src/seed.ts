@@ -10,6 +10,9 @@ import { DEFAULT_SETTINGS } from './settings.ts';
 
 export const DEFAULT_AGENT_ID = 'agent_xiaodan';
 
+/** 新库里默认智能体开启的插件:本仓库自写、会在设备屏幕上显示画面的三个工具。 */
+export const DEFAULT_AGENT_PLUGINS = ['show_calendar', 'get_weather', 'set_volume'] as const;
+
 /** 服务端用它做 Bearer 鉴权。首次启动随机生成,之后可在设置页轮换。 */
 export const SECRET_KEY = 'server.secret';
 
@@ -61,13 +64,15 @@ export function seed(conn: Db): void {
       },
       isDefault: true,
     });
+    // 工具调用默认开启:新装的实例开箱就能查日期、查天气、调音量(server/plugins/)。
+    // 只影响新库 —— seedModel 与下面的默认智能体都是"缺了才插",已有实例的默认模型与智能体配置不会被改。
     seedModel(conn, {
       id: 'Intent_nointent',
       type: 'Intent',
       name: '不启用工具',
       provider: 'nointent',
       config: { type: 'nointent' },
-      isDefault: true,
+      isDefault: false,
     });
     seedModel(conn, {
       id: 'Intent_function_call',
@@ -75,7 +80,7 @@ export function seed(conn: Db): void {
       name: '函数调用',
       provider: 'function_call',
       config: { type: 'function_call' },
-      isDefault: false,
+      isDefault: true,
     });
     seedModel(conn, {
       id: 'Memory_nomem',
@@ -94,16 +99,20 @@ export function seed(conn: Db): void {
         conn,
         `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, memory_model_id,
                              intent_model_id, chat_history_conf, is_default)
-         VALUES (?, ?, ?, 'VAD_SileroVAD', NULL, 'Memory_nomem', 'Intent_nointent', 1, 1)`,
+         VALUES (?, ?, ?, 'VAD_SileroVAD', NULL, 'Memory_nomem', 'Intent_function_call', 1, 1)`,
         DEFAULT_AGENT_ID,
         '小单',
         [
           '你叫小单,是一个随身的 AI 伴侣,住在一块小小的硬件里。',
           '你的回答必须简短口语化,通常一到两句话,因为用户是在听你说话而不是读文字。',
-          '不要使用 Markdown、列表或任何排版符号。不要念出表情符号。',
+          '不要使用 Markdown、列表或任何排版符号。',
           '遇到不确定的事就说不知道,不要编造。',
         ].join('\n'),
       );
+      for (const code of DEFAULT_AGENT_PLUGINS) {
+        run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, ?, ?)',
+          DEFAULT_AGENT_ID, code, '{}');
+      }
     }
   });
 }
