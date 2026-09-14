@@ -13,6 +13,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const text = await response.text();
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!response.ok) {
+    // 会话过期:由 App.vue 统一带回登录页
+    if (response.status === 401) window.dispatchEvent(new Event('xiaodan:unauthorized'));
     const error = new Error(
       (data as { error?: string } | null)?.error ?? `请求失败(${response.status})`,
     ) as ApiError;
@@ -178,4 +180,11 @@ export interface Overview {
   models: number;
   messages: number;
   settings: number;
+}
+
+export interface CorrectWord {
+  id: number;
+  agent_id: string;
+  source: string;
+  target: string;
 }

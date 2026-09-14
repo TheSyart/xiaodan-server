@@ -41,7 +41,7 @@
 ```
 
 契约的每个字段都对照过上游 Java 实现与服务端消费它的 Python 代码,
-并有 119 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
+并有 121 个测试守着(`console/test/`)。改动接口前请先读那些测试的注释,
 里面写了每条断言对应服务端的哪一行。
 
 ## 绑定设备:只有拿着设备的人能绑定
@@ -108,7 +108,8 @@ console/            控制台(Node + Vue)
     schema.sql        ← 表结构的 v0 基线
     migrations.ts     ← 之后的表结构变化,按 PRAGMA user_version 顺序执行
     cli.ts            ← 命令行:设密码、从旧配置导入密钥
-  web/                前端页面
+  web/                前端页面:设备、智能体、模型、对话记录、读音替换、设置;浅色与深色主题,
+                      不引外部资源(响应带同源内容安全策略)
   test/               契约测试
 server/             小智服务端的配套文件
   providers/          自写的网关 ASR / TTS provider
@@ -285,7 +286,7 @@ Opus 解码和 onnxruntime 都工作正常。
 ## 测试
 
 ```bash
-npm test        # 119 个测试:接口契约、权限边界、设备身份与绑定、数据库迁移
+npm test        # 121 个测试:接口契约、权限边界、设备身份与绑定、数据库迁移
 npm run check   # 类型检查 + 测试
 python3 -m unittest discover -s server/tests -v   # 29 个插件测试:卡片字段、天气解析、日期与音量(只用标准库)
 ```

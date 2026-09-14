@@ -3,14 +3,22 @@ import { computed, onMounted, ref } from 'vue';
 import {
   api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type Overview, type PendingDevice,
 } from '../api';
+import AppIcon from '../components/AppIcon.vue';
+import CodeInput from '../components/CodeInput.vue';
+import EmptyState from '../components/EmptyState.vue';
+import PageHeader from '../components/PageHeader.vue';
+import SkeletonRows from '../components/SkeletonRows.vue';
+import type { IconName } from '../icons';
+import { confirmDialog, copyText, formatTime, promptDialog, relativeTime, toast, toastError } from '../ui';
 
 const devices = ref<Device[]>([]);
 const pending = ref<PendingDevice[]>([]);
 const events = ref<IdentityEvent[]>([]);
 const agents = ref<Agent[]>([]);
 const overview = ref<Overview | null>(null);
-const error = ref('');
 const loading = ref(true);
+const refreshing = ref(false);
+const loadError = ref('');
 
 // 绑定表单。智能体留空时:新设备绑到默认智能体,重新配对的旧设备保留原来的智能体。
 const code = ref('');
@@ -18,10 +26,10 @@ const agentId = ref('');
 const alias = ref('');
 const binding = ref(false);
 const bindError = ref('');
-const bindDone = ref('');
 
-async function load() {
-  error.value = '';
+async function load(manual = false) {
+  refreshing.value = manual;
+  loadError.value = '';
   try {
     const [list, agentList, stats] = await Promise.all([
       api.get<DeviceList>('/devices'),
@@ -33,32 +41,34 @@ async function load() {
     events.value = list.events;
     agents.value = agentList.items;
     overview.value = stats;
+    if (manual) toast('已刷新', 'info', 1600);
   } catch (e) {
-    error.value = (e as Error).message;
+    loadError.value = (e as Error).message;
   } finally {
     loading.value = false;
+    refreshing.value = false;
   }
 }
-onMounted(load);
+onMounted(() => load());
+
+const deviceName = (device: Device) => device.alias || device.mac;
 
 async function bind() {
   bindError.value = '';
-  bindDone.value = '';
-  const value = code.value.replace(/\s/gu, '');
-  if (!/^\d{6}$/u.test(value)) {
-    bindError.value = '绑定码是设备屏幕上显示的六位数字';
+  if (!/^\d{6}$/u.test(code.value)) {
+    bindError.value = '绑定码是设备屏幕上显示的六位数字。';
     return;
   }
   binding.value = true;
   try {
     const result = await api.post<{ ok: boolean; mac: string }>('/devices/bind', {
-      code: value,
+      code: code.value,
       alias: alias.value.trim(),
       ...(agentId.value ? { agent_id: agentId.value } : {}),
     });
     code.value = '';
     alias.value = '';
-    bindDone.value = `已绑定 ${result.mac}。设备会在几秒内自动开始工作。`;
+    toast(`已绑定 ${result.mac}。设备会在几秒内自动开始工作。`);
     await load();
   } catch (e) {
     const err = e as ApiError;
@@ -73,67 +83,82 @@ async function bind() {
 }
 
 async function unbind(device: Device) {
-  const name = device.alias || device.mac;
-  const message = `确定解绑 ${name} 吗?\n\n解绑后这台设备无法再对话。要重新绑定,需要在设备屏幕上看到新的绑定码并在这里输入。`
-    + '\n正在进行中的对话会持续到设备下次重连为止。';
-  if (!confirm(message)) return;
+  const ok = await confirmDialog({
+    title: `解绑「${deviceName(device)}」?`,
+    message:
+      '解绑后这台设备无法再对话。要重新绑定,需要在设备屏幕上看到新的绑定码并在这里输入。\n'
+      + '正在进行中的对话会持续到设备下次重连为止。',
+    confirmText: '解绑',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await api.del(`/devices/${encodeURIComponent(device.mac)}`);
+    toast(`已解绑 ${deviceName(device)}`);
     await load();
   } catch (e) {
-    error.value = (e as Error).message;
+    toastError(e);
   }
 }
 
 async function dismissPending(item: PendingDevice) {
-  if (!confirm(`清除 ${item.mac} 的这条等待记录?\n\n如果那台设备还开着,它下次询问时会带着一个新的码重新出现。`)) return;
+  const ok = await confirmDialog({
+    title: `清除 ${item.mac} 的等待记录?`,
+    message: '如果那台设备还开着,它下次询问时会带着一个新的码重新出现。',
+    confirmText: '清除',
+  });
+  if (!ok) return;
   try {
     await api.del(`/devices/pending/${item.id}`);
+    toast('已清除');
     await load();
   } catch (e) {
-    error.value = (e as Error).message;
+    toastError(e);
   }
 }
 
 async function clearEvents() {
+  const ok = await confirmDialog({
+    title: '清除全部身份异常记录?',
+    message: '只清除记录本身,不影响任何设备。以后再出现异常时会重新记录。',
+    confirmText: '全部清除',
+  });
+  if (!ok) return;
   try {
     await api.del('/identity-events');
+    toast('已清除身份异常记录');
     await load();
   } catch (e) {
-    error.value = (e as Error).message;
+    toastError(e);
   }
 }
 
 async function rename(device: Device) {
-  const next = prompt('设备名称', device.alias);
+  const next = await promptDialog({
+    title: '修改设备名称',
+    input: { label: '名称', value: device.alias, placeholder: '例如 客厅的小单', maxlength: 64 },
+    confirmText: '保存',
+  });
   if (next === null) return;
   try {
-    await api.put(`/devices/${encodeURIComponent(device.mac)}`, { alias: next });
+    await api.put(`/devices/${encodeURIComponent(device.mac)}`, { alias: next.trim() });
+    toast('名称已保存');
     await load();
   } catch (e) {
-    error.value = (e as Error).message;
+    toastError(e);
   }
 }
 
 async function moveAgent(device: Device, target: string) {
+  const agent = agents.value.find((item) => item.id === target);
   try {
     await api.put(`/devices/${encodeURIComponent(device.mac)}`, { agent_id: target });
-    await load();
+    toast(`${deviceName(device)} 已切换到「${agent?.name ?? target}」,下次连接时生效`);
   } catch (e) {
-    error.value = (e as Error).message;
+    toastError(e);
   }
+  await load();   // 失败时把下拉框恢复成真实值
 }
-
-const relative = (iso: string | null) => {
-  if (!iso) return '从未';
-  // SQLite 的 datetime('now') 给的是 UTC 但不带时区标记,补上 Z 再解析
-  const date = new Date(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
-  const diff = Date.now() - date.getTime();
-  if (diff < 60_000) return '刚刚';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  return date.toLocaleString('zh-CN');
-};
 
 const EVENT_TEXT: Record<IdentityEvent['kind'], string> = {
   mismatch: '出示的设备密钥与绑定时记录的不一致',
@@ -145,145 +170,248 @@ const SOURCE_TEXT: Record<IdentityEvent['source'], string> = {
   engine: '连接对话服务时',
 };
 
-const hasAgents = computed(() => agents.value.length > 0);
+const stats = computed<{ label: string; value: number; icon: IconName; tone: string }[]>(() =>
+  overview.value
+    ? [
+        { label: '已绑定设备', value: overview.value.devices, icon: 'device', tone: 'tone-sky' },
+        { label: '等待绑定', value: overview.value.pending, icon: 'clock', tone: 'tone-sun' },
+        { label: '智能体', value: overview.value.agents, icon: 'bot', tone: 'tone-grass' },
+        { label: '对话消息', value: overview.value.messages, icon: 'message', tone: 'tone-violet' },
+      ]
+    : [],
+);
+
 const hasLegacy = computed(() => devices.value.some((device) => device.identity === 'legacy'));
 const sharedMac = computed(() => pending.value.some((item) => item.same_mac_count > 1));
 </script>
 
 <template>
-  <div class="page-head">
-    <h1>设备</h1>
-    <p>每台设备绑定一个智能体。</p>
-  </div>
+  <PageHeader title="设备" description="绑定新设备、看它们最近是否连接过,并为每台设备选择一个智能体。">
+    <template #actions>
+      <button class="btn" type="button" :aria-busy="refreshing" @click="load(true)">
+        <AppIcon name="refresh" :size="16" /><span>刷新</span>
+      </button>
+    </template>
+  </PageHeader>
 
-  <div v-if="error" class="notice error">{{ error }}</div>
-
-  <div v-if="overview" class="stats">
-    <div class="stat"><b>{{ overview.devices }}</b><span>已绑定</span></div>
-    <div class="stat"><b>{{ overview.pending }}</b><span>等待绑定</span></div>
-    <div class="stat"><b>{{ overview.agents }}</b><span>智能体</span></div>
-    <div class="stat"><b>{{ overview.messages }}</b><span>对话消息</span></div>
-  </div>
-
-  <div class="card">
-    <h2>绑定新设备</h2>
-    <p>
-      设备连上 Wi-Fi 后会先询问控制塔,还没绑定时屏幕上会显示六位绑定码。
-      只有拿着设备的人能看到这个码,所以控制塔不会在页面上列出它。把屏幕上的码输入到这里即可。
-    </p>
-
-    <div v-if="!hasAgents" class="notice warn">还没有智能体,请先到「智能体」页面创建一个。</div>
-
-    <form class="btn-row" @submit.prevent="bind">
-      <input
-        v-model="code" type="text" inputmode="numeric" autocomplete="off" maxlength="6"
-        placeholder="六位绑定码" style="width: 140px; letter-spacing: 4px"
-      />
-      <select v-model="agentId" style="width: auto">
-        <option value="">默认智能体(重新配对的设备保留原来的)</option>
-        <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
-      </select>
-      <input v-model="alias" type="text" maxlength="64" placeholder="设备名称(可选)" style="width: 180px" />
-      <button class="primary" type="submit" :disabled="binding || !hasAgents">绑定</button>
-    </form>
-    <div v-if="bindError" class="notice error" style="margin-top: 12px">{{ bindError }}</div>
-    <div v-if="bindDone" class="notice info" style="margin-top: 12px">{{ bindDone }}</div>
-  </div>
-
-  <div v-if="events.length > 0" class="card">
-    <h2>身份异常</h2>
-    <p>
-      有设备用已绑定设备的 MAC 连接,但身份对不上。如果你刚给设备恢复出厂或擦除过闪存,
-      这是正常的:在下方解绑它,设备屏幕上会出现新码,重新输入即可。否则可能有人在冒充你的设备 ——
-      冒充者拿不到任何配置,也无法对话。
-    </p>
-    <table>
-      <thead>
-        <tr><th>设备 MAC</th><th>情况</th><th>次数</th><th>最近一次</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in events" :key="item.id">
-          <td><span class="code">{{ item.mac }}</span></td>
-          <td>{{ SOURCE_TEXT[item.source] }}{{ EVENT_TEXT[item.kind] }}</td>
-          <td>{{ item.count }}</td>
-          <td>{{ relative(item.last_seen_at) }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="btn-row" style="margin-top: 12px">
-      <button @click="clearEvents">全部清除</button>
+  <div v-if="loadError" class="callout danger" role="alert">
+    <AppIcon name="alert" :size="18" />
+    <div class="callout-body">
+      <strong>加载失败。</strong>{{ loadError }}
+      <div class="callout-actions"><button class="btn btn-sm" type="button" @click="load(true)">重试</button></div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>正在等待绑定</h2>
-    <p>这里列出正在显示绑定码的设备,方便确认你的设备已经连上控制塔。设备关机后约十分钟自动消失。</p>
-
-    <div v-if="sharedMac" class="notice warn">
-      有多个身份在用同一个 MAC 等待绑定,其中可能有冒充者。只输入你自己设备屏幕上的码。
-    </div>
-
-    <div v-if="pending.length === 0" class="empty">暂时没有设备在等待绑定。</div>
-    <table v-else>
-      <thead>
-        <tr><th>设备 MAC</th><th>板型 / 固件</th><th>首次出现</th><th>最近询问</th><th></th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in pending" :key="item.id">
-          <td>
-            <span class="code">{{ item.mac }}</span>
-            <span v-if="item.same_mac_count > 1" class="tag warn" style="margin-left: 6px">
-              同 MAC 共 {{ item.same_mac_count }} 个
-            </span>
-          </td>
-          <td>{{ [item.board, item.app_version].filter(Boolean).join(' / ') || '未上报' }}</td>
-          <td>{{ relative(item.created_at) }}</td>
-          <td>{{ relative(item.last_seen_at) }}</td>
-          <td class="actions">
-            <button class="link danger" @click="dismissPending(item)">清除</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+  <div class="stat-grid">
+    <template v-if="overview">
+      <div v-for="stat in stats" :key="stat.label" class="stat">
+        <span class="stat-icon" :class="stat.tone"><AppIcon :name="stat.icon" :size="20" /></span>
+        <div>
+          <div class="stat-value">{{ stat.value }}</div>
+          <div class="stat-label">{{ stat.label }}</div>
+        </div>
+      </div>
+    </template>
+    <template v-else>
+      <div v-for="i in 4" :key="i" class="stat">
+        <span class="skeleton" style="width: 40px; height: 40px; border-radius: 11px"></span>
+        <div style="flex: 1">
+          <span class="skeleton" style="width: 36%; height: 20px"></span>
+          <span class="skeleton" style="width: 62%; margin-top: 8px"></span>
+        </div>
+      </div>
+    </template>
   </div>
 
-  <div class="card">
-    <h2>已绑定设备</h2>
+  <section class="card accent-sky">
+    <div class="bind">
+      <div>
+        <div class="card-head" style="margin-bottom: 0">
+          <div>
+            <h2><AppIcon name="link" :size="18" />绑定新设备</h2>
+            <p>只有拿着设备的人能看到绑定码,所以控制台不会在页面上列出它。</p>
+          </div>
+        </div>
+        <ol class="steps">
+          <li>给设备配好 Wi-Fi,它会先询问控制台自己有没有被绑定。</li>
+          <li>还没绑定时,设备屏幕上会显示六位绑定码。</li>
+          <li>在这里输入那六位数字、选好智能体,几秒后设备就能对话。</li>
+        </ol>
+      </div>
 
-    <div v-if="hasLegacy" class="notice warn">
-      有设备是在身份校验上线前绑定的,重新配对之前它无法对话。给它刷入新固件并开机,
-      屏幕上会显示六位绑定码,在上方输入即可,名称和智能体都会保留。
-    </div>
-
-    <div v-if="loading" class="empty">加载中…</div>
-    <div v-else-if="devices.length === 0" class="empty">还没有绑定任何设备。</div>
-    <table v-else>
-      <thead>
-        <tr><th>名称</th><th>MAC</th><th>身份</th><th>智能体</th><th>最后连接</th><th></th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="device in devices" :key="device.mac">
-          <td>{{ device.alias || '(未命名)' }}</td>
-          <td><span class="code">{{ device.mac }}</span></td>
-          <td>
-            <span v-if="device.identity === 'verified'" class="tag ok">已验证</span>
-            <span v-else class="tag warn">需重新配对</span>
-          </td>
-          <td>
-            <select
-              :value="device.agent_id" style="width: auto"
-              @change="moveAgent(device, ($event.target as HTMLSelectElement).value)"
-            >
+      <form class="bind-form" @submit.prevent="bind">
+        <div v-if="!loading && agents.length === 0" class="callout warn" style="margin: 0">
+          <AppIcon name="alert" :size="18" />
+          <div class="callout-body">还没有智能体,请先到<router-link to="/agents">智能体</router-link>页面创建一个。</div>
+        </div>
+        <div class="field">
+          <span class="field-label">绑定码</span>
+          <CodeInput v-model="code" :invalid="!!bindError" :disabled="binding" @update:model-value="bindError = ''" />
+          <span v-if="bindError" class="field-error" role="alert">{{ bindError }}</span>
+        </div>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">智能体</span>
+            <select v-model="agentId" class="select">
+              <option value="">默认智能体</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
             </select>
-          </td>
-          <td>{{ relative(device.last_connected_at) }}</td>
-          <td class="actions">
-            <button class="link" @click="rename(device)">改名</button>
-            <button class="link danger" @click="unbind(device)">解绑</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+            <span class="field-hint">重新配对的旧设备会保留原来的智能体。</span>
+          </label>
+          <label class="field">
+            <span class="field-label">设备名称</span>
+            <input v-model="alias" class="input" type="text" maxlength="64" placeholder="可选,例如 客厅的小单" />
+          </label>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" type="submit" :disabled="binding || agents.length === 0" :aria-busy="binding">
+            <AppIcon name="link" :size="16" /><span>绑定设备</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section v-if="events.length > 0" class="card accent-danger">
+    <div class="card-head">
+      <div>
+        <h2><AppIcon name="shield" :size="18" />身份异常 <span class="count">{{ events.length }}</span></h2>
+        <p>
+          有设备用已绑定设备的 MAC 连接,但身份对不上。如果你刚给设备恢复出厂或擦除过闪存,这是正常的:
+          在下方解绑它,再输入屏幕上出现的新码。否则可能有人在冒充你的设备,冒充者拿不到任何配置,也无法对话。
+        </p>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-sm btn-danger" type="button" @click="clearEvents">
+          <AppIcon name="trash" :size="14" /><span>全部清除</span>
+        </button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>设备</th><th>情况</th><th>次数</th><th>最近一次</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in events" :key="item.id">
+            <td><span class="chip-mono">{{ item.mac }}</span></td>
+            <td class="text-cell">{{ SOURCE_TEXT[item.source] }}{{ EVENT_TEXT[item.kind] }}</td>
+            <td class="mono">{{ item.count }}</td>
+            <td class="nowrap" :title="formatTime(item.last_seen_at)">{{ relativeTime(item.last_seen_at) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2><AppIcon name="clock" :size="18" />正在等待绑定 <span v-if="pending.length" class="count">{{ pending.length }}</span></h2>
+        <p>正在屏幕上显示绑定码的设备。设备关机后约十分钟自动消失。</p>
+      </div>
+    </div>
+    <div v-if="sharedMac" class="callout warn">
+      <AppIcon name="alert" :size="18" />
+      <div class="callout-body">有多个身份在用同一个 MAC 等待绑定,其中可能有冒充者。只输入你自己设备屏幕上的码。</div>
+    </div>
+    <SkeletonRows v-if="loading" :rows="2" />
+    <EmptyState
+      v-else-if="pending.length === 0" title="没有设备在等待绑定"
+      description="给新设备配好 Wi-Fi,它就会出现在这里,屏幕上同时显示绑定码。"
+    />
+    <div v-else class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>设备</th><th>板型 / 固件</th><th>首次出现</th><th>最近询问</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in pending" :key="item.id">
+            <td>
+              <div class="row" style="gap: 6px">
+                <span class="chip-mono">{{ item.mac }}</span>
+                <span v-if="item.same_mac_count > 1" class="tag warn">同 MAC 共 {{ item.same_mac_count }} 个</span>
+              </div>
+            </td>
+            <td class="muted">{{ [item.board, item.app_version].filter(Boolean).join(' / ') || '未上报' }}</td>
+            <td class="nowrap" :title="formatTime(item.created_at)">{{ relativeTime(item.created_at) }}</td>
+            <td class="nowrap" :title="formatTime(item.last_seen_at)">{{ relativeTime(item.last_seen_at) }}</td>
+            <td class="actions">
+              <button class="btn btn-ghost btn-sm danger" type="button" @click="dismissPending(item)">
+                <AppIcon name="x" :size="14" /><span>清除</span>
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2><AppIcon name="device" :size="18" />已绑定设备 <span v-if="devices.length" class="count">{{ devices.length }}</span></h2>
+        <p>切换智能体或解绑都在设备下次连接时生效。</p>
+      </div>
+    </div>
+    <div v-if="hasLegacy" class="callout warn">
+      <AppIcon name="alert" :size="18" />
+      <div class="callout-body">
+        有设备是在身份校验上线前绑定的,重新配对之前它无法对话。给它刷入新固件并开机,屏幕上会显示六位绑定码,
+        在上方输入即可,名称和智能体都会保留。
+      </div>
+    </div>
+    <SkeletonRows v-if="loading" />
+    <EmptyState
+      v-else-if="devices.length === 0" title="还没有绑定任何设备"
+      description="在上方输入设备屏幕上的六位绑定码,完成第一次绑定。"
+    />
+    <div v-else class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>设备</th><th>身份</th><th>智能体</th><th>最后连接</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="device in devices" :key="device.mac">
+            <td>
+              <div class="cell-main">{{ device.alias || '未命名设备' }}</div>
+              <div class="row" style="gap: 2px; margin-top: 3px">
+                <span class="chip-mono">{{ device.mac }}</span>
+                <button
+                  class="btn btn-ghost btn-sm btn-icon" type="button" title="复制 MAC" :aria-label="`复制 ${device.mac}`"
+                  @click="copyText(device.mac, ' MAC 地址')"
+                >
+                  <AppIcon name="copy" :size="14" />
+                </button>
+              </div>
+            </td>
+            <td>
+              <span v-if="device.identity === 'verified'" class="tag ok dot">已验证</span>
+              <span v-else class="tag warn dot">需重新配对</span>
+            </td>
+            <td>
+              <select
+                class="select" :value="device.agent_id" :aria-label="`${deviceName(device)} 使用的智能体`"
+                @change="moveAgent(device, ($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
+              </select>
+            </td>
+            <td>
+              <div class="nowrap" :title="formatTime(device.last_connected_at)">{{ relativeTime(device.last_connected_at) }}</div>
+              <div v-if="device.app_version" class="cell-sub">固件 {{ device.app_version }}</div>
+            </td>
+            <td class="actions">
+              <button class="btn btn-ghost btn-sm" type="button" @click="rename(device)">
+                <AppIcon name="pencil" :size="14" /><span>改名</span>
+              </button>
+              <button class="btn btn-ghost btn-sm danger" type="button" @click="unbind(device)">
+                <AppIcon name="unlink" :size="14" /><span>解绑</span>
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
 </template>

@@ -46,7 +46,7 @@ device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Consol
 ```
 
 Every field of that contract was checked against the upstream Java implementation and
-against the Python code that consumes it, and 119 tests hold it in place
+against the Python code that consumes it, and 121 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
@@ -132,7 +132,8 @@ console/            the console (Node + Vue)
     schema.sql        ← v0 baseline schema
     migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
     cli.ts            ← CLI: set a password, import keys from an old config
-  web/                frontend
+  web/                frontend: devices, agents, models, chat logs, pronunciation fixes, settings;
+                      light and dark themes, no external assets (same-origin Content-Security-Policy)
   test/               contract tests
 server/             companion files for the xiaozhi server
   providers/          custom gateway ASR / TTS providers
@@ -331,7 +332,7 @@ and onnxruntime both work under the default profile.
 ## Tests
 
 ```bash
-npm test        # 119 tests: API contract, authorisation boundaries, device identity and binding, migrations
+npm test        # 121 tests: API contract, authorisation boundaries, device identity and binding, migrations
 npm run check   # typecheck plus tests
 python3 -m unittest discover -s server/tests -v   # 29 plugin tests: card fields, weather parsing, dates, volume
 ```

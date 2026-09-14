@@ -2,6 +2,7 @@
 
 import { Hono } from 'hono';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { secureHeaders } from 'hono/secure-headers';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Db } from './db.ts';
@@ -18,6 +19,28 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
   // strict:false —— 设备与 nginx 调的是 /xiaozhi/ota/(带尾斜杠),
   // Hono 默认把带不带尾斜杠当成两个路径,少一个就 404。
   const app = new Hono({ strict: false });
+
+  // 安全响应头。控制台页面只加载同源的脚本、样式与内联图片(data: 图标),不引用任何外部资源,
+  // 所以内容安全策略可以收得很紧。style 放开 'unsafe-inline' 是因为 Vue 会给元素写 style 属性。
+  // HSTS 由前面的 nginx 负责,这里不重复发;设备与引擎调用的接口不是浏览器,这些头对它们没有影响。
+  app.use(
+    '*',
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'"],
+        connectSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'self'"],
+      },
+      strictTransportSecurity: false,
+    }),
+  );
 
   // 健康检查。无鉴权 —— 运维面板与 Docker 都用它判断容器是否就绪,
   // 那两者都无法携带会话。只暴露"数据库能不能读",不泄露任何配置。
