@@ -8,18 +8,19 @@
 // 约定:HTTP 状态码永远 200,成败靠 body 里的 code。这是上游的做法,服务端的
 // _async_request 也是按 code 判断的(只识别 0、10041、10042),所以必须照做。
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Db } from './db.ts';
-import { all, one, run } from './db.ts';
+import { all, one, run, tx } from './db.ts';
 import { nestSettings, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
+import {
+  canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
+} from './identity.ts';
 
 /** 服务端会识别的两个业务错误码。其余 code 一律被它当作通用异常。 */
 const CODE_DEVICE_NOT_FOUND = 10041;
 const CODE_DEVICE_NEED_BIND = 10042;
-
-/** 绑定码有效期。太短会让用户还没走到电脑前就失效。 */
-const BIND_CODE_TTL_MINUTES = 60;
 
 interface ModelRow {
   id: string;
@@ -159,45 +160,9 @@ function agentVoice(conn: Db, agent: AgentRow): { voice?: string; language?: str
   return language ? { voice: row.voice, language } : { voice: row.voice };
 }
 
-/** 六位数字绑定码,避开已被占用的值。 */
-function newBindCode(conn: Db): string {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
-    if (!one(conn, 'SELECT 1 FROM pending_devices WHERE code = ?', code)) return code;
-  }
-  throw new Error('无法生成未被占用的绑定码');
-}
-
-/**
- * 取(或创建)一台未绑定设备的绑定码。
- *
- * 这是本控制台与官方智控台最重要的一处行为差异。官方只在设备调用 OTA 接口时
- * 才生成绑定码;而我们自研的固件直接连 WebSocket、从不调 OTA,于是在官方那边
- * 设备永远拿不到码 —— 实测返回的是 10041,设备会念"没有找到该设备的版本信息,
- * 请正确配置 OTA 地址",而用户按提示去配 OTA 也解决不了。
- *
- * 这里改成:服务端为未知设备取配置时就地生成,并把 MAC 记进待绑定列表,
- * 让用户在控制台上直接看到"哪台设备在等绑定、码是多少",不必再去听设备念。
- */
-export function ensureBindCode(conn: Db, mac: string): string {
-  const existing = one<{ code: string }>(
-    conn,
-    "SELECT code FROM pending_devices WHERE mac = ? AND expires_at > datetime('now')",
-    mac,
-  );
-  if (existing) return existing.code;
-
-  run(conn, 'DELETE FROM pending_devices WHERE mac = ?', mac);
-  const code = newBindCode(conn);
-  run(
-    conn,
-    `INSERT INTO pending_devices (mac, code, expires_at)
-     VALUES (?, ?, datetime('now', '+' || ? || ' minutes'))`,
-    mac,
-    code,
-    BIND_CODE_TTL_MINUTES,
-  );
-  return code;
+/** 比较前先各自取摘要:两边长度恒为 32 字节,timingSafeEqual 才能用,也不泄露密钥长度。 */
+function digest(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
 }
 
 export function managerApi(conn: Db): Hono {
@@ -212,7 +177,7 @@ export function managerApi(conn: Db): Hono {
     const secret = one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', SECRET_KEY)?.value;
     const header = c.req.header('authorization') ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (!secret || token !== secret) {
+    if (!secret || !timingSafeEqual(digest(token), digest(secret))) {
       // 照上游:HTTP 200 + body 里的 401。服务端只看 code。
       return c.json(fail(401, '无效的服务器密钥'));
     }
@@ -253,30 +218,54 @@ export function managerApi(conn: Db): Hono {
   });
 
   // ---- 每台设备连上来时拉一次的差异化配置 ----
+  //
+  // 引擎把设备的 Client-Id 请求头原样放进 clientId 转过来,这里据此核验身份。
+  //
+  // 拒绝一律回 10041:它让引擎念一句固定的、不泄露任何信息的提示,并丢弃这条连接的全部消息。
+  // 不回 10042 —— 那要求给一个六位码,而造码只应走 OTA 且受限流;给冒充者造的码也永远用不上
+  // (那个 MAC 已经绑定)。更不要用其他错误码:引擎把它们当通用异常,行为没有验证过。
   app.post('/config/agent-models', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
-      macAddress?: string;
+      macAddress?: unknown;
+      clientId?: unknown;
       selectedModule?: Record<string, string>;
     };
-    const mac = (body.macAddress ?? '').trim();
-    if (!mac) return c.json(fail(CODE_DEVICE_NOT_FOUND, '缺少设备标识'));
+    const mac = canonicalMac(body.macAddress);
+    if (!mac) return c.json(fail(CODE_DEVICE_NOT_FOUND, '缺少或无法识别的设备标识'));
+    const clientId = parseClientId(body.clientId);
+    const hash = clientId ? hashClientId(clientId) : null;
 
-    const device = one<{ mac: string; agent_id: string }>(
-      conn,
-      'SELECT mac, agent_id FROM devices WHERE mac = ?',
-      mac,
-    );
+    const decision = tx(conn, (): { agentId: string } | { bindCode: string } | { refused: true } => {
+      const identity = resolveDevice(conn, mac, hash);
+      switch (identity.kind) {
+        case 'verified':
+          run(conn, "UPDATE devices SET last_connected_at = datetime('now') WHERE mac = ?", mac);
+          return { agentId: identity.agentId };
+        case 'unknown': {
+          // 这里只读不造码。设备没先走 OTA 就直接连进来,说明它不是走新流程的固件,
+          // 回 10041,引擎会念"请正确配置 OTA 地址",对这种情况恰好是对的提示。
+          const code = hash ? findPendingCode(conn, mac, hash) : undefined;
+          return code ? { bindCode: code } : { refused: true };
+        }
+        case 'legacy':
+          recordIdentityEvent(conn, { mac, kind: 'legacy_unverified', source: 'engine', hash });
+          return { refused: true };
+        case 'missing':
+          recordIdentityEvent(conn, { mac, kind: 'missing_identity', source: 'engine', hash: null });
+          return { refused: true };
+        case 'mismatch':
+          recordIdentityEvent(conn, { mac, kind: 'mismatch', source: 'engine', hash });
+          return { refused: true };
+        default:
+          return { refused: true };
+      }
+    });
 
-    if (!device) {
-      // 未绑定:给出绑定码,设备会把它念出来,控制台也会列出来。
-      const code = ensureBindCode(conn, mac);
-      return c.json(fail(CODE_DEVICE_NEED_BIND, code));
-    }
+    if ('refused' in decision) return c.json(fail(CODE_DEVICE_NOT_FOUND, '设备未通过身份校验'));
+    if ('bindCode' in decision) return c.json(fail(CODE_DEVICE_NEED_BIND, decision.bindCode));
 
-    const agent = one<AgentRow>(conn, 'SELECT * FROM agents WHERE id = ?', device.agent_id);
+    const agent = one<AgentRow>(conn, 'SELECT * FROM agents WHERE id = ?', decision.agentId);
     if (!agent) return c.json(fail(CODE_DEVICE_NOT_FOUND, '设备绑定的智能体已不存在'));
-
-    run(conn, "UPDATE devices SET last_connected_at = datetime('now') WHERE mac = ?", mac);
 
     // 服务端已经实例化过同一个模型的类型不必重发。只有 VAD/ASR 值得这样省 ——
     // 它们要加载模型文件,重载代价高;其余模块都是轻量的 HTTP 客户端。
@@ -322,8 +311,8 @@ export function managerApi(conn: Db): Hono {
 
   // ---- 识别结果的替换词 ----
   app.post('/config/correct-words', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { macAddress?: string };
-    const mac = (body.macAddress ?? '').trim();
+    const body = (await c.req.json().catch(() => ({}))) as { macAddress?: unknown };
+    const mac = canonicalMac(body.macAddress);
     if (!mac) return c.json(ok([]));
     const rows = all<{ source: string; target: string }>(
       conn,
@@ -338,12 +327,12 @@ export function managerApi(conn: Db): Hono {
   // ---- 对话记录上报 ----
   app.post('/agent/chat-history/report', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
-      macAddress?: string;
+      macAddress?: unknown;
       sessionId?: string;
       chatType?: number;
       content?: string;
     };
-    const mac = (body.macAddress ?? '').trim();
+    const mac = canonicalMac(body.macAddress);
     const sessionId = (body.sessionId ?? '').trim();
     const chatType = Number(body.chatType);
     const content = body.content ?? '';

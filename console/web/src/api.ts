@@ -114,15 +114,37 @@ export interface Device {
   app_version: string;
   last_connected_at: string | null;
   created_at: string;
+  /** verified = 用绑定码配对过、每次连接都核验身份;legacy = 身份校验上线前绑定,需重新配对才能对话 */
+  identity: 'verified' | 'legacy';
 }
 
+/** 正在等待绑定的设备身份。绑定码只显示在设备屏幕上,这里刻意没有。 */
 export interface PendingDevice {
+  id: number;
   mac: string;
-  code: string;
   board: string;
   app_version: string;
   created_at: string;
+  last_seen_at: string;
   expires_at: string;
+  /** 同一 MAC 下正在等待绑定的身份数。大于 1 说明有别的设备在用这个 MAC。 */
+  same_mac_count: number;
+}
+
+export interface IdentityEvent {
+  id: number;
+  mac: string;
+  kind: 'mismatch' | 'missing_identity' | 'legacy_unverified';
+  source: 'ota' | 'engine';
+  count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface DeviceList {
+  items: Device[];
+  pending: PendingDevice[];
+  events: IdentityEvent[];
 }
 
 export interface Setting {

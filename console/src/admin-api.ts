@@ -13,9 +13,23 @@ import {
   authMode, authorized, clearCookie, isInitialized, issueCookie, login, logout, requireAuth,
   sessionToken, setAdmin,
 } from './auth.ts';
+import { bindByCode, canonicalMac, unbindDevice } from './identity.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
-const macSchema = z.string().regex(/^([0-9A-Za-z]{2}[:-]){5}[0-9A-Za-z]{2}$/u, 'MAC 地址格式不正确');
+
+/** 输错绑定码的限流。计数只在内存里,进程重启即清零 —— 它防的是在线穷举,不是持久封禁。 */
+const BIND_FAILURE_WINDOW_MS = 5 * 60_000;
+const MAX_BIND_FAILURES = 10;
+
+/** 固件只接受 wss:// 的对话服务地址。 */
+function isWssUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'wss:' && url.hostname !== '';
+  } catch {
+    return false;
+  }
+}
 
 const modelTypeSchema = z.enum(MODEL_TYPES as [ModelType, ...ModelType[]]);
 
@@ -123,11 +137,21 @@ export function adminApi(conn: Db): Hono {
   app.put('/settings', async (c) => {
     const parsed = z.record(z.string(), z.string()).safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: '参数格式不正确' }, 400);
+    const ws = parsed.data['server.websocket']?.trim();
+    // 设备拿到 ws:// 或其他形式的地址会拒绝连接并一直停在重试页,在这里就挡住。
+    if (ws !== undefined && ws !== '' && !isWssUrl(ws)) {
+      return c.json({ error: '设备连接地址必须是 wss:// 开头的完整地址' }, 400);
+    }
     tx(conn, () => {
       for (const [key, value] of Object.entries(parsed.data)) {
         // 密钥有专用的轮换接口,不允许从这里改成任意值
         if (key === SECRET_KEY) continue;
-        run(conn, "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = ?", value, key);
+        run(
+          conn,
+          "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = ?",
+          key === 'server.websocket' ? ws : value,
+          key,
+        );
       }
     });
     return c.json({ ok: true });
@@ -357,77 +381,87 @@ export function adminApi(conn: Db): Hono {
   });
 
   // ---- 设备 ----
+  //
+  // 绑定只认设备屏幕上显示的六位码。码对应的是 (MAC, 设备密钥) 这一对,只有拿着设备的人才看得到,
+  // 所以这里的任何响应都不返回绑定码、密钥哈希或哈希指纹 —— 否则控制塔本身就成了冒充者取码的地方。
 
   app.get('/devices', (c) =>
     c.json({
       items: all(
         conn,
         `SELECT d.mac, d.agent_id, d.alias, d.board, d.app_version, d.last_connected_at, d.created_at,
+                CASE WHEN d.secret_hash IS NULL THEN 'legacy' ELSE 'verified' END AS identity,
                 a.name AS agent_name
          FROM devices d LEFT JOIN agents a ON a.id = d.agent_id
          ORDER BY d.last_connected_at DESC, d.created_at DESC`,
       ),
       pending: all(
         conn,
-        `SELECT mac, code, board, app_version, created_at, expires_at
-         FROM pending_devices WHERE expires_at > datetime('now') ORDER BY created_at DESC`,
+        `SELECT p.id, p.mac, p.board, p.app_version, p.created_at, p.last_seen_at, p.expires_at,
+                (SELECT COUNT(*) FROM pending_devices q
+                 WHERE q.mac = p.mac AND q.expires_at > datetime('now')) AS same_mac_count
+         FROM pending_devices p WHERE p.expires_at > datetime('now')
+         ORDER BY p.last_seen_at DESC, p.id DESC`,
+      ),
+      events: all(
+        conn,
+        `SELECT id, mac, kind, source, count, first_seen_at, last_seen_at
+         FROM identity_events ORDER BY last_seen_at DESC, id DESC LIMIT 50`,
       ),
     }),
   );
 
+  let bindFailures: number[] = [];
+
   /**
-   * 绑定。两种入口:
-   *  - 给 code:用户照着设备念的六位数字输入(与官方流程一致)
-   *  - 给 mac:直接从待绑定列表里点"绑定",不必听设备念 —— 这是我们加的
+   * 按设备屏幕上的六位码绑定。
+   *
+   * 不再接受按 MAC 绑定:MAC 是公开的,按它绑定等于谁先来要码就把设备交给谁。
+   * 不指定智能体时,新设备绑到默认智能体,升级前绑定的旧设备保留原来的智能体。
    */
   app.post('/devices/bind', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as unknown;
+    if (typeof body === 'object' && body !== null && 'mac' in body) {
+      return c.json({ error: '只能输入设备屏幕上显示的六位绑定码来绑定' }, 400);
+    }
     const parsed = z
       .object({
-        code: z.string().regex(/^\d{6}$/u).optional(),
-        mac: macSchema.optional(),
-        agent_id: idSchema,
+        code: z.string().regex(/^\d{6}$/u, '绑定码是六位数字'),
+        agent_id: idSchema.optional(),
         alias: z.string().max(64).default(''),
       })
-      .safeParse(await c.req.json().catch(() => ({})));
+      .strict()
+      .safeParse(body);
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
-    const { code, mac, agent_id: agentId, alias } = parsed.data;
-    if (!code && !mac) return c.json({ error: '请提供绑定码或设备 MAC' }, 400);
-    if (!one(conn, 'SELECT 1 FROM agents WHERE id = ?', agentId)) return c.json({ error: '智能体不存在' }, 400);
 
-    const pending = code
-      ? one<{ mac: string; board: string; app_version: string }>(
-          conn,
-          "SELECT mac, board, app_version FROM pending_devices WHERE code = ? AND expires_at > datetime('now')",
-          code,
-        )
-      : one<{ mac: string; board: string; app_version: string }>(
-          conn,
-          "SELECT mac, board, app_version FROM pending_devices WHERE mac = ? AND expires_at > datetime('now')",
-          mac,
-        );
-    if (!pending) return c.json({ error: '绑定码无效或已过期' }, 404);
-    if (one(conn, 'SELECT 1 FROM devices WHERE mac = ?', pending.mac)) {
-      return c.json({ error: '这台设备已经绑定过了' }, 409);
+    const now = Date.now();
+    bindFailures = bindFailures.filter((at) => now - at < BIND_FAILURE_WINDOW_MS);
+    if (bindFailures.length >= MAX_BIND_FAILURES) {
+      const retryAfter = Math.ceil((bindFailures[0]! + BIND_FAILURE_WINDOW_MS - now) / 1000);
+      c.header('Retry-After', String(Math.max(1, retryAfter)));
+      return c.json({ error: '绑定码输错次数过多,请几分钟后再试' }, 429);
     }
 
-    tx(conn, () => {
-      run(
-        conn,
-        'INSERT INTO devices (mac, agent_id, alias, board, app_version) VALUES (?, ?, ?, ?, ?)',
-        pending.mac, agentId, alias, pending.board, pending.app_version,
-      );
-      run(conn, 'DELETE FROM pending_devices WHERE mac = ?', pending.mac);
-    });
-    return c.json({ ok: true, mac: pending.mac });
+    const { code, agent_id: agentId, alias } = parsed.data;
+    if (agentId && !one(conn, 'SELECT 1 FROM agents WHERE id = ?', agentId)) {
+      return c.json({ error: '智能体不存在' }, 400);
+    }
+
+    const result = tx(conn, () => bindByCode(conn, { code, agentId: agentId ?? null, alias }));
+    if (!result.ok) {
+      if (result.status === 404) bindFailures.push(now);
+      return c.json({ error: result.error }, result.status);
+    }
+    return c.json({ ok: true, mac: result.mac });
   });
 
   app.put('/devices/:mac', async (c) => {
-    const mac = c.req.param('mac');
+    const mac = canonicalMac(c.req.param('mac'));
     const parsed = z
       .object({ alias: z.string().max(64).optional(), agent_id: idSchema.optional() })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: '参数不正确' }, 400);
-    if (!one(conn, 'SELECT 1 FROM devices WHERE mac = ?', mac)) return c.json({ error: '设备不存在' }, 404);
+    if (!mac || !one(conn, 'SELECT 1 FROM devices WHERE mac = ?', mac)) return c.json({ error: '设备不存在' }, 404);
     if (parsed.data.agent_id && !one(conn, 'SELECT 1 FROM agents WHERE id = ?', parsed.data.agent_id)) {
       return c.json({ error: '智能体不存在' }, 400);
     }
@@ -436,8 +470,34 @@ export function adminApi(conn: Db): Hono {
     return c.json({ ok: true });
   });
 
+  /** 清除一条待绑定记录。设备若还开着,下次询问时会重新拿到一个码。 */
+  app.delete('/devices/pending/:id', (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id) || !one(conn, 'SELECT 1 FROM pending_devices WHERE id = ?', id)) {
+      return c.json({ error: '这条待绑定记录不存在或已过期' }, 404);
+    }
+    run(conn, 'DELETE FROM pending_devices WHERE id = ?', id);
+    return c.json({ ok: true });
+  });
+
+  /** 解绑。设备的密钥哈希随设备行一起删除,该 MAC 的待绑定记录与身份事件一并清空。 */
   app.delete('/devices/:mac', (c) => {
-    run(conn, 'DELETE FROM devices WHERE mac = ?', c.req.param('mac'));
+    const mac = canonicalMac(c.req.param('mac'));
+    const existed = mac ? tx(conn, () => unbindDevice(conn, mac)) : false;
+    if (!existed) return c.json({ error: '设备不存在' }, 404);
+    return c.json({ ok: true });
+  });
+
+  /** 清除身份异常记录。带 mac 只清这台,不带则全部清除。 */
+  app.delete('/identity-events', (c) => {
+    const raw = c.req.query('mac');
+    if (raw === undefined || raw === '') {
+      run(conn, 'DELETE FROM identity_events');
+      return c.json({ ok: true });
+    }
+    const mac = canonicalMac(raw);
+    if (!mac) return c.json({ error: 'MAC 地址格式不正确' }, 400);
+    run(conn, 'DELETE FROM identity_events WHERE mac = ?', mac);
     return c.json({ ok: true });
   });
 

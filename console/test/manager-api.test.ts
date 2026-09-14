@@ -6,10 +6,16 @@
 
 import { strict as assert } from 'node:assert';
 import { test, beforeEach, describe } from 'node:test';
-import { openMemoryDb, run, type Db } from '../src/db.ts';
+import { randomBytes } from 'node:crypto';
+import { one, openMemoryDb, run, type Db } from '../src/db.ts';
 import { seed, SECRET_KEY, DEFAULT_AGENT_ID } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
 import { getSetting } from '../src/settings.ts';
+import { hashClientId } from '../src/identity.ts';
+
+/** 测试设备的密钥。真设备第一次开机时用硬件随机数生成,放在 Client-Id 请求头里。 */
+const CLIENT_ID = randomBytes(32).toString('hex');
+const newSecret = () => randomBytes(32).toString('hex');
 
 let conn: Db;
 let app: ReturnType<typeof createApp>;
@@ -39,6 +45,18 @@ async function call(path: string, body?: unknown, token = secret) {
   return { status: response.status, json: (await response.json()) as { code: number; msg: string; data: unknown } };
 }
 
+/**
+ * 引擎取某台设备的配置。它把设备的 Client-Id 请求头原样放进 clientId(connection.py 的 get_private_config)。
+ * clientId 传 null 表示请求体里不带这个字段(传 undefined 会落到默认值上)。
+ */
+function agentModels(mac: string, selectedModule: Record<string, string> = {}, clientId: string | null = CLIENT_ID) {
+  return call('/config/agent-models', {
+    macAddress: mac,
+    ...(clientId === null ? {} : { clientId }),
+    selectedModule,
+  });
+}
+
 /** 配齐一套可用的模型与智能体,模拟真实部署。 */
 function seedGateway(): void {
   const models: [string, string, string, Record<string, unknown>][] = [
@@ -63,8 +81,10 @@ function seedGateway(): void {
      WHERE id = ?`, DEFAULT_AGENT_ID);
 }
 
-function bindDevice(mac: string, agentId = DEFAULT_AGENT_ID): void {
-  run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', mac, agentId, '测试设备');
+/** 模拟一台已经用绑定码绑好的设备:库里存的是它密钥的哈希。 */
+function bindDevice(mac: string, agentId = DEFAULT_AGENT_ID, clientId = CLIENT_ID): void {
+  run(conn, 'INSERT INTO devices (mac, agent_id, alias, secret_hash) VALUES (?, ?, ?, ?)',
+    mac, agentId, '测试设备', hashClientId(clientId));
 }
 
 describe('鉴权', () => {
@@ -75,6 +95,8 @@ describe('鉴权', () => {
     const res = await call('/config/server-base', undefined, 'wrong-secret');
     assert.equal(res.status, 200);
     assert.equal(res.json.code, 401);
+    // 比较前先取摘要,长度不同的错误密钥走的是同一条路径
+    assert.equal((await call('/config/server-base', undefined, 'x')).json.code, 401);
   });
 
   test('没有 Authorization 头也一样', async () => {
@@ -88,11 +110,12 @@ describe('鉴权', () => {
     // 前缀,就会把这里一起拦掉 —— 这个用例专门盯住那个错误。
     const response = await app.request('http://localhost/xiaozhi/ota/', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'device-id': 'aa:bb:cc:dd:ee:ff' },
+      headers: { 'content-type': 'application/json', 'device-id': 'aa:bb:cc:dd:ee:ff', 'client-id': CLIENT_ID },
       body: JSON.stringify({ application: { version: '1.0.0' }, board: { type: 'ai-passport' } }),
     });
     assert.equal(response.status, 200);
     const body = (await response.json()) as Record<string, unknown>;
+    assert.equal(body['status'], 'unbound');
     assert.ok(body['server_time'], '应返回 server_time');
   });
 });
@@ -150,35 +173,99 @@ describe('server-base:服务端启动时拉的基础配置', () => {
   });
 });
 
-describe('agent-models:设备连上来时拉的差异化配置', () => {
-  test('未知设备返回 10042,msg 是六位绑定码', async () => {
-    // 这是与官方智控台最重要的行为差异。官方只在设备调过 OTA 后才有绑定码,
-    // 没有时返回 10041;而我们的固件从不调 OTA,于是在官方那边永远绑不上,
-    // 设备只会一遍遍念"请正确配置 OTA 地址"。这里改成就地生成。
-    const { json } = await call('/config/agent-models',
-      { macAddress: 'aa:bb:cc:dd:ee:01', clientId: 'c1', selectedModule: {} });
+describe('agent-models:设备身份', () => {
+  // 引擎只认 0、10041、10042。拒绝一律用 10041:引擎念一句不泄露信息的固定提示并丢弃这条连接的消息。
+
+  /** 让设备走一次 OTA,拿到与这个身份对应的绑定码。 */
+  async function otaCode(mac: string, clientId = CLIENT_ID): Promise<string> {
+    const response = await app.request('http://localhost/xiaozhi/ota/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'device-id': mac, 'client-id': clientId },
+      body: '{}',
+    });
+    return ((await response.json()) as { activation: { code: string } }).activation.code;
+  }
+
+  const events = (mac: string) =>
+    conn.prepare('SELECT kind, source, count FROM identity_events WHERE mac = ? ORDER BY id').all(mac)
+      .map((row) => ({ ...row }));
+
+  test('没走过 OTA 的未知设备返回 10041,且不在这里造码', async () => {
+    // 造码只走 OTA 并受限流。这条路径任何能连上 WebSocket 的人都能触发,不能让它往表里写。
+    const { json } = await agentModels('aa:bb:cc:dd:ee:01');
+    assert.equal(json.code, 10041);
+    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM pending_devices')!.n, 0);
+  });
+
+  test('走过 OTA 的未绑定设备返回 10042,msg 正是它屏幕上的码,且不顺延有效期', async () => {
+    const mac = 'aa:bb:cc:dd:ee:02';
+    const code = await otaCode(mac);
+    run(conn, "UPDATE pending_devices SET expires_at = datetime('now', '+1 minute')");
+    const before = one<{ expires_at: string }>(conn, 'SELECT expires_at FROM pending_devices')!.expires_at;
+
+    const { json } = await agentModels(mac);
     assert.equal(json.code, 10042);
     assert.match(json.msg, /^\d{6}$/u, 'msg 必须正好是六位数字');
+    assert.equal(json.msg, code, '设备念出来的码必须与屏幕上显示的一致');
+    assert.equal(one<{ expires_at: string }>(conn, 'SELECT expires_at FROM pending_devices')!.expires_at, before);
   });
 
-  test('同一台设备重复来问,拿到的是同一个码', async () => {
-    // 否则用户在页面上看到的码和设备刚念过的对不上。
-    const first = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:02', selectedModule: {} });
-    const second = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:02', selectedModule: {} });
-    assert.equal(first.json.msg, second.json.msg);
+  test('同一 MAC 但密钥不同,拿不到别人的码', async () => {
+    const mac = 'aa:bb:cc:dd:ee:03';
+    await otaCode(mac);
+    assert.equal((await agentModels(mac, {}, newSecret())).json.code, 10041);
   });
 
-  test('不同设备拿到不同的码', async () => {
-    const a = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:03', selectedModule: {} });
-    const b = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:04', selectedModule: {} });
-    assert.notEqual(a.json.msg, b.json.msg);
+  test('Client-Id 缺失或是旧固件由 MAC 推出的值时,未知设备返回 10041', async () => {
+    assert.equal((await agentModels('aa:bb:cc:dd:ee:04', {}, null)).json.code, 10041);
+    assert.equal((await agentModels('aa:bb:cc:dd:ee:04', {}, 'xiaodan-ddee04')).json.code, 10041);
   });
 
+  test('已绑定且密钥相符:下发配置并记下连接时间', async () => {
+    bindDevice('aa:bb:cc:dd:ee:05');
+    const { json } = await agentModels('aa:bb:cc:dd:ee:05');
+    assert.equal(json.code, 0);
+    assert.ok(one<{ t: string | null }>(conn, 'SELECT last_connected_at AS t FROM devices')!.t);
+  });
+
+  test('已绑定但密钥不符:10041,记为冒充,同一冒充者重复出现只累加次数', async () => {
+    const mac = 'aa:bb:cc:dd:ee:06';
+    bindDevice(mac);
+    const spoof = newSecret();
+    const first = await agentModels(mac, {}, spoof);
+    await agentModels(mac, {}, spoof);
+    assert.equal(first.json.code, 10041);
+    assert.equal(first.json.data, null, '冒充者拿不到任何配置');
+    assert.deepEqual(events(mac), [{ kind: 'mismatch', source: 'engine', count: 2 }]);
+  });
+
+  test('已绑定但没有出示有效密钥:10041,记为缺少身份', async () => {
+    const mac = 'aa:bb:cc:dd:ee:07';
+    bindDevice(mac);
+    assert.equal((await agentModels(mac, {}, null)).json.code, 10041);
+    assert.equal((await agentModels(mac, {}, 'xiaodan-ddee07')).json.code, 10041);
+    assert.deepEqual(events(mac), [{ kind: 'missing_identity', source: 'engine', count: 2 }]);
+  });
+
+  test('升级前绑定、还没有重新配对的旧设备一律 10041', async () => {
+    // MAC 是公开的,不能把第一个来要的密钥自动认作这台设备。
+    const mac = '4c:11:ae:31:7a:30';
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', mac, DEFAULT_AGENT_ID, 'AI Passport');
+    assert.equal((await agentModels(mac)).json.code, 10041);
+    assert.deepEqual(events(mac), [{ kind: 'legacy_unverified', source: 'engine', count: 1 }]);
+  });
+
+  test('大写或连字符形式的 MAC 与库里的规范形式视为同一台', async () => {
+    bindDevice('aa:bb:cc:dd:ee:08');
+    assert.equal((await agentModels('AA-BB-CC-DD-EE-08')).json.code, 0);
+  });
+});
+
+describe('agent-models:下发的配置', () => {
   test('已绑定设备拿到完整的模块配置', async () => {
     seedGateway();
     bindDevice('aa:bb:cc:dd:ee:10');
-    const { json } = await call('/config/agent-models',
-      { macAddress: 'aa:bb:cc:dd:ee:10', clientId: 'c1', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:10');
     assert.equal(json.code, 0);
     const data = json.data as Record<string, any>;
 
@@ -195,7 +282,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     // 服务端的 TTS provider 一律优先读 private_voice,读不到才回落 voice。
     seedGateway();
     bindDevice('aa:bb:cc:dd:ee:11');
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:11', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:11');
     const tts = (json.data as any)['TTS']['TTS_Gateway'];
     assert.equal(tts['private_voice'], 'Ethan');
     assert.equal(tts['language'], '中文', '语言取音色支持列表的第一个');
@@ -206,10 +293,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     // 的 check_vad_update 也是靠"键在不在"判断要不要重建。
     seedGateway();
     bindDevice('aa:bb:cc:dd:ee:12');
-    const { json } = await call('/config/agent-models', {
-      macAddress: 'aa:bb:cc:dd:ee:12',
-      selectedModule: { VAD: 'VAD_SileroVAD', ASR: 'ASR_Gateway' },
-    });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:12', { VAD: 'VAD_SileroVAD', ASR: 'ASR_Gateway' });
     const data = json.data as Record<string, unknown>;
     assert.equal(data['VAD'], undefined, '相同的 VAD 应被省略');
     assert.equal(data['ASR'], undefined, '相同的 ASR 应被省略');
@@ -220,10 +304,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
   test('服务端持有的是别的模型时照常下发', async () => {
     seedGateway();
     bindDevice('aa:bb:cc:dd:ee:13');
-    const { json } = await call('/config/agent-models', {
-      macAddress: 'aa:bb:cc:dd:ee:13',
-      selectedModule: { VAD: 'VAD_SomethingElse', ASR: 'ASR_SomethingElse' },
-    });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:13', { VAD: 'VAD_SomethingElse', ASR: 'ASR_SomethingElse' });
     const data = json.data as Record<string, any>;
     assert.ok(data['VAD'], '不同的 VAD 必须下发');
     assert.ok(data['ASR'], '不同的 ASR 必须下发');
@@ -233,7 +314,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     run(conn, 'UPDATE agents SET system_prompt = ?, name = ? WHERE id = ?',
       '你叫{{assistant_name}},是一个助手。', '小单', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:14');
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:14', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:14');
     assert.equal((json.data as any)['prompt'], '你叫小单,是一个助手。');
   });
 
@@ -242,7 +323,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     // int(private_config["chat_history_conf"]) 取值,两种都能吃,
     // 但形状要与上游一致,免得将来对比行为时产生困惑。
     bindDevice('aa:bb:cc:dd:ee:15');
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:15', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:15');
     const data = json.data as Record<string, unknown>;
     assert.equal(typeof data['chat_history_conf'], 'number');
     assert.equal(typeof data['device_max_output_size'], 'string');
@@ -254,7 +335,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     bindDevice('aa:bb:cc:dd:ee:16');
     run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
       DEFAULT_AGENT_ID, 'get_time', '{}');
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:16', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:16');
     assert.equal((json.data as any)['plugins'], undefined);
   });
 
@@ -267,7 +348,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
       DEFAULT_AGENT_ID, 'get_weather', '{"api_key":"w-key","default_location":"广州"}');
 
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:17', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:17');
     const plugins = (json.data as any)['plugins'];
     assert.ok(plugins, '应下发 plugins');
     assert.equal(typeof plugins['get_weather'], 'string', '值必须是字符串');
@@ -282,7 +363,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_fc2', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:18');
 
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:18', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:18');
     const intent = (json.data as any)['Intent']['Intent_fc2'];
     assert.deepEqual(intent['functions'], ['get_time', 'get_weather', 'web_search']);
   });
@@ -302,7 +383,7 @@ describe('agent-models:设备连上来时拉的差异化配置', () => {
     run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_llm', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:19');
 
-    const { json } = await call('/config/agent-models', { macAddress: 'aa:bb:cc:dd:ee:19', selectedModule: {} });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:19');
     const llm = (json.data as any)['LLM'];
     assert.ok(llm['LLM_Small'], '辅助模型必须在 LLM 段里');
     assert.ok(llm['LLM_Gateway'], '主模型不能被覆盖掉');

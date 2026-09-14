@@ -2,9 +2,11 @@
 
 import { strict as assert } from 'node:assert';
 import { test, beforeEach, describe } from 'node:test';
+import { randomBytes } from 'node:crypto';
 import { openMemoryDb, one, run, type Db } from '../src/db.ts';
 import { seed, DEFAULT_AGENT_ID } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
+import { hashClientId } from '../src/identity.ts';
 
 let conn: Db;
 let app: ReturnType<typeof createApp>;
@@ -154,75 +156,189 @@ describe('智能体', () => {
 });
 
 describe('设备绑定', () => {
-  /** 让一台设备进入待绑定状态:模拟它连了一次服务端。 */
-  async function makePending(mac: string): Promise<string> {
-    const response = await app.request('http://localhost/xiaozhi/config/agent-models', {
+  const newSecret = () => randomBytes(32).toString('hex');
+
+  /** 模拟一台设备开机后调 OTA:返回它屏幕上会显示的码,以及它的密钥。 */
+  async function makePending(mac: string, clientId = newSecret()) {
+    const response = await app.request('http://localhost/xiaozhi/ota/', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${one<{ value: string }>(conn, "SELECT value FROM settings WHERE key='server.secret'")!.value}`,
-      },
-      body: JSON.stringify({ macAddress: mac, selectedModule: {} }),
+      headers: { 'content-type': 'application/json', 'device-id': mac, 'client-id': clientId },
+      body: JSON.stringify({ application: { version: '0.2.0' }, board: { type: 'ai-passport' } }),
     });
-    return ((await response.json()) as { msg: string }).msg;
+    const body = await json(response);
+    return { status: body.status as string, code: body.activation?.code as string, clientId };
   }
 
-  test('待绑定列表能看到设备与它的码', async () => {
-    // 这正是自建控制台的意义:官方那边要用户去听设备把六位数字念出来。
-    const code = await makePending('aa:bb:cc:dd:ee:10');
-    const list = await json(await api('GET', '/devices'));
-    assert.equal(list.pending.length, 1);
-    assert.equal(list.pending[0].mac, 'aa:bb:cc:dd:ee:10');
-    assert.equal(list.pending[0].code, code);
-  });
-
-  test('用绑定码绑定', async () => {
-    const code = await makePending('aa:bb:cc:dd:ee:11');
-    const response = await api('POST', '/devices/bind', { code, agent_id: DEFAULT_AGENT_ID, alias: '客厅' });
-    assert.equal(response.status, 200);
-    const list = await json(await api('GET', '/devices'));
-    assert.equal(list.items.length, 1);
-    assert.equal(list.items[0].alias, '客厅');
-    assert.equal(list.pending.length, 0, '绑定后应从待绑定列表移除');
-  });
-
-  test('直接用 MAC 绑定,不必输码', async () => {
-    await makePending('aa:bb:cc:dd:ee:12');
-    const response = await api('POST', '/devices/bind', { mac: 'aa:bb:cc:dd:ee:12', agent_id: DEFAULT_AGENT_ID });
-    assert.equal(response.status, 200);
-  });
-
-  test('错误的码返回 404', async () => {
-    await makePending('aa:bb:cc:dd:ee:13');
-    const response = await api('POST', '/devices/bind', { code: '000000', agent_id: DEFAULT_AGENT_ID });
-    assert.equal(response.status, 404);
-  });
-
-  test('绑到不存在的智能体上会被拒绝', async () => {
-    const code = await makePending('aa:bb:cc:dd:ee:14');
-    const response = await api('POST', '/devices/bind', { code, agent_id: 'agent_nope' });
-    assert.equal(response.status, 400);
-  });
-
-  test('同一台设备不能绑两次', async () => {
-    const code = await makePending('aa:bb:cc:dd:ee:15');
-    await api('POST', '/devices/bind', { code, agent_id: DEFAULT_AGENT_ID });
-    const again = await api('POST', '/devices/bind', { mac: 'aa:bb:cc:dd:ee:15', agent_id: DEFAULT_AGENT_ID });
-    assert.notEqual(again.status, 200);
-  });
-
-  test('绑定后设备取配置就能拿到完整内容', async () => {
-    const code = await makePending('aa:bb:cc:dd:ee:16');
-    await api('POST', '/devices/bind', { code, agent_id: DEFAULT_AGENT_ID });
+  /** 引擎替设备取配置。 */
+  async function agentModels(mac: string, clientId: string) {
     const secret = one<{ value: string }>(conn, "SELECT value FROM settings WHERE key='server.secret'")!.value;
     const response = await app.request('http://localhost/xiaozhi/config/agent-models', {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
-      body: JSON.stringify({ macAddress: 'aa:bb:cc:dd:ee:16', selectedModule: {} }),
+      body: JSON.stringify({ macAddress: mac, clientId, selectedModule: {} }),
     });
-    const body = await json(response);
-    assert.equal(body.code, 0, '绑定之后不应再返回 10042');
-    assert.ok(body.data.prompt, '应带上人设');
+    return json(response);
+  }
+
+  const devicePath = (mac: string) => `/devices/${encodeURIComponent(mac)}`;
+
+  test('待绑定列表只有设备信息,不含绑定码与任何密钥材料', async () => {
+    // 码只应出现在设备屏幕上。页面若显示码,任何能打开控制塔的人都能把别人的设备绑走,
+    // 冒充者抢先用同一 MAC 来要的码也会被当成真设备的码。
+    const first = await makePending('aa:bb:cc:dd:ee:10');
+    await makePending('aa:bb:cc:dd:ee:10');
+    const response = await api('GET', '/devices');
+    const text = await response.text();
+    const list = JSON.parse(text);
+
+    assert.equal(list.pending.length, 2);
+    for (const row of list.pending) {
+      assert.equal(row.code, undefined);
+      assert.equal(row.secret_hash, undefined);
+      assert.equal(row.mac, 'aa:bb:cc:dd:ee:10');
+      assert.equal(row.same_mac_count, 2, '同一 MAC 出现多个身份时页面要能提示');
+      assert.ok(Number.isInteger(row.id));
+      assert.ok(row.last_seen_at);
+    }
+    assert.ok(!text.includes(first.code), '响应里出现了绑定码');
+    assert.ok(!text.includes(first.clientId), '响应里出现了设备密钥');
+    assert.ok(!/[0-9a-f]{64}/u.test(text), '响应里出现了疑似密钥哈希的串');
+    assert.ok(!text.includes('client_fp'), '响应里出现了哈希指纹');
+  });
+
+  test('输入屏幕上的码完成绑定,之后只有这台设备能取到配置', async () => {
+    const mac = 'aa:bb:cc:dd:ee:11';
+    const device = await makePending(mac);
+    const response = await api('POST', '/devices/bind', { code: device.code, agent_id: DEFAULT_AGENT_ID, alias: '客厅' });
+    assert.equal(response.status, 200);
+
+    const list = await json(await api('GET', '/devices'));
+    assert.equal(list.items.length, 1);
+    assert.equal(list.items[0].alias, '客厅');
+    assert.equal(list.items[0].identity, 'verified');
+    assert.equal(list.items[0].secret_hash, undefined, '绝不返回密钥哈希');
+    assert.equal(list.pending.length, 0, '绑定后应从待绑定列表移除');
+
+    const own = await agentModels(mac, device.clientId);
+    assert.equal(own.code, 0, '绑定之后不应再返回 10042');
+    assert.ok(own.data.prompt, '应带上人设');
+    assert.equal((await agentModels(mac, newSecret())).code, 10041, '同 MAC 的其他密钥拿不到配置');
+  });
+
+  test('不指定智能体时绑到默认智能体', async () => {
+    const device = await makePending('aa:bb:cc:dd:ee:12');
+    assert.equal((await api('POST', '/devices/bind', { code: device.code })).status, 200);
+    assert.equal((await json(await api('GET', '/devices'))).items[0].agent_id, DEFAULT_AGENT_ID);
+  });
+
+  test('不再支持按 MAC 绑定', async () => {
+    const device = await makePending('aa:bb:cc:dd:ee:13');
+    const byMac = await api('POST', '/devices/bind', { mac: 'aa:bb:cc:dd:ee:13', agent_id: DEFAULT_AGENT_ID });
+    assert.equal(byMac.status, 400);
+    const both = await api('POST', '/devices/bind', { code: device.code, mac: 'aa:bb:cc:dd:ee:13' });
+    assert.equal(both.status, 400, '带着 mac 字段一律拒绝,不能悄悄忽略');
+    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM devices')!.n, 0);
+  });
+
+  test('错误的码返回 404', async () => {
+    const device = await makePending('aa:bb:cc:dd:ee:14');
+    const wrong = device.code === '000000' ? '000001' : '000000';
+    const response = await api('POST', '/devices/bind', { code: wrong, agent_id: DEFAULT_AGENT_ID });
+    assert.equal(response.status, 404);
+  });
+
+  test('绑到不存在的智能体上会被拒绝', async () => {
+    const device = await makePending('aa:bb:cc:dd:ee:15');
+    const response = await api('POST', '/devices/bind', { code: device.code, agent_id: 'agent_nope' });
+    assert.equal(response.status, 400);
+  });
+
+  test('已带身份的设备不能被另一条待绑定记录覆盖', async () => {
+    const mac = 'aa:bb:cc:dd:ee:16';
+    const device = await makePending(mac);
+    await api('POST', '/devices/bind', { code: device.code });
+    // 正常流程里设备绑定后就拿不到新码了;这里直接插一条,守住"必须先解绑"这条规则。
+    run(conn,
+      "INSERT INTO pending_devices (mac, secret_hash, code, expires_at) VALUES (?, ?, '654321', datetime('now', '+10 minutes'))",
+      mac, hashClientId(newSecret()));
+    const again = await api('POST', '/devices/bind', { code: '654321' });
+    assert.equal(again.status, 409);
+    assert.equal((await agentModels(mac, device.clientId)).code, 0, '原设备不受影响');
+  });
+
+  test('升级前绑定的旧设备输码后原地重新配对,别名与智能体保留', async () => {
+    const mac = '4c:11:ae:31:7a:30';
+    const spare = await json(await api('POST', '/agents', { name: '备用' }));
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', mac, spare.id, '书房');
+    assert.equal((await json(await api('GET', '/devices'))).items[0].identity, 'legacy');
+
+    const device = await makePending(mac);
+    assert.equal(device.status, 'unbound');
+    assert.equal((await api('POST', '/devices/bind', { code: device.code })).status, 200);
+
+    const list = await json(await api('GET', '/devices'));
+    assert.equal(list.items.length, 1);
+    assert.equal(list.items[0].identity, 'verified');
+    assert.equal(list.items[0].alias, '书房');
+    assert.equal(list.items[0].agent_id, spare.id);
+    assert.equal((await agentModels(mac, device.clientId)).code, 0);
+  });
+
+  test('解绑清除设备、待绑定记录与身份事件;未知设备返回 404', async () => {
+    const mac = 'aa:bb:cc:dd:ee:17';
+    const device = await makePending(mac);
+    await api('POST', '/devices/bind', { code: device.code });
+    assert.equal((await makePending(mac)).status, 'identity_mismatch');
+    assert.equal((await json(await api('GET', '/devices'))).events.length, 1);
+
+    assert.equal((await api('DELETE', devicePath(mac))).status, 200);
+    const list = await json(await api('GET', '/devices'));
+    assert.equal(list.items.length, 0);
+    assert.equal(list.events.length, 0);
+    assert.equal((await agentModels(mac, device.clientId)).code, 10041, '解绑后原设备需要重新输码');
+
+    assert.equal((await api('DELETE', devicePath(mac))).status, 404);
+    assert.equal((await api('DELETE', devicePath('not-a-mac'))).status, 404);
+  });
+
+  test('身份异常可见、不含哈希指纹,可以清除', async () => {
+    const mac = 'aa:bb:cc:dd:ee:18';
+    const device = await makePending(mac);
+    await api('POST', '/devices/bind', { code: device.code });
+    const spoof = newSecret();
+    await makePending(mac, spoof);
+    await makePending(mac, spoof);
+
+    const events = (await json(await api('GET', '/devices'))).events;
+    assert.equal(events.length, 1);
+    assert.equal(events[0].mac, mac);
+    assert.equal(events[0].kind, 'mismatch');
+    assert.equal(events[0].source, 'ota');
+    assert.equal(events[0].count, 2);
+    assert.equal(events[0].client_fp, undefined);
+
+    assert.equal((await api('DELETE', '/identity-events?mac=bad')).status, 400);
+    assert.equal((await api('DELETE', `/identity-events?mac=${encodeURIComponent(mac)}`)).status, 200);
+    assert.equal((await json(await api('GET', '/devices'))).events.length, 0);
+  });
+
+  test('可以清除单条待绑定记录', async () => {
+    await makePending('aa:bb:cc:dd:ee:19');
+    const [row] = (await json(await api('GET', '/devices'))).pending;
+    assert.equal((await api('DELETE', `/devices/pending/${row.id}`)).status, 200);
+    assert.equal((await json(await api('GET', '/devices'))).pending.length, 0);
+    assert.equal((await api('DELETE', `/devices/pending/${row.id}`)).status, 404);
+  });
+
+  test('连续输错绑定码会被限流,限流期间正确的码也不接受', async () => {
+    const device = await makePending('aa:bb:cc:dd:ee:1a');
+    const wrong = device.code === '000000' ? '000001' : '000000';
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await api('POST', '/devices/bind', { code: wrong })).status, 404);
+    }
+    const limited = await api('POST', '/devices/bind', { code: device.code });
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get('retry-after')) > 0);
   });
 });
 
@@ -239,6 +355,14 @@ describe('系统参数', () => {
     const body = await json(await api('GET', '/settings'));
     const item = body.items.find((row: any) => row.key === 'server.websocket');
     assert.equal(item.value, 'wss://example/xiaozhi/v1/');
+  });
+
+  test('设备连接地址只接受 wss://', async () => {
+    // 固件拒收其他形式的地址,填错了设备只会一直停在重试页。
+    for (const bad of ['ws://example/xiaozhi/v1/', 'https://example/xiaozhi/v1/', 'example/xiaozhi/v1/']) {
+      assert.equal((await api('PUT', '/settings', { 'server.websocket': bad })).status, 400, bad);
+    }
+    assert.equal((await api('PUT', '/settings', { 'server.websocket': '' })).status, 200, '允许清空');
   });
 
   test('不能从通用接口改密钥', async () => {

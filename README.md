@@ -49,17 +49,33 @@ against the Python code that consumes it, and 56 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
-## Binding codes: where this differs from upstream
+## Binding a device: only whoever holds it can bind it
 
-Upstream only mints a binding code when a device calls the **OTA endpoint**. Purpose-built
-firmware commonly connects straight to the WebSocket and never calls OTA, so the device
-never receives a code. The endpoint returns "device not found", the device repeatedly says
-"no firmware information found, please configure the OTA address correctly", and following
-that instruction does not fix anything.
+A device's MAC travels in clear text in Wi-Fi frames, so anyone nearby can read it. It cannot
+serve as an identity. This console works as follows:
 
-This console mints the code **when the server asks for an unknown device's configuration**
-and records the device in a *pending* list. You bind it with one click in the UI rather
-than listening for six spoken digits. The type-in-the-code flow still works too.
+1. On first boot the device generates a 32-byte secret from the hardware random number
+   generator, keeps it in flash, and sends it in the `Client-Id` header on every request. The
+   console stores only a prefixed SHA-256 of it. The UUID that stock xiaozhi firmware saves is
+   accepted the same way.
+2. Once online, the device calls `POST /xiaozhi/ota/` first. While unbound the reply is
+   `status: unbound` with a six-digit binding code, and **the code is shown only on the
+   device's screen**. The code belongs to the (MAC, secret) pair: an impostor asking with the
+   same MAC receives a different code.
+3. Type the code from the screen into the console's Devices page. The page never lists codes
+   and cannot bind by MAC; ten wrong codes within five minutes trigger a temporary limit.
+4. After binding, OTA replies `status: bound` with the conversation service address. The
+   engine forwards `clientId` each time it fetches configuration and the console checks the
+   hash. A mismatch always returns 10041 and records an identity event on the Devices page.
+
+Devices bound before identity checks existed have no hash and are marked *needs re-pairing*:
+flash the new firmware, boot, and type the code the screen shows. Name and agent are kept.
+A device that was factory-reset or had its flash erased generates a new secret; unbind it on
+the page and enter its new code.
+
+OTA always answers HTTP 200 with a top-level `status`: `bound`, `unbound`,
+`identity_mismatch`, `invalid_request`, `rate_limited` or `unavailable`. See
+`console/src/ota.ts`, `console/src/identity.ts` and `console/test/ota.test.ts`.
 
 ## Layout
 
@@ -69,8 +85,10 @@ console/            the console (Node + Vue)
     manager-api.ts    ← the seven endpoints the server calls; the core of the project
     ota.ts            ← device OTA / activation (compatible with stock xiaozhi firmware)
     admin-api.ts      ← management endpoints used by the UI
+    identity.ts       ← device identity: secret hashes, binding codes, identity events
     catalog.ts        ← provider and plugin catalogue (code constants, not database rows)
-    schema.sql        ← all 10 tables
+    schema.sql        ← v0 baseline schema
+    migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
     cli.ts            ← CLI: set a password, import keys from an old config
   web/                frontend
   test/               contract tests
@@ -119,8 +137,8 @@ cp server/config.api.yaml /opt/xiaodan/data/.config.yaml
 docker compose restart xiaodan-server
 ```
 
-The server log printing 从API读取配置 confirms it worked. Devices then announce a binding
-code, or you bind them directly from the pending list.
+The server log printing 从API读取配置 confirms it worked. Each device then shows a six-digit
+binding code on its screen; enter it on the console's Devices page.
 
 Rolling back is swapping `.config.yaml` back to the single-module version and restarting;
 the console can keep running.
