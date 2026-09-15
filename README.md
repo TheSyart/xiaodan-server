@@ -116,14 +116,19 @@ build fails if any anchor is missing:
 - `core/connection.py`: the device secret in the header log line becomes `<redacted>`.
 - `core/connection.py`: replies that come through the `direct_answer` virtual tool now send an emotion message. With
   function calling on, most replies take that path, and upstream sends no emotion there at all.
-- `core/providers/llm/openai/openai.py`: DeepSeek sometimes writes tool calls as DSML text (`<｜DSML｜function_calls>` ...)
-  inside the reply instead of structured `tool_calls`, so upstream spoke the markup and ran no tool. The provider is
-  wrapped (`server/engine/xiaodan_tool_text.py`): DSML blocks become structured calls and `direct_answer` text streams as
-  it arrives, while DSML blocks in replies without tools are removed. Each conversion or removal logs a warning.
+- `core/providers/llm/openai/openai.py`: models sometimes write tool calls as text inside the reply instead of structured
+  `tool_calls`. Two forms have been seen, DeepSeek DSML (`<｜DSML｜function_calls>` ...) and
+  `<tool_call>get_weather</tool_call>`, and upstream spoke the markup and ran no tool. The provider is
+  wrapped (`server/engine/xiaodan_tool_text.py`): both kinds of block become structured calls and DSML `direct_answer`
+  text streams as it arrives, while such blocks in replies without tools are removed. Each conversion or removal logs a
+  warning.
+
+The custom Omni TTS provider returns 50 ms of silence for a fragment with no letter, digit or Chinese character. Otherwise
+the request would contain only the read-aloud instruction, and the model would speak the instruction itself.
 
 New installations default to function calling with these three plugins ticked. Existing installations are left alone:
 switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
-function calling: OpenAI `tools` with streamed `tool_calls`, or the DSML text described above.
+function calling: OpenAI `tools` with streamed `tool_calls`, or one of the text forms described above.
 
 ## Layout
 
@@ -143,9 +148,9 @@ console/            the console (Node + Vue)
   test/               contract tests
 server/             companion files for the xiaozhi server
   providers/          custom gateway ASR / TTS providers
-  engine/             module added to the engine: turns DSML text tool calls into structured calls
+  engine/             module added to the engine: turns tool calls written as text into structured calls
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
-  tests/              unit tests for the plugins and the DSML conversion (standard library only) and two image smoke scripts
+  tests/              unit tests for the plugins and the tool-call text conversion (standard library only) and two image smoke scripts
   prompts/            prompt template
   config.api.yaml     API-mode configuration template
 ```

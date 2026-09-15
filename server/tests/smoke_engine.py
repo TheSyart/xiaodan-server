@@ -4,7 +4,7 @@
 
 证明单元测试证明不了的那部分:镜像里的 openai provider 确实打上了包装;真实的 LLMProvider 在引擎的
 Python 3.10 上把分块到来的 DSML 转成工具调用,经引擎自己的 _merge_tool_calls 合并后名字与参数正确;
-direct_answer 的文字能被引擎的 _extract_direct_answer_response 取出;不带工具的 response 删掉了 DSML 块。
+direct_answer 的文字能被引擎的 _extract_direct_answer_response 取出;不带工具的 response 删掉了 DSML 块;<tool_call> 标签同样转成工具调用;语音合成对没有可朗读文字的片段给静音。
 模型客户端换成假的,不发任何网络请求。
 """
 
@@ -86,6 +86,14 @@ assert calls[0]["id"], "工具调用 id 不能为空"
 spoken, calls = call_with_functions(DIRECT)
 assert spoken == "" and [call["name"] for call in calls] == ["direct_answer"], (spoken, calls)
 assert ConnectionHandler._extract_direct_answer_response(calls[0]["arguments"]) == ANSWER, calls
+
+spoken, calls = call_with_functions("<tool_call>get_weather</tool_call>")
+assert spoken == "" and [call["name"] for call in calls] == ["get_weather"], (spoken, calls)
+assert json.loads(calls[0]["arguments"]) == {}, calls
+
+from core.providers.tts.gateway_omni_tts import speakable  # noqa: E402
+
+assert not speakable("") and not speakable("<> ,。!\n") and speakable("今天") and speakable("27"), "可朗读判断不对"
 
 completions.text = "前面" + WEATHER + "后面"
 plain = "".join(provider.response("smoke", dialogue))

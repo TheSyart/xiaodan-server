@@ -109,7 +109,8 @@ DIRECT = block(invoke("direct_answer", param("response", ANSWER)))
 
 class PlainTextTest(unittest.TestCase):
     def test_plain_text_passes_unchanged(self):
-        for text in ["今天天气不错。", "a < b 并且 c > d", "结尾是个小于号 <", "<｜看起来像但不是", "x<|y", "<｜DS 不是标记"]:
+        for text in ["今天天气不错。", "a < b 并且 c > d", "结尾是个小于号 <", "<｜看起来像但不是", "x<|y", "<｜DS 不是标记",
+                     "<tool 不是标记", "结尾 <to"]:
             for chunks in chunkings(text):
                 got, calls, items, _ = run(chunks)
                 self.assertEqual(got, text, chunks)
@@ -275,6 +276,73 @@ class DirectAnswerTest(unittest.TestCase):
         self.assertEqual(json.loads(calls[0]["arguments"]), {"response": "我查一下"})
 
 
+class ToolCallTagTest(unittest.TestCase):
+    def assert_call(self, source, name, arguments, expect_text=""):
+        for chunks in chunkings(source):
+            text, calls, items, logs = run(chunks)
+            self.assertEqual(text, expect_text, chunks)
+            self.assertEqual([call["name"] for call in calls], [name], chunks)
+            self.assertEqual(json.loads(calls[0]["arguments"]), arguments)
+            self.assertTrue(calls[0]["id"].startswith("call_"))
+            for content, _ in items:
+                self.assertNotIn("tool_call", (content or "").lower(), chunks)
+                self.assertNotIn("<", content or "", chunks)
+            self.assertTrue(logs)
+
+    def test_bare_function_name(self):
+        # 2026-09-15 生产上的原样:标签里只有函数名
+        self.assert_call("<tool_call>get_weather</tool_call>", "get_weather", {})
+
+    def test_json_bodies(self):
+        self.assert_call('<tool_call>\n{"name": "get_weather", "arguments": {"location": "北京"}}\n</tool_call>',
+                         "get_weather", {"location": "北京"})
+        self.assert_call('<tool_call>{"name": "set_volume", "arguments": "{\\"level\\": 60}"}</tool_call>',
+                         "set_volume", {"level": 60})
+        self.assert_call('<tool_call>{"function": {"name": "show_calendar", "arguments": {}}}</tool_call>',
+                         "show_calendar", {})
+
+    def test_call_syntax(self):
+        self.assert_call('<tool_call>get_weather({"location": "上海"})</tool_call>', "get_weather", {"location": "上海"})
+        self.assert_call('<tool_call>get_weather(location="上海")</tool_call>', "get_weather", {"location": "上海"})
+        self.assert_call('<tool_call>set_volume {"level": 30}</tool_call>', "set_volume", {"level": 30})
+
+    def test_tolerant_tags(self):
+        self.assert_call("< TOOL_CALL >get_weather< / tool_call >", "get_weather", {})
+
+    def test_text_before_and_after(self):
+        self.assert_call("好的。<tool_call>get_weather</tool_call>马上", "get_weather", {}, "好的。马上")
+
+    def test_two_blocks_keep_order(self):
+        for chunks in chunkings("<tool_call>get_weather</tool_call><tool_call>show_calendar</tool_call>"):
+            _, calls, _, _ = run(chunks)
+            self.assertEqual([call["name"] for call in calls], ["get_weather", "show_calendar"], chunks)
+
+    def test_unterminated_at_end_of_stream(self):
+        self.assert_call("<tool_call>get_weather", "get_weather", {})
+
+    def test_unparseable_block_is_dropped(self):
+        for chunks in chunkings("<tool_call>???</tool_call>好的"):
+            text, calls, _, logs = run(chunks)
+            self.assertEqual(text, "好的", chunks)
+            self.assertEqual(calls, [])
+            self.assertTrue(any("丢弃" in line for line in logs))
+
+    def test_nothing_spoken_before_the_tag_completes(self):
+        # 半个标签一旦流出去就会被送去合成,念成怪声或让朗读指令本身被念出来
+        dsml = tt.DsmlToolCallFilter()
+        spoken = []
+        for char in "<tool_call>get_weather</tool_call>":
+            spoken += [content for content, _ in dsml.feed(char) if content]
+        spoken += [content for content, _ in dsml.finish() if content]
+        self.assertEqual(spoken, [])
+
+    def test_mixed_with_dsml(self):
+        for chunks in chunkings("<tool_call>show_calendar</tool_call>" + WEATHER):
+            _, calls, _, _ = run(chunks)
+            self.assertEqual([call["name"] for call in calls], ["show_calendar", "get_weather"], chunks)
+            self.assertEqual(len({call["id"] for call in calls}), 2)
+
+
 class StripTextTest(unittest.TestCase):
     def test_block_removed_from_plain_replies(self):
         logs = []
@@ -282,6 +350,10 @@ class StripTextTest(unittest.TestCase):
             got = "".join(tt.strip_text_stream(iter(chunks), log=logs.append))
             self.assertEqual(got, "前面后面", chunks)
         self.assertTrue(any("丢弃" in line for line in logs))
+
+    def test_tool_call_tag_removed_from_plain_replies(self):
+        for chunks in chunkings("前面<tool_call>get_weather</tool_call>后面"):
+            self.assertEqual("".join(tt.strip_text_stream(iter(chunks))), "前面后面", chunks)
 
     def test_plain_replies_unchanged(self):
         for chunks in chunkings("普通的回复 a < b"):

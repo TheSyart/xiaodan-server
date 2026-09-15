@@ -93,12 +93,14 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 
 - `core/connection.py`:请求头日志里的设备密钥换成 `<redacted>`。
 - `core/connection.py`:模型经 `direct_answer` 虚拟工具回答时补发情绪消息。开启函数调用后大多数回答走这条路,上游在这里一条情绪都不发。
-- `core/providers/llm/openai/openai.py`:DeepSeek 有时把工具调用写成 DSML 文本(`<｜DSML｜function_calls>` …)放进正文,
-  上游只认结构化的 `tool_calls`,于是标记被念出来、工具一个也不执行。provider 外面包了一层(`server/engine/xiaodan_tool_text.py`),
-  把 DSML 块转成结构化调用,`direct_answer` 的文字边收边交;不带工具的回复里出现的 DSML 块直接删掉。每次转换或删除都在引擎日志里记一条警告。
+- `core/providers/llm/openai/openai.py`:模型有时把工具调用写成文本放进正文,见过 DeepSeek 的 DSML(`<｜DSML｜function_calls>` …)
+  与 `<tool_call>get_weather</tool_call>` 两种,上游只认结构化的 `tool_calls`,于是标记被念出来、工具一个也不执行。provider 外面包了一层(`server/engine/xiaodan_tool_text.py`),
+  把这两种块转成结构化调用,DSML 里 `direct_answer` 的文字边收边交;不带工具的回复里出现的块直接删掉。每次转换或删除都在引擎日志里记一条警告。
+
+自写的 Omni 语音合成遇到没有字母、数字或汉字的片段时直接给 50 毫秒静音:否则发过去的只剩"逐字朗读"那句指令,模型会把指令本身念出来。
 
 新装的实例默认就是函数调用并勾选这三个插件。已有实例不会被改动:在「智能体」页把工具调用切到「函数调用」并勾选即可。
-所用模型必须支持 function calling:OpenAI 的 `tools` 与流式 `tool_calls`,或者上面这种 DSML 文本。
+所用模型必须支持 function calling:OpenAI 的 `tools` 与流式 `tool_calls`,或者上面那两种写在正文里的调用文本。
 
 ## 目录
 
@@ -118,9 +120,9 @@ console/            控制台(Node + Vue)
   test/               契约测试
 server/             小智服务端的配套文件
   providers/          自写的网关 ASR / TTS provider
-  engine/             补进引擎的模块:把 DSML 文本工具调用转成结构化调用
+  engine/             补进引擎的模块:把写在正文里的工具调用文本转成结构化调用
   plugins/            自写的插件:日历、天气、音量,以及覆盖上游的天气与告别插件
-  tests/              插件与 DSML 转换的单元测试(只用标准库)与两个镜像冒烟脚本
+  tests/              插件与工具调用文本转换的单元测试(只用标准库)与两个镜像冒烟脚本
   prompts/            提示词模板
   config.api.yaml     api 模式的配置模板
 ```

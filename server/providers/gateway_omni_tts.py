@@ -28,6 +28,7 @@ import base64
 import io
 import json
 import os
+import re
 import wave
 from typing import Optional
 
@@ -38,6 +39,14 @@ from core.providers.tts.base import TTSProviderBase
 
 TAG = __name__
 logger = setup_logging()
+
+# 至少有一个字母、数字或汉字才值得合成。只剩标点、空白或被清洗掉的标记时,
+# 发给 Omni 的就只有前面那句"请逐字朗读…"的指令,它会把指令本身念出来。
+_SPEAKABLE = re.compile(r"[0-9A-Za-z\u3400-\u9fff\uf900-\ufaff]")
+
+
+def speakable(text) -> bool:
+    return bool(text) and _SPEAKABLE.search(text) is not None
 
 
 class TTSProvider(TTSProviderBase):
@@ -130,9 +139,23 @@ class TTSProvider(TTSProviderBase):
             w.writeframes(pcm)
         return buf.getvalue()
 
+    def _silence(self) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.pcm_sample_rate)
+            w.writeframes(b"\x00\x00" * (self.pcm_sample_rate // 20))   # 50 毫秒
+        return buf.getvalue()
+
     async def text_to_speak(self, text, output_file):
         try:
-            audio = self._synthesize(text)
+            if speakable(text):
+                audio = self._synthesize(text)
+            else:
+                # 返回静音而不是 None:返回 None 会让上游重试五次再报"语音生成失败",句子流程也会断
+                logger.bind(tag=TAG).info(f"没有可朗读的文字,用静音代替: {text!r}")
+                audio = self._silence()
             if not audio:
                 return None
             if output_file:
