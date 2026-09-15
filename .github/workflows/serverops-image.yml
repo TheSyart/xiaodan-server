@@ -195,9 +195,12 @@ jobs:
 
           # 自写插件按引擎自己的方式导入并真正调用一次(说明见 server/tests/smoke_plugins.py 开头)。
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_plugins.py
-          # 对 core/connection.py 的两处修补都在镜像里生效
+          # 对上游的三处修补都在镜像里生效
           docker exec xiaodan-engine-smoke grep -q "'<redacted>' if k.lower()" core/connection.py
           docker exec xiaodan-engine-smoke grep -q 'textUtils.get_emotion(self, da_text)' core/connection.py
+          docker exec xiaodan-engine-smoke grep -q '_xd_patched_response_with_functions' core/providers/llm/openai/openai.py
+          # DSML 文本工具调用经真实的 openai provider 与引擎的合并逻辑走一遍(说明见 server/tests/smoke_engine.py 开头)
+          docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_engine.py
 
       - name: Record trusted build proof (console)
         shell: bash

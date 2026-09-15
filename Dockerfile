@@ -95,8 +95,10 @@ COPY server/plugins/show_calendar.py plugins_func/functions/show_calendar.py
 COPY server/plugins/get_weather.py plugins_func/functions/get_weather.py
 COPY server/plugins/set_volume.py plugins_func/functions/set_volume.py
 COPY server/plugins/handle_exit_intent.py plugins_func/functions/handle_exit_intent.py
+# DeepSeek 以 DSML 文本给出工具调用时的转换模块,由下面第 3 处修补引用(原理见文件开头)。
+COPY server/engine/xiaodan_tool_text.py core/utils/xiaodan_tool_text.py
 
-# 对上游 core/connection.py 的两处精确修补。每处都要求找到恰好一处原文,找不到就让构建失败:
+# 对上游的三处精确修补。每处都要求找到恰好一处原文,找不到就让构建失败:
 # 换上游版本后修补悄悄失效,比构建失败危险得多。修补后的代码已在上游同一提交的源码上编译验证。
 #
 # 1. 上游在每条连接建立时把全部请求头打进 INFO 日志。其中 Client-Id 是设备密钥,控制塔据它核验设备身份;
@@ -104,19 +106,22 @@ COPY server/plugins/handle_exit_intent.py plugins_func/functions/handle_exit_int
 # 2. 开启工具调用(Intent 为 function_call)后,引擎给模型加了一个 direct_answer 虚拟工具,普通回答大多从它的参数里流出。
 #    上游只在模型直接输出正文时发情绪消息,走 direct_answer 就一条也不发,设备上的表情永远停在默认值。
 #    在提取 direct_answer 文本的地方补上与正文路径相同的一段:一轮只发一次,尊重设备在 hello 里声明的 emoji 开关。
+# 3. 模型网关背后的 DeepSeek 会把工具调用写成 DSML 文本放在正文里,而不是 delta.tool_calls。引擎只认后者,
+#    于是标记被念出来、写进对话记录,工具一个也没执行。在 openai provider 模块末尾把 response_with_functions
+#    包一层,把 DSML 块转成结构化的工具调用;不带工具的 response 同样包一层,只删掉 DSML 块。
 RUN python - <<'PY'
 import pathlib
 import py_compile
 
-path = pathlib.Path("core/connection.py")
-source = path.read_text(encoding="utf-8")
 
-
-def replace_once(text, old, new, what):
+def replace_once(text, old, new, what, where="core/connection.py"):
     if text.count(old) != 1:
-        raise SystemExit(f"core/connection.py 里找不到恰好一处{what},上游可能改了写法,请重新确认修补方式")
+        raise SystemExit(f"{where} 里找不到恰好一处{what},上游可能改了写法,请重新确认修补方式")
     return text.replace(old, new)
 
+
+path = pathlib.Path("core/connection.py")
+source = path.read_text(encoding="utf-8")
 
 source = replace_once(
     source,
@@ -142,6 +147,51 @@ source = replace_once(
 
 path.write_text(source, encoding="utf-8")
 py_compile.compile(str(path), doraise=True)
+
+provider_path = pathlib.Path("core/providers/llm/openai/openai.py")
+provider = provider_path.read_text(encoding="utf-8")
+for needle, what in (
+    ("\nclass LLMProvider(", "LLMProvider 类"),
+    ("\n    def response_with_functions(self", "response_with_functions 方法"),
+    ("\n    def response(self", "response 方法"),
+    ("\nTAG = __name__\n", "模块级 TAG"),
+    ("\nlogger = setup_logging()\n", "模块级 logger"),
+):
+    replace_once(provider, needle, needle, what, where=str(provider_path))
+if "_xd_patched_response" in provider:
+    raise SystemExit(f"{provider_path} 已经修补过,不应重复修补")
+provider += '''
+
+# ---- xiaodan-server 追加:DeepSeek 以 DSML 文本给出的工具调用转成结构化调用(见 core/utils/xiaodan_tool_text.py) ----
+import functools as _xd_functools
+
+from core.utils.xiaodan_tool_text import strip_text_stream as _xd_strip, wrap_function_stream as _xd_wrap
+
+_xd_response_with_functions = LLMProvider.response_with_functions
+_xd_response = LLMProvider.response
+
+
+def _xd_log(message):
+    logger.bind(tag=TAG).warning(message)
+
+
+@_xd_functools.wraps(_xd_response_with_functions)
+def _xd_patched_response_with_functions(self, *args, **kwargs):
+    return _xd_wrap(_xd_response_with_functions(self, *args, **kwargs), log=_xd_log)
+
+
+@_xd_functools.wraps(_xd_response)
+def _xd_patched_response(self, *args, **kwargs):
+    return _xd_strip(_xd_response(self, *args, **kwargs), log=_xd_log)
+
+
+_xd_patched_response_with_functions.xiaodan_dsml = True
+_xd_patched_response.xiaodan_dsml = True
+LLMProvider.response_with_functions = _xd_patched_response_with_functions
+LLMProvider.response = _xd_patched_response
+'''
+provider_path.write_text(provider, encoding="utf-8")
+py_compile.compile(str(provider_path), doraise=True)
 PY
 
 RUN set -eux; \
@@ -163,7 +213,7 @@ RUN set -eux; \
     find /opt/xiaozhi-esp32-server -name __pycache__ -type d -prune -exec rm -rf {} +; \
     python -m compileall -q /opt/xiaozhi-esp32-server/app.py /opt/xiaozhi-esp32-server/config \
       /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/plugins_func || true; \
-    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py']]"; \
+    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py']]"; \
     test -s /opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt
 
 FROM debian:trixie-slim AS engine

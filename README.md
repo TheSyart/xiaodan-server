@@ -36,7 +36,7 @@ It also fixes one upstream design problem; see **Binding codes** below.
 
 In **API mode** the xiaozhi server takes its configuration over HTTP instead of from a
 local YAML file. It depends on exactly seven endpoints, all implemented here, so **the
-server needs no code changes for the configuration interface** (the image separately carries plugins and two
+server needs no code changes for the configuration interface** (the image separately carries plugins and three
 patches unrelated to it; see the tools section).
 
 ```
@@ -110,14 +110,20 @@ temperatures are integers from -40 to 60; `hold_s` is how long the screen stays 
 truncation rules are documented at the top of `server/plugins/xiaodan_cards.py`, and the firmware validates the same ranges.
 
 The prompt template asks for one emoji at the start of every reply. The engine turns it into an emotion message for the
-device and strips it from subtitles and speech. The image also carries two exact patches to upstream
-`core/connection.py`, and the build fails if either anchor is missing: the device secret in the header log line becomes
-`<redacted>`, and replies that come through the `direct_answer` virtual tool now send an emotion message. With function
-calling on, most replies take that path, and upstream sends no emotion there at all.
+device and strips it from subtitles and speech. The image also carries three exact patches to upstream code, and the
+build fails if any anchor is missing:
+
+- `core/connection.py`: the device secret in the header log line becomes `<redacted>`.
+- `core/connection.py`: replies that come through the `direct_answer` virtual tool now send an emotion message. With
+  function calling on, most replies take that path, and upstream sends no emotion there at all.
+- `core/providers/llm/openai/openai.py`: DeepSeek sometimes writes tool calls as DSML text (`<｜DSML｜function_calls>` ...)
+  inside the reply instead of structured `tool_calls`, so upstream spoke the markup and ran no tool. The provider is
+  wrapped (`server/engine/xiaodan_tool_text.py`): DSML blocks become structured calls and `direct_answer` text streams as
+  it arrives, while DSML blocks in replies without tools are removed. Each conversion or removal logs a warning.
 
 New installations default to function calling with these three plugins ticked. Existing installations are left alone:
 switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
-function calling (OpenAI `tools` with streamed `tool_calls`).
+function calling: OpenAI `tools` with streamed `tool_calls`, or the DSML text described above.
 
 ## Layout
 
@@ -137,8 +143,9 @@ console/            the console (Node + Vue)
   test/               contract tests
 server/             companion files for the xiaozhi server
   providers/          custom gateway ASR / TTS providers
+  engine/             module added to the engine: turns DSML text tool calls into structured calls
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
-  tests/              plugin unit tests (standard library only) and the image smoke script
+  tests/              unit tests for the plugins and the DSML conversion (standard library only) and two image smoke scripts
   prompts/            prompt template
   config.api.yaml     API-mode configuration template
 ```
