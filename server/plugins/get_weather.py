@@ -130,6 +130,6 @@ async def get_weather(conn, location: str = None, **_ignored):
         _WEATHER_CACHE.put(city, result)
 
     name, observation = result
-    await cards.push(conn, cards.weather_card(name, observation, config.get("hold_s")))
-    logger.bind(tag=TAG).info(f"天气「{name}」来自 {observation['source']}")
-    return ActionResponse(Action.REQLLM, cards.weather_summary(name, observation), None)
+    shown = await cards.push(conn, cards.weather_card(name, observation, config.get("hold_s")))
+    logger.bind(tag=TAG).info(f"天气「{name}」来自 {observation['source']},卡片{'已推送' if shown else '未推送'}")
+    return ActionResponse(Action.REQLLM, cards.weather_summary(name, observation, shown), None)

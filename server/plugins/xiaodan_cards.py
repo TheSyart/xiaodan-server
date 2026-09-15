@@ -208,13 +208,31 @@ async def _send(conn, message: dict) -> bool:
         return False
 
 
+def _info(conn, text: str) -> None:
+    logger = getattr(conn, "logger", None)
+    try:
+        logger.bind(tag=__name__).info(text)
+    except Exception:
+        pass
+
+
 async def push(conn, payload: dict) -> bool:
-    """把一张卡片推给设备。设备没声明支持时什么都不发,返回 False。"""
+    """把一张卡片推给设备。设备没声明支持时什么都不发,返回 False。
+
+    两种结果都写日志:卡片没出现在屏幕上时,先看引擎日志里是"已推送"还是"设备没声明",
+    就能分清是服务端没发,还是设备收到后没显示。
+    """
+    cmd = payload.get("cmd", "")
     if not device_supports_cards(conn):
+        declared = sorted(_features(conn).keys())
+        _warn(conn, f"设备没有声明 features.xiaodan,不推送 {cmd} 卡片(设备声明的特性: {declared})")
         return False
     message = {"type": "xiaodan"}
     message.update(payload)
-    return await _send(conn, message)
+    sent = await _send(conn, message)
+    if sent:
+        _info(conn, f"已向设备推送 {cmd} 卡片")
+    return sent
 
 
 _EMOTION_EMOJI = {"happy": "🙂", "neutral": "😶", "thinking": "🤔"}
@@ -509,8 +527,12 @@ def weather_card(city: str, obs: dict, hold_s=HOLD_DEFAULT_S) -> dict:
     return card
 
 
-def weather_summary(city: str, obs: dict) -> str:
-    """交给模型的工具结果。给足事实,让它自己组织成一两句口语。"""
+def weather_summary(city: str, obs: dict, shown: bool = True) -> str:
+    """交给模型的工具结果。给足事实,让它自己组织成一两句口语。
+
+    shown 是卡片是否真的推给了设备。没推成功时不能告诉模型"屏幕上已经显示",
+    否则它会对着一块什么都没有的屏幕说"已经显示在屏幕上了"。
+    """
     now = f"{city}现在{obs['text']},{temp_int(obs['temp'])}度"
     if obs.get("humidity") is not None:
         now += f",湿度百分之{obs['humidity']}"
@@ -519,8 +541,9 @@ def weather_summary(city: str, obs: dict) -> str:
     tomorrow = obs.get("tomorrow")
     if tomorrow:
         parts.append(f"明天{tomorrow['text']},{temp_int(tomorrow['lo'])}到{temp_int(tomorrow['hi'])}度")
-    return ("。".join(parts) + "。设备屏幕上已经显示了这些数据。"
-            "请用一两句口语回答用户的问题,需要时提醒带伞或添减衣服;不要逐项念数字,不要提到工具。")
+    screen = "设备屏幕上已经显示了这些数据。" if shown else ""
+    return ("。".join(parts) + "。" + screen +
+            "请用一两句口语回答用户的问题,需要时提醒带伞或添减衣服;不要逐项念数字,不要提到工具,也不要说屏幕上显示了什么。")
 
 
 def weather_not_found(city: str) -> str:

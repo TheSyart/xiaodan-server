@@ -296,6 +296,13 @@ class Weather(unittest.TestCase):
         text = cards.weather_summary("广州", cards.parse_open_meteo(open_meteo_fixture()))
         self.assertTrue(text.startswith("广州现在毛毛雨,29度,湿度百分之77。今天雷雨冰雹,24到32度。明天雷阵雨,25到32度。"))
         self.assertIn("不要逐项念数字", text)
+        self.assertIn("屏幕上已经显示", text)
+
+    def test_summary_without_card(self):
+        # 卡片没推成功时不能让模型说"已经显示在屏幕上"
+        text = cards.weather_summary("广州", cards.parse_open_meteo(open_meteo_fixture()), shown=False)
+        self.assertNotIn("已经显示", text)
+        self.assertIn("不要说屏幕上显示了什么", text)
 
 
 class Volume(unittest.TestCase):
