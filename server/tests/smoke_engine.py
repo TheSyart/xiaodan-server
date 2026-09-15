@@ -65,10 +65,10 @@ provider.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 dialogue = [{"role": "user", "content": "今天天气怎么样"}]
 
 
-def call_with_functions(text):
+def call_with_functions(text, functions=None):
     completions.text = text
     spoken, calls = [], []
-    for content, tool_calls in provider.response_with_functions("smoke", dialogue, functions=[]):
+    for content, tool_calls in provider.response_with_functions("smoke", dialogue, functions=functions or []):
         if content:
             spoken.append(content)
         if tool_calls:
@@ -90,6 +90,12 @@ assert ConnectionHandler._extract_direct_answer_response(calls[0]["arguments"]) 
 spoken, calls = call_with_functions("<tool_call>get_weather</tool_call>")
 assert spoken == "" and [call["name"] for call in calls] == ["get_weather"], (spoken, calls)
 assert json.loads(calls[0]["arguments"]) == {}, calls
+
+weather_only = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+spoken, calls = call_with_functions("<tool_calls><tool_calls><tool_name>get_weather</tool_name></tool_calls></tool_calls>", weather_only)
+assert spoken == "" and [call["name"] for call in calls] == ["get_weather"], (spoken, calls)
+spoken, calls = call_with_functions("<tool_call>get_time</tool_call>", weather_only)
+assert calls == [], "本轮没有提供的工具应被丢弃"
 
 from core.providers.tts.gateway_omni_tts import speakable  # noqa: E402
 

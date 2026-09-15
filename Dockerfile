@@ -106,9 +106,10 @@ COPY server/engine/xiaodan_tool_text.py core/utils/xiaodan_tool_text.py
 # 2. 开启工具调用(Intent 为 function_call)后,引擎给模型加了一个 direct_answer 虚拟工具,普通回答大多从它的参数里流出。
 #    上游只在模型直接输出正文时发情绪消息,走 direct_answer 就一条也不发,设备上的表情永远停在默认值。
 #    在提取 direct_answer 文本的地方补上与正文路径相同的一段:一轮只发一次,尊重设备在 hello 里声明的 emoji 开关。
-# 3. 模型网关背后的 DeepSeek 会把工具调用写成 DSML 文本放在正文里,而不是 delta.tool_calls。引擎只认后者,
-#    于是标记被念出来、写进对话记录,工具一个也没执行。在 openai provider 模块末尾把 response_with_functions
-#    包一层,把 DSML 块转成结构化的工具调用;不带工具的 response 同样包一层,只删掉 DSML 块。
+# 3. 模型网关背后的模型会把工具调用写成文本放在正文里(DeepSeek 的 DSML、<tool_call>、<tool_calls><tool_name> 等),
+#    而不是 delta.tool_calls。引擎只认后者,于是标记被念出来或整轮沉默,工具一个也没执行。在 openai provider
+#    模块末尾把 response_with_functions 包一层,把这些块转成结构化的工具调用(只放行本轮提供的工具);
+#    不带工具的 response 同样包一层,只删掉这些块。
 RUN python - <<'PY'
 import pathlib
 import py_compile
@@ -177,7 +178,9 @@ def _xd_log(message):
 
 @_xd_functools.wraps(_xd_response_with_functions)
 def _xd_patched_response_with_functions(self, *args, **kwargs):
-    return _xd_wrap(_xd_response_with_functions(self, *args, **kwargs), log=_xd_log)
+    # 本轮交给模型的工具列表,只放行其中的函数名。签名是 (session_id, dialogue, functions=None, **kwargs)
+    tools = kwargs.get("functions", args[2] if len(args) > 2 else None)
+    return _xd_wrap(_xd_response_with_functions(self, *args, **kwargs), log=_xd_log, tools=tools)
 
 
 @_xd_functools.wraps(_xd_response)

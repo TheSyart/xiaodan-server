@@ -61,13 +61,13 @@ def extract_direct_answer(arguments_str):
     return raw.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
 
 
-def run(chunks, structured=None):
+def run(chunks, structured=None, tools=None):
     """把分块喂进 wrap_function_stream,按引擎的方式合并。返回 (正文, 工具调用, 全部产出, 日志)。"""
     logs = []
     source = [(chunk, None) for chunk in chunks]
     if structured:
         source.insert(0, (None, structured))
-    items = list(tt.wrap_function_stream(iter(source), log=logs.append))
+    items = list(tt.wrap_function_stream(iter(source), log=logs.append, tools=tools))
     text = "".join(content for content, _ in items if content)
     calls = []
     for _, tool_calls in items:
@@ -341,6 +341,68 @@ class ToolCallTagTest(unittest.TestCase):
             _, calls, _, _ = run(chunks)
             self.assertEqual([call["name"] for call in calls], ["show_calendar", "get_weather"], chunks)
             self.assertEqual(len({call["id"] for call in calls}), 2)
+
+
+TOOLS = [{"type": "function", "function": {"name": name, "parameters": {}}}
+         for name in ("get_weather", "show_calendar", "set_volume")]
+
+
+class TagFormatsTest(unittest.TestCase):
+    def assert_calls(self, source, expected, tools=TOOLS, expect_text=""):
+        for chunks in chunkings(source):
+            text, calls, items, _ = run(chunks, tools=tools)
+            self.assertEqual(text, expect_text, chunks)
+            self.assertEqual([(call["name"], json.loads(call["arguments"])) for call in calls], expected, chunks)
+            for content, _ in items:
+                self.assertNotIn("<", content or "", chunks)
+
+    def test_nested_plural_with_tool_name(self):
+        # 2026-09-15 设备自检抓到的原样
+        self.assert_calls("<tool_calls><tool_calls><tool_name>show_calendar</tool_name></tool_calls></tool_calls>",
+                          [("show_calendar", {})])
+
+    def test_name_and_argument_children(self):
+        self.assert_calls('<tool_call><tool_name>get_weather</tool_name><parameters>{"location": "北京"}</parameters></tool_call>',
+                          [("get_weather", {"location": "北京"})])
+        self.assert_calls("<tool_call><name>set_volume</name><arguments><level>60</level></arguments></tool_call>",
+                          [("set_volume", {"level": 60})])
+
+    def test_invoke_with_parameters(self):
+        self.assert_calls('<function_calls><invoke name="get_weather"><parameter name="location">上海</parameter></invoke></function_calls>',
+                          [("get_weather", {"location": "上海"})])
+
+    def test_several_calls_in_one_block(self):
+        self.assert_calls('<tool_calls><tool_call name="show_calendar"><parameter name="offset_days">1</parameter></tool_call>'
+                          '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call></tool_calls>',
+                          [("show_calendar", {"offset_days": 1}), ("get_weather", {})])
+
+    def test_opening_tag_with_attributes_is_held(self):
+        dsml = tt.DsmlToolCallFilter(tools=TOOLS)
+        spoken = []
+        for char in '<tool_call id="a1" type="function">get_weather</tool_call>':
+            spoken += [content for content, _ in dsml.feed(char) if content]
+        spoken += [content for content, _ in dsml.finish() if content]
+        self.assertEqual(spoken, [])
+
+    def test_template_format_after_leading_emoji(self):
+        # 模板要求每条回复以一个表情开头,工具调用紧跟其后
+        self.assert_calls('🙂<tool_call>{"name": "get_weather", "arguments": {"location": "广州"} }</tool_call>',
+                          [("get_weather", {"location": "广州"})], expect_text="🙂")
+
+    def test_direct_answer_in_tag_form(self):
+        self.assert_calls('<tool_use><tool_name>direct_answer</tool_name><parameters>{"response": "你好呀"}</parameters></tool_use>',
+                          [("direct_answer", {"response": "你好呀"})])
+
+    def test_tool_not_offered_this_turn_is_dropped(self):
+        for chunks in chunkings("<tool_call>get_time</tool_call>现在"):
+            text, calls, _, logs = run(chunks, tools=TOOLS)
+            self.assertEqual(calls, [], chunks)
+            self.assertEqual(text, "现在")
+            self.assertTrue(any("没有提供的工具" in line for line in logs))
+
+    def test_no_filtering_without_a_tool_list(self):
+        _, calls, _, _ = run(["<tool_call>anything_goes</tool_call>"])
+        self.assertEqual([call["name"] for call in calls], ["anything_goes"])
 
 
 class StripTextTest(unittest.TestCase):

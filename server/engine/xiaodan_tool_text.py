@@ -1,31 +1,31 @@
 """把模型写在正文里的工具调用文本,转换成引擎认识的结构化工具调用。
 
-背景:模型网关背后的模型有时不把工具调用放进 delta.tool_calls,而是当作正文吐出来。生产上见过两种写法:
+背景:模型网关背后的模型经常不把工具调用放进 delta.tool_calls,而是当作正文吐出来,而且写法不固定。生产上见过:
 
     DeepSeek 的 DSML 标记
-    <｜DSML｜function_calls>
-    <｜DSML｜invoke name="get_weather">
-    <｜DSML｜parameter name="location" string="true">北京</｜DSML｜parameter>
-    </｜DSML｜invoke>
-    </｜DSML｜function_calls>
+    <｜DSML｜function_calls><｜DSML｜invoke name="get_weather">
+    <｜DSML｜parameter name="location" string="true">北京</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>
 
-    <tool_call> 标签(里面可能只有函数名,也可能是 JSON 或 函数名(参数))
+    各种 XML 风格的标签
     <tool_call>get_weather</tool_call>
     <tool_call>{"name": "get_weather", "arguments": {"location": "北京"}}</tool_call>
+    <tool_calls><tool_calls><tool_name>show_calendar</tool_name></tool_calls></tool_calls>
 
 引擎(core/connection.py 的 chat)只认 delta.tool_calls,以及以 <tool_call> 开头、里面是 {"name","arguments"} JSON 的文本。
-其余写法都被当成回复念出来、显示成字幕、写进对话记录,工具一个也没执行;标记在凑齐之前流出的残段还会被送去合成语音。
+其余写法都被当成回复念出来或整轮沉默,工具一个也没执行;标记在凑齐之前流出的残段还会被送去合成语音。
 本模块包在 LLM provider 外面:普通正文原样放行,工具调用块截下来解析成 tool_calls 增量再交给引擎,
-引擎后面的合并、执行、上报链路一行不改。
+引擎后面的合并、执行、上报链路一行不改。提示词模板也规定了一种固定写法,这里对其他写法保持宽容。
 
 几个必须照顾到的细节:
-- 标记可能被切在两个流式分块之间。正文末尾像是标记开头的残段(比如一个 "<｜" 或 "<tool_c")先扣住,确认不是再放行,
-  否则半个标记已经送去合成语音了。
-- 生产记录里见过双竖线、缺 function_ 前缀的 DSML,DeepSeek V4 外层又叫 tool_calls,所以解析对竖线个数、前缀、
-  大小写与空白都宽容;也接受没有外层标签、直接以 invoke 开头的块。
-- 开启函数调用后模型常用 direct_answer 虚拟工具直接作答。整块攒完再交会让第一句话晚一整段生成时间,
-  所以 DSML 里它的 response 参数边收边交:引擎本来就会从不完整的 JSON 里逐段取出文字送去合成。
-  引擎那条流式兜底只还原 \\" \\n \\\\ 三种转义,所以片段里的制表符与回车先换成空格。
+- 标记可能被切在两个流式分块之间。正文末尾像是标记开头的残段(比如 "<｜"、"<tool_c"、带属性还没写完的开标签)
+  先扣住,确认不是再放行,否则半个标记已经送去合成语音了。
+- 标签的名字、嵌套与大小写都不固定:外层可能是 tool_call、tool_calls、function_calls、tool_use,同名标签还会套两层;
+  函数名可能在 name 属性、<tool_name>/<name> 子标签或 JSON 里;参数可能在 <parameters>/<arguments> 里(JSON 或子标签)、
+  <parameter name="…"> 里,也可能写成 函数名(参数)。
+- 只放行本轮真正提供给模型的工具(再加上引擎自带的 direct_answer):模型编出一个不存在的工具名时,
+  引擎会把"插件函数 X 不存在"念给用户听,不如丢掉并记一笔。
+- DSML 里的 direct_answer 边收边交,首句不必等整块生成完;引擎那条流式兜底只还原 \\" \\n \\\\ 三种转义,
+  所以片段里的制表符与回车先换成空格。
 - 上游 chat() 用 `"content" in response` 判断元组,正文片段恰好等于 "content" 时会抛异常;拆开再交。
 - 解析不出任何调用的块整块丢弃(不念),通过 log 回调记一笔。
 
@@ -38,6 +38,9 @@ import uuid
 from types import SimpleNamespace
 
 _I = re.IGNORECASE
+_S = re.DOTALL
+
+# ---------------------------------------------------------------- DSML
 _BARS = r"[｜|]+"
 _DSML = rf"{_BARS}\s*DSML\s*{_BARS}"
 # 开标签的开头 "<｜DSML｜"。后面紧跟 "/" 的是另一种闭标签写法,不算开头。
@@ -53,15 +56,27 @@ _PARAM_OPEN = re.compile(
 _PARAM_CLOSE = re.compile(rf"{_CLOSE}parameter\s*>", _I)
 _BLOCK_CLOSE = re.compile(rf"{_CLOSE}[a-z_]*calls\s*>", _I)
 
-_TC_OPEN = re.compile(r"<\s*tool_call\s*>", _I)
-_TC_CLOSE = re.compile(r"<\s*/\s*tool_call\s*>", _I)
+# ---------------------------------------------------------------- XML 风格的标签
+_TAG_NAMES = r"tool_calls?|function_calls?|tool_use"
+_TAG_OPEN = re.compile(rf"<\s*({_TAG_NAMES})\b[^<>]*>", _I)
+_TAG_OPENING = re.compile(rf"<\s*(?:{_TAG_NAMES})\b[^<>]*", _I)     # 写到一半、还没有 ">" 的开标签
+_WRAPPER_TAG = re.compile(r"<\s*/?\s*(?:tool_calls|function_calls)\b[^<>]*>", _I)
+_UNIT_OPEN = re.compile(r"<\s*(tool_call|function_call|tool_use|invoke)\b([^<>]*)>", _I)
+_NAME_TAG = re.compile(r"<\s*(tool_name|function_name|name)\s*>\s*([^<]*?)\s*<\s*/\s*\1\s*>", _I)
+_ARGS_TAG = re.compile(r"<\s*(parameters|arguments|args|params|input)\s*>(.*?)<\s*/\s*\1\s*>", _I | _S)
+_PARAM_TAG = re.compile(r"<\s*parameter\s+name\s*=\s*\"([^\"]+)\"[^<>]*>(.*?)<\s*/\s*parameter\s*>", _I | _S)
+_CHILD_TAG = re.compile(r"<\s*([A-Za-z_]\w*)\s*>(.*?)<\s*/\s*\1\s*>", _S)
+_ATTR_NAME = re.compile(r"\bname\s*=\s*[\"']([^\"']+)[\"']", _I)
+_ANY_TAG = re.compile(r"<[^<>]*>")
+
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
 _KWARG = re.compile(r"([A-Za-z_]\w*)\s*[=:]\s*(\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^,]+)")
 
 # 判断"末尾残段是不是某个标签的开头"时,先去掉空白、统一竖线与大小写,再与这些规范写法比前缀。
-_OPEN_CANONS = ("<｜DSML｜", "<TOOL_CALL>")
+_OPEN_CANONS = ("<｜DSML｜", "<TOOL_CALL", "<TOOL_CALLS", "<FUNCTION_CALL", "<FUNCTION_CALLS", "<TOOL_USE")
 _VALUE_CLOSE_CANONS = ("</｜DSML｜PARAMETER>", "<｜DSML｜/PARAMETER>")
 _HOLD_MAX = 40            # 残段超过这个长度就不可能是标签开头
+_OPENING_HOLD_MAX = 160   # 带属性的开标签可以长一些
 _BLOCK_MAX = 20000        # 迟迟不闭合的块到这个长度就按流结束处理,免得无限攒下去
 
 DIRECT_ANSWER = "direct_answer"
@@ -72,14 +87,17 @@ def _canon(text):
     return re.sub("｜+", "｜", text)
 
 
-def _partial_tail(text, canons):
+def _partial_tail(text, canons, allow_opening=False):
     """text 末尾可能是某个标签开头的那一段;不是则返回空串。标签里不会出现 "<",所以只看最后一个 "<" 之后。"""
     at = text.rfind("<")
-    if at < 0 or len(text) - at > _HOLD_MAX:
+    if at < 0:
         return ""
     tail = text[at:]
-    canon = _canon(tail)
-    return tail if any(c.startswith(canon) for c in canons) else ""
+    if len(tail) <= _HOLD_MAX and any(c.startswith(_canon(tail)) for c in canons):
+        return tail
+    if allow_opening and len(tail) <= _OPENING_HOLD_MAX and _TAG_OPENING.fullmatch(tail):
+        return tail
+    return ""
 
 
 def _new_id():
@@ -104,6 +122,15 @@ def _param_value(raw, is_string):
         except ValueError:
             return raw.strip()
     return raw.strip()
+
+
+def _scalar(raw):
+    """子标签里的值:数字、布尔、JSON 按原样还原,其余当字符串。"""
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
 
 
 def _params(body):
@@ -147,7 +174,7 @@ def _kwargs(text):
 
 
 def parse_tool_call_text(body):
-    """解析 <tool_call> 标签里的内容,返回 (函数名, 参数字典);认不出返回 (None, None)。
+    """解析一个调用里没有标签的部分,返回 (函数名, 参数字典);认不出返回 (None, None)。
 
     认得的写法:{"name": ..., "arguments": {...} 或 JSON 字符串};函数名;函数名 {JSON};函数名({JSON});函数名(k="v", ...)。
     """
@@ -160,7 +187,7 @@ def parse_tool_call_text(body):
         if obj is None:
             return None, None
         function = obj.get("function") if isinstance(obj.get("function"), dict) else {}
-        name = obj.get("name") or function.get("name")
+        name = obj.get("name") or obj.get("tool_name") or function.get("name")
         args = obj.get("arguments", obj.get("parameters", function.get("arguments", {})))
         if isinstance(args, str):
             args = _json_dict(args) if args.strip() else {}
@@ -184,18 +211,96 @@ def parse_tool_call_text(body):
     return named.group(0), args
 
 
+def _parse_unit(attrs, body):
+    """一个调用单元(一个 <tool_call>、<invoke> 或整个没有子单元的块)→ (函数名, 参数);认不出返回 None。"""
+    name = None
+    attr = _ATTR_NAME.search(attrs or "")
+    if attr:
+        name = attr.group(1).strip()
+    rest = body
+
+    name_tag = _NAME_TAG.search(rest)
+    if name_tag:
+        if name is None:
+            name = name_tag.group(2).strip()
+        rest = rest[:name_tag.start()] + rest[name_tag.end():]
+
+    args = None
+    args_tag = _ARGS_TAG.search(rest)
+    if args_tag:
+        inner = args_tag.group(2).strip()
+        args = _json_dict(inner) if inner.startswith("{") else None
+        if args is None:
+            children = {key: _scalar(value) for key, value in _CHILD_TAG.findall(inner)}
+            args = children or (_kwargs(inner) if inner else {}) or {}
+        rest = rest[:args_tag.start()] + rest[args_tag.end():]
+
+    params = {match.group(1): _scalar(match.group(2)) for match in _PARAM_TAG.finditer(rest)}
+    if params:
+        args = {**(args or {}), **params}
+        rest = _PARAM_TAG.sub("", rest)
+
+    leftover = _ANY_TAG.sub("", rest).strip()
+    if name is None:
+        # 没有名字标签:按 <tool_call>get_weather</tool_call> 或 JSON 那几种写法解析剩下的文字
+        text_name, text_args = parse_tool_call_text(leftover)
+        if text_name is None:
+            return None
+        name, args = text_name, {**text_args, **(args or {})}
+    elif args is None:
+        args = (_json_dict(leftover) if leftover.startswith("{") else None) or {}
+
+    if not name or not _NAME.fullmatch(name):
+        return None
+    return name, args
+
+
+def parse_tag_calls(block):
+    """解析一整个 XML 风格的工具调用块,返回 [(函数名, 参数), ...]。"""
+    text = _WRAPPER_TAG.sub("", block)
+    opens = list(_UNIT_OPEN.finditer(text))
+    units = []
+    if not opens:
+        units.append(("", text))
+    for k, opened in enumerate(opens):
+        end = opens[k + 1].start() if k + 1 < len(opens) else len(text)
+        body = text[opened.end():end]
+        closer = re.search(rf"<\s*/\s*{opened.group(1)}\s*>", body, _I)
+        units.append((opened.group(2), body[:closer.start()] if closer else body))
+    calls = []
+    for attrs, body in units:
+        call = _parse_unit(attrs, body)
+        if call:
+            calls.append(call)
+    return calls
+
+
+def _tool_names(tools):
+    """从 OpenAI 的 tools 列表里取出函数名;没给列表时返回 None(不做过滤)。"""
+    if not tools:
+        return None
+    names = {DIRECT_ANSWER}   # 引擎只在第一层把它交给模型,但任何一层返回它都会处理
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+    return names
+
+
 class DsmlToolCallFilter:
     """流式过滤器。feed 每段正文、流结束时 finish,各自返回要交给引擎的 (content, tool_calls) 列表。
 
     convert=False 用于不带工具的回复:工具调用块照样截下,但只丢弃并记录,不产出工具调用。
+    tools 是本轮交给模型的工具列表;给了就只放行其中的函数名。
     """
 
-    def __init__(self, log=None, convert=True):
+    def __init__(self, log=None, convert=True, tools=None):
         self._log = log or (lambda message: None)
         self._convert = convert
+        self._allowed = _tool_names(tools)
         self._pending = ""   # 正文模式下扣住的末尾残段
         self._block = None   # 截留中的块;None 表示正文模式
-        self._kind = None    # "dsml" 或 "tool_call"
+        self._kind = None    # "dsml" 或 "tag"
         self._wrapped = False
         self._calls = []     # 当前 DSML 块里每个 invoke 的处理进度
         self._next_index = 0
@@ -225,9 +330,9 @@ class DsmlToolCallFilter:
             if self._block is None:
                 text = self._pending + text
                 self._pending = ""
-                starts = [(m.start(), kind) for m, kind in ((_OPEN.search(text), "dsml"), (_TC_OPEN.search(text), "tool_call")) if m]
+                starts = [(m.start(), kind) for m, kind in ((_OPEN.search(text), "dsml"), (_TAG_OPEN.search(text), "tag")) if m]
                 if not starts:
-                    keep = "" if final else _partial_tail(text, _OPEN_CANONS)
+                    keep = "" if final else _partial_tail(text, _OPEN_CANONS, allow_opening=True)
                     visible = text[:len(text) - len(keep)]
                     if visible:
                         out.append((visible, None))
@@ -244,10 +349,7 @@ class DsmlToolCallFilter:
             self._block += text
             text = ""
             final_now = final or len(self._block) > _BLOCK_MAX
-            if self._kind == "tool_call":
-                rest = self._advance_tool_call(out, final_now)
-            else:
-                rest = self._advance(out, final_now)
+            rest = self._advance_tag(out, final_now) if self._kind == "tag" else self._advance(out, final_now)
             if rest is None:
                 return
             self._block = None
@@ -256,24 +358,39 @@ class DsmlToolCallFilter:
             if not text and not final:
                 return
 
-    def _advance_tool_call(self, out, final):
+    def _allowed_name(self, name, form):
+        if self._allowed is None or name in self._allowed:
+            return True
+        self._log(f"模型以{form}调用了本轮没有提供的工具 {name},已丢弃不念")
+        return False
+
+    def _advance_tag(self, out, final):
         block = self._block
-        opened = _TC_OPEN.match(block)
-        body_start = opened.end() if opened else 0
-        closed = _TC_CLOSE.search(block, body_start)
+        opener = _TAG_OPEN.match(block)
+        tag = re.escape(opener.group(1)) if opener else "tool_call"
+        # 同名标签可能套两层(<tool_calls><tool_calls>…),按层数找到与最外层配对的闭标签
+        depth, closed = 0, None
+        for match in re.finditer(rf"<\s*(/?)\s*{tag}\b[^<>]*>", block, _I):
+            depth += -1 if match.group(1) else 1
+            if depth == 0:
+                closed = match
+                break
         if closed is None and not final:
             return None
-        body = block[body_start:closed.start() if closed else len(block)]
-        name, args = parse_tool_call_text(body)
-        if name is None:
-            self._log(f"模型输出了无法解析的 <tool_call> 块,已丢弃不念: {block[:200]!r}")
-        elif not self._convert:
-            self._log(f"不带工具的回复里出现 <tool_call> 调用 {name},已丢弃不念")
-        else:
+        body = block[:closed.end()] if closed else block
+        calls = parse_tag_calls(body)
+        if not calls:
+            self._log(f"模型输出了无法解析的工具调用块,已丢弃不念: {block[:200]!r}")
+        for name, args in calls:
+            if not self._convert:
+                self._log(f"不带工具的回复里出现工具调用 {name},已丢弃不念")
+                continue
+            if not self._allowed_name(name, "标签"):
+                continue
             index = self._next_index
             self._next_index += 1
             out.append((None, [_delta(index, _new_id(), name, json.dumps(args, ensure_ascii=False))]))
-            self._log(f"模型以 <tool_call> 文本调用工具 {name},已转换为结构化调用")
+            self._log(f"模型以标签文本调用工具 {name},已转换为结构化调用")
         return block[closed.end():] if closed else ""
 
     def _advance(self, out, final):
@@ -340,6 +457,8 @@ class DsmlToolCallFilter:
         if not name:
             self._log("DSML 工具调用缺少函数名,已丢弃")
             return
+        if not self._allowed_name(name, " DSML "):
+            return
         arguments = json.dumps(_params(body), ensure_ascii=False)
         out.append((None, [_delta(self._take_index(call), _new_id(), name, arguments)]))
         self._log(f"模型以 DSML 文本调用工具 {name},已转换为结构化调用")
@@ -387,9 +506,9 @@ def _chat_safe(parts):
             yield content, tool_calls
 
 
-def wrap_function_stream(inner, log=None):
-    """包住 response_with_functions 返回的生成器,产出同样形状的 (content, tool_calls)。"""
-    dsml = DsmlToolCallFilter(log=log)
+def wrap_function_stream(inner, log=None, tools=None):
+    """包住 response_with_functions 返回的生成器,产出同样形状的 (content, tool_calls)。tools 是本轮的工具列表。"""
+    dsml = DsmlToolCallFilter(log=log, tools=tools)
     try:
         for content, tool_calls in inner:
             parts = dsml.feed(content)

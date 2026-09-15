@@ -117,9 +117,10 @@ build fails if any anchor is missing:
 - `core/connection.py`: replies that come through the `direct_answer` virtual tool now send an emotion message. With
   function calling on, most replies take that path, and upstream sends no emotion there at all.
 - `core/providers/llm/openai/openai.py`: models sometimes write tool calls as text inside the reply instead of structured
-  `tool_calls`. Two forms have been seen, DeepSeek DSML (`<｜DSML｜function_calls>` ...) and
-  `<tool_call>get_weather</tool_call>`, and upstream spoke the markup and ran no tool. The provider is
-  wrapped (`server/engine/xiaodan_tool_text.py`): both kinds of block become structured calls and DSML `direct_answer`
+  `tool_calls`. Forms seen so far include DeepSeek DSML (`<｜DSML｜function_calls>` ...), `<tool_call>get_weather</tool_call>` and
+  `<tool_calls><tool_name>show_calendar</tool_name></tool_calls>`; upstream spoke the markup or stayed silent and ran no tool. The
+  prompt template prescribes one fixed form, the parser stays tolerant of the others, and only tools offered in the turn pass. The provider is
+  wrapped (`server/engine/xiaodan_tool_text.py`): such blocks become structured calls and DSML `direct_answer`
   text streams as it arrives, while such blocks in replies without tools are removed. Each conversion or removal logs a
   warning.
 
