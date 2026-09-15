@@ -87,7 +87,7 @@ every turn. This repository ships three plugins of its own (`server/plugins/`, c
 | Plugin | What it does | Data source | How it answers |
 |---|---|---|---|
 | `show_calendar` | date, weekday and lunar date; shows this month's calendar | server clock, lunar date from the bundled cnlunar | spoken directly, no second model call |
-| `get_weather` | current weather and tomorrow's forecast; shows a weather screen | Open-Meteo, or wttr.in when the place is uncertain or the call fails; neither needs a key | the model summarises it |
+| `get_weather` | current weather and tomorrow's forecast; shows a weather screen; without a named city it uses the city of the device's IP for the session | Open-Meteo, or wttr.in when the place is uncertain or the call fails; IP lookup via the pconline IP database; none needs a key | the model summarises it |
 | `set_volume` | louder, quieter, or a given percentage | none | spoken directly |
 
 Two upstream plugins are replaced as well: `get_weather` (upstream queries QWeather and then scrapes a web page with a
@@ -216,6 +216,11 @@ The engine reaches the console by component name on the project network, so
 `manager-api.url` in `.config.yaml` must be `http://console:8002/xiaozhi`. Port 8003
 is no longer published: the console serves OTA, and the vision endpoint never had an
 nginx route.
+
+The engine takes the device address from `X-Real-IP`, then `X-Forwarded-For`, then the peer address, and the
+weather plugin locates the city from it. The nginx site needs `proxy_set_header X-Real-IP $remote_addr;`;
+without it the engine only sees the container gateway, the log says the address is not public, and weather
+falls back to the default city.
 
 **The panel does not read this repository's `compose.yaml`.** It renders its own from a
 root-approved policy, always as a non-root user with `cap_drop: ALL`,

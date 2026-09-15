@@ -70,7 +70,7 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 | 插件 | 做什么 | 数据来源 | 回答方式 |
 |---|---|---|---|
 | `show_calendar` | 日期、星期、农历;屏幕显示当月日历 | 服务器时间,农历用镜像自带的 cnlunar | 直接播报,不再经过模型 |
-| `get_weather` | 实时天气与明天预报;屏幕显示天气画面 | Open-Meteo;地点不可信或出错时用 wttr.in。都不需要密钥 | 模型据此口语总结 |
+| `get_weather` | 实时天气与明天预报;屏幕显示天气画面。没说城市时按本次会话设备 IP 所在城市 | Open-Meteo;地点不可信或出错时用 wttr.in;IP 定位用太平洋网络 IP 库。都不需要密钥 | 模型据此口语总结 |
 | `set_volume` | 调大、调小或调到某个百分比 | 无 | 直接播报 |
 
 同时覆盖了上游两个同名插件:`get_weather`(上游先查和风再抓网页,靠写死的共享密钥)与 `handle_exit_intent`
@@ -183,6 +183,9 @@ docker compose restart xiaodan-server
 engine 在项目网络里用组件名访问控制台,所以 `.config.yaml` 的
 `manager-api.url` 要写 `http://console:8002/xiaozhi`。8003 不再对外发布:
 OTA 由控制台提供,视觉分析接口本来就没有 nginx 路由。
+
+引擎按 `X-Real-IP` → `X-Forwarded-For` → 对端地址取设备 IP,天气插件据此定位城市。nginx 的站点配置里要有
+`proxy_set_header X-Real-IP $remote_addr;`,否则引擎只看到容器网关的内网地址,日志会提示"不是公网 IP",天气退回默认城市。
 
 **面板不读本仓库的 `compose.yaml`**。它按 root 批准的策略自己渲染一份,固定为
 非 root、`cap_drop: ALL`、`no-new-privileges`、默认 seccomp、仅回环端口、

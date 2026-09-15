@@ -1,8 +1,12 @@
 """天气:查 Open-Meteo 或 wttr.in,在设备屏幕上显示天气卡片,再让模型口语总结。
 
-覆盖上游同名插件。上游版本先调和风的城市查询接口再抓取网页,靠一个写死的共享密钥,
-网页一改版就失效;不说城市时按客户端 IP 定位,又要调第三方 whois 接口,而我们的 nginx 并不透传真实 IP。
-这里两个数据源都不需要密钥,没说城市时用插件参数里的默认城市。解析与文案在 xiaodan_cards.py,那里有单元测试。
+覆盖上游同名插件。上游版本先调和风的城市查询接口再抓取网页,靠一个写死的共享密钥,网页一改版就失效。
+这里两个数据源都不需要密钥。解析与文案在 xiaodan_cards.py,那里有单元测试。
+
+用户没说城市时,按这次会话里设备的 IP 查所在城市(太平洋网络 IP 库,不需要密钥):每个会话只查一次,
+同一 IP 跨会话缓存一天。引擎建立连接时按 x-real-ip → x-forwarded-for → 对端地址 取到 conn.client_ip,
+所以 nginx 必须转发 X-Real-IP;拿到的是内网地址或查不出城市时,才退回插件参数里的默认城市。
+没有用上游 core/utils/util.py 的 get_ip_info:它遇到内网地址会改查服务器自己的位置,而且用阻塞的 requests。
 
 选源规则(2026-09-14 实测后定的):
   - Open-Meteo 为主:结构化 JSON,含逐日预报。但它的中文地名库只认中国地名,"广州市"要去掉"市"才查得到,
@@ -32,7 +36,7 @@ GET_WEATHER_FUNCTION_DESC = {
         "name": "get_weather",
         "description": (
             "查询天气,并在设备屏幕上显示天气画面。用户问天气、气温、会不会下雨、要不要带伞、穿什么时调用。"
-            "用户没说地点时不要传 location,会用默认城市。"
+            "用户没说地点时不要传 location,会按设备所在的城市查。"
         ),
         "parameters": {
             "type": "object",
@@ -53,6 +57,8 @@ _HEADERS = {"User-Agent": "xiaodan-server/1.0"}
 _GEOCODE_CACHE = cards.TtlCache(ttl_s=30 * 86400, max_items=256)
 _WEATHER_CACHE = cards.TtlCache(ttl_s=600, max_items=128)
 _NOT_FOUND = object()
+_IP_CITY_CACHE = cards.TtlCache(ttl_s=86400, max_items=512)
+_SESSION_CITY = "_xiaodan_ip_city"   # 挂在连接对象上:每个会话只按设备 IP 定位一次
 
 
 async def _get_json(client: httpx.AsyncClient, url: str):
@@ -113,10 +119,43 @@ async def _lookup(city: str):
         raise RuntimeError("Open-Meteo 与 wttr.in 都不可用")
 
 
+async def _device_city(conn):
+    """按这次会话的设备 IP 查所在城市;查不到返回 None。结果挂在连接上,同一会话不再重复查。"""
+    if hasattr(conn, _SESSION_CITY):
+        return getattr(conn, _SESSION_CITY)
+    ip = getattr(conn, "client_ip", None)
+    if not cards.is_public_ip(ip):
+        logger.bind(tag=TAG).warning(
+            f"设备地址 {cards.mask_ip(ip)} 不是公网 IP,没法按 IP 定位,用默认城市;请确认 nginx 转发了 X-Real-IP"
+        )
+        setattr(conn, _SESSION_CITY, None)
+        return None
+    city = _IP_CITY_CACHE.get(ip)
+    if city is None:
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+                response = await client.get(cards.pconline_url(ip), headers=_HEADERS)
+                response.raise_for_status()
+            city = cards.parse_pconline(response.content)
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(f"按 IP {cards.mask_ip(ip)} 定位失败,用默认城市: {exc!r}")
+            return None   # 不记到会话上:网络抖动时下次再试
+        if city:
+            _IP_CITY_CACHE.put(ip, city)
+    setattr(conn, _SESSION_CITY, city or None)
+    if city:
+        logger.bind(tag=TAG).info(f"本次会话按设备 IP {cards.mask_ip(ip)} 定位到「{city}」")
+    else:
+        logger.bind(tag=TAG).warning(f"IP {cards.mask_ip(ip)} 查不到所在城市,用默认城市")
+    return city or None
+
+
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 async def get_weather(conn, location: str = None, **_ignored):
     config = cards.plugin_config(conn, "get_weather")
-    city = cards.clean_location(location) or cards.clean_location(config.get("default_location")) or "广州"
+    city = cards.clean_location(location)
+    if not city:
+        city = await _device_city(conn) or cards.clean_location(config.get("default_location")) or "广州"
 
     result = _WEATHER_CACHE.get(city)
     if result is None:

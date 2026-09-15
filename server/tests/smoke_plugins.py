@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import importlib
 import json
 
 from plugins_func.loadplugins import auto_import_modules
@@ -59,6 +60,12 @@ assert stock.websocket.sent == [] and "按键" in result.response, "原版固件
 
 result = all_function_registry["handle_exit_intent"].func(conn, say_goodbye="拜拜")
 assert result.action == Action.RESPONSE and result.response == "拜拜" and conn.close_after_chat is False
+
+weather = importlib.import_module("plugins_func.functions.get_weather")
+behind_proxy = Conn({"xiaodan": True})
+behind_proxy.client_ip = "172.18.0.1"   # nginx 没转发 X-Real-IP 时引擎看到的是容器网关
+assert asyncio.run(weather._device_city(behind_proxy)) is None, "内网地址不应去查城市"
+assert getattr(behind_proxy, weather._SESSION_CITY) is None, "同一会话不应重复判断"
 
 description = all_function_registry["get_weather"].description["function"]
 assert "location" in description["parameters"]["properties"] and "lang" not in description["parameters"]["properties"]

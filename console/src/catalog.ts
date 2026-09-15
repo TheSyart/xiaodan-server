@@ -241,10 +241,10 @@ export const PLUGINS: PluginDef[] = [
   {
     code: 'get_weather',
     label: '天气',
-    description: '查实时天气与明天预报,并在设备屏幕上显示天气画面。数据来自 Open-Meteo,出错时改用 wttr.in,都不需要密钥。',
+    description: '查实时天气与明天预报,并在设备屏幕上显示天气画面。没说城市时按设备 IP 所在城市查。数据来自 Open-Meteo,出错时改用 wttr.in,都不需要密钥。',
     keyless: true,
     fields: [
-      { key: 'default_location', label: '默认城市', type: 'string', default: '广州', hint: '用户没说地点时查这里' },
+      { key: 'default_location', label: '默认城市', type: 'string', default: '广州', hint: '按设备 IP 查不到所在城市时查这里' },
       { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, hint: '回答说完后天气画面停留多久,5 到 60' },
     ],
   },

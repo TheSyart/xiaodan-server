@@ -16,12 +16,13 @@ weekday 以 0 表示星期日。字符串按 UTF-8 字节数截断在字符边�
 
 import calendar as _calendar
 import datetime as _dt
+import ipaddress
 import json
 import math
 import re
 import time
 from typing import Callable, NamedTuple, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 HOLD_DEFAULT_S = 20
 HOLD_MIN_S = 5
@@ -367,6 +368,46 @@ def open_meteo_forecast_url(latitude: float, longitude: float) -> str:
 
 def wttr_url(name: str) -> str:
     return f"https://wttr.in/{quote(name)}?format=j1&lang=zh"
+
+
+# ---------------------------------------------------------------- 按设备 IP 定位
+
+def is_public_ip(ip) -> bool:
+    """公网地址才值得去查所在城市。内网、回环、链路本地、运营商级 NAT(100.64/10)一律不算。"""
+    try:
+        return ipaddress.ip_address(str(ip or "").strip()).is_global
+    except ValueError:
+        return False
+
+
+def mask_ip(ip) -> str:
+    """写日志用:IPv4 遮掉最后一段,IPv6 只留前两组。"""
+    text = str(ip or "")
+    if "." in text:
+        return ".".join(text.split(".")[:3] + ["*"])
+    if ":" in text:
+        return ":".join(text.split(":")[:2] + ["*"])
+    return "?"
+
+
+def pconline_url(ip: str) -> str:
+    return "https://whois.pconline.com.cn/ipJson.jsp?" + urlencode({"json": "true", "ip": ip})
+
+
+def parse_pconline(raw) -> Optional[str]:
+    """太平洋网络 IP 库的返回(GBK 编码的 JSON)→ 城市名,去掉末尾的"市";没有城市时退到省份;查不到返回 None。"""
+    try:
+        data = json.loads(bytes(raw).decode("gbk", "replace"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("err"):
+        return None
+    for key in ("city", "pro"):
+        name = re.sub(r"\s+", "", str(data.get(key) or ""))
+        name = re.sub(r"(市|省|自治区|特别行政区)$", "", name)
+        if name:
+            return name
+    return None
 
 
 def geocode_candidates(city: str) -> Tuple[str, ...]:

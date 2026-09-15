@@ -193,6 +193,30 @@ class Calendar(unittest.TestCase):
 
 
 class Weather(unittest.TestCase):
+    def test_public_ip(self):
+        for ip in ("202.96.128.86", "8.8.8.8", "2400:3200::1"):
+            self.assertTrue(cards.is_public_ip(ip), ip)
+        for ip in ("", None, "127.0.0.1", "10.1.2.3", "172.18.0.5", "192.168.1.9", "100.64.3.4",
+                   "169.254.1.1", "::1", "fe80::1", "not-an-ip"):
+            self.assertFalse(cards.is_public_ip(ip), ip)
+
+    def test_mask_ip(self):
+        self.assertEqual(cards.mask_ip("202.96.128.86"), "202.96.128.*")
+        self.assertEqual(cards.mask_ip("2400:3200::1"), "2400:3200:*")
+        self.assertEqual(cards.mask_ip(None), "?")
+
+    def test_parse_pconline(self):
+        # 2026-09-15 实际返回的原样(GBK 编码)
+        raw = ('{"ip":"202.96.128.86","pro":"广东省","proCode":"440000","city":"广州市","cityCode":"440100",'
+               '"region":"","regionCode":"0","addr":"广东省广州市 电信DNS服务器","regionNames":"","err":""}').encode("gbk")
+        self.assertEqual(cards.parse_pconline(raw), "广州")
+        province_only = json.dumps({"pro": "北京市", "city": "", "err": ""}, ensure_ascii=False).encode("gbk")
+        self.assertEqual(cards.parse_pconline(province_only), "北京")
+        abroad = json.dumps({"pro": "", "city": "", "addr": "美国", "err": "noprovince"}, ensure_ascii=False).encode("gbk")
+        self.assertIsNone(cards.parse_pconline(abroad))
+        self.assertIsNone(cards.parse_pconline(b"<html>busy</html>"))
+        self.assertIn("ip=202.96.128.86", cards.pconline_url("202.96.128.86"))
+
     def test_code_tables_fit_device(self):
         for table in (cards._WMO, cards._WWO):
             for code, (icon, text) in table.items():
