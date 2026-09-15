@@ -105,4 +105,4 @@ completions.text = "前面" + WEATHER + "后面"
 plain = "".join(provider.response("smoke", dialogue))
 assert plain == "前面后面", plain
 
-print("dsml ok:", calls[0]["name"], ANSWER)
+print("tool-call text ok")
