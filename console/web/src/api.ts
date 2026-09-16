@@ -362,3 +362,47 @@ export interface Reminder {
   attempts: number;
   delivered_at: string | null;
 }
+
+export interface MediaItem {
+  id: string;
+  kind: 'story' | 'music';
+  title: string;
+  aliases: string[];
+  tags: string[];
+  summary: string;
+  body?: string;
+  body_chars: number;
+  voice_instruction: string;
+  file: string;
+  audio_status: 'none' | 'pending' | 'ready' | 'failed';
+  audio_error: string;
+  duration_s: number;
+  age: string;
+  license: string;
+  source_url: string;
+  attribution: string;
+  builtin: number;
+  enabled: number;
+  updated_at: string;
+}
+
+export interface VocabBook {
+  id: string;
+  title: string;
+  description: string;
+  builtin: number;
+  word_count: number;
+}
+
+export interface VocabProgress {
+  learner: string;
+  alias: string | null;
+  book_id: string;
+  book_title: string;
+  total: number;
+  learned: number;
+  mastered: number;
+  due: number;
+  right: number;
+  wrong: number;
+}

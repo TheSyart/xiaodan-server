@@ -5,3 +5,5 @@ import './search/tool.ts';
 import './mcp/tools.ts';
 import './skills/tools.ts';
 import './reminders/tools.ts';
+import './media/tools.ts';
+import './vocab/tools.ts';

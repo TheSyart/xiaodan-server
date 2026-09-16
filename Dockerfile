@@ -38,6 +38,8 @@ COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/console/package.json ./console/
 COPY --from=build /app/console/dist ./console/dist
+# 内容素材:原创故事、许可核实过的曲库、单词书。控制塔启动时缺了才补进数据库与数据目录(见 console/src/agent/media/seed.ts)
+COPY media ./media
 
 # 数据目录必须先存在且属主正确:面板生成的 compose 用 create_host_path:false,
 # 容器自己创建不了它。

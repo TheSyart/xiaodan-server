@@ -1,0 +1,284 @@
+[
+  {
+    "id": "brahms-lullaby",
+    "file": "brahms-lullaby.ogg",
+    "title": "摇篮曲",
+    "aliases": [
+      "勃拉姆斯摇篮曲",
+      "勃拉姆斯的摇篮曲",
+      "睡觉的摇篮曲",
+      "晚安曲",
+      "Brahms Lullaby",
+      "Brahms' Lullaby",
+      "Wiegenlied",
+      "Guten Abend, gut' Nacht",
+      "Cradle Song",
+      "Op. 49 No. 4"
+    ],
+    "composer": "勃拉姆斯 (Johannes Brahms)",
+    "performer": "Pracchia-78 (virtual piano rendering, Colossus Classical Piano SoundFont)",
+    "tags": [
+      "摇篮曲",
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 109,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Johannes_Brahms_ninna_nanna_op_49_n_4.ogg",
+    "attribution": "Johannes Brahms: Wiegenlied Op. 49 No. 4. Rendering by Wikimedia Commons user Pracchia-78, released into the public domain (PD-self).",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "mozart-twinkle-variations",
+    "file": "mozart-twinkle-variations.ogg",
+    "title": "小星星",
+    "aliases": [
+      "小星星变奏曲",
+      "莫扎特小星星",
+      "莫扎特小星星变奏曲",
+      "一闪一闪亮晶晶",
+      "小星星钢琴曲",
+      "Twinkle Twinkle Little Star",
+      "Twinkle Twinkle Little Star Variations",
+      "Mozart Twinkle Variations",
+      "Ah vous dirai-je, Maman",
+      "K. 265"
+    ],
+    "composer": "莫扎特 (Wolfgang Amadeus Mozart)",
+    "performer": "Stefano Ligoratti (piano)",
+    "tags": [
+      "童谣",
+      "古典",
+      "钢琴",
+      "欢快"
+    ],
+    "duration_s": 340,
+    "license": "CC BY 3.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Mozart_-_12_Variations_K._265_-_Stefano_Ligoratti.mp3",
+    "attribution": "\"12 Variations on 'Ah vous dirai-je, Maman', K. 265\" (W. A. Mozart), performed by Stefano Ligoratti, licensed under CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/). Source: IMSLP #72959 via Wikimedia Commons. Changes: excerpted to the first 5:40 (theme and opening variations, cut at a pause between variations) with a 2 s fade-out, loudness-normalized, downmixed to mono, transcoded to Opus 16 kHz 32 kbps.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "schumann-traumerei",
+    "file": "schumann-traumerei.ogg",
+    "title": "梦幻曲",
+    "aliases": [
+      "舒曼梦幻曲",
+      "舒曼的梦幻曲",
+      "童年情景梦幻曲",
+      "Traumerei",
+      "Dreaming",
+      "Schumann Traumerei",
+      "Kinderszenen No. 7",
+      "Scenes from Childhood"
+    ],
+    "composer": "舒曼 (Robert Schumann)",
+    "performer": "Musopen (pianist not credited on the source page)",
+    "tags": [
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 203,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Robert_Schumann_-_scenes_from_childhood,_op._15_-_vii._dreaming.ogg",
+    "attribution": "Robert Schumann: Kinderszenen Op. 15 No. 7 \"Träumerei\". Recording courtesy of Musopen (musopen.org), released into the public domain.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "schumann-child-falling-asleep",
+    "file": "schumann-child-falling-asleep.ogg",
+    "title": "孩子入睡了",
+    "aliases": [
+      "入睡",
+      "孩子入睡",
+      "宝宝睡着了",
+      "舒曼入睡",
+      "舒曼孩子入睡了",
+      "Child Falling Asleep",
+      "Kind im Einschlummern",
+      "Schumann Child Falling Asleep",
+      "Kinderszenen No. 12"
+    ],
+    "composer": "舒曼 (Robert Schumann)",
+    "performer": "Musopen (pianist not credited on the source page)",
+    "tags": [
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 122,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Robert_Schumann_-_scenes_from_childhood,_op._15_-_xii._child_falling_asleep.ogg",
+    "attribution": "Robert Schumann: Kinderszenen Op. 15 No. 12 \"Kind im Einschlummern\". Recording courtesy of Musopen (musopen.org), released into the public domain.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "beethoven-fur-elise",
+    "file": "beethoven-fur-elise.ogg",
+    "title": "致爱丽丝",
+    "aliases": [
+      "献给爱丽丝",
+      "贝多芬致爱丽丝",
+      "贝多芬献给爱丽丝",
+      "Fur Elise",
+      "Beethoven Fur Elise",
+      "Bagatelle in A minor",
+      "WoO 59"
+    ],
+    "composer": "贝多芬 (Ludwig van Beethoven)",
+    "performer": "V Gao (Wikimedia user Gaodifan), piano",
+    "tags": [
+      "古典",
+      "钢琴"
+    ],
+    "duration_s": 177,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:FurElise.ogg",
+    "attribution": "Ludwig van Beethoven: Für Elise, WoO 59. Performed by V Gao (Gaodifan), released into the public domain (PD-self; also CC0 1.0).",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "debussy-clair-de-lune",
+    "file": "debussy-clair-de-lune.ogg",
+    "title": "月光",
+    "aliases": [
+      "德彪西月光",
+      "德彪西的月光",
+      "德彪西月光曲",
+      "贝加马斯克组曲",
+      "Clair de lune",
+      "Clair de Lune",
+      "Debussy Clair de Lune",
+      "Suite bergamasque"
+    ],
+    "composer": "德彪西 (Claude Debussy)",
+    "performer": "Laurens Goedhart (piano)",
+    "tags": [
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 304,
+    "license": "CC BY 3.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Clair_de_lune_(Claude_Debussy)_Suite_bergamasque.ogg",
+    "attribution": "\"Claude Debussy's Clair de Lune\" by Laurens Goedhart, licensed under CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/). Source: https://soundcloud.com/laurensgoedhart/claude-debussys-clair-de-lune via Wikimedia Commons. Changes: loudness-normalized, downmixed to mono, transcoded to Opus 16 kHz 32 kbps.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "satie-gymnopedie-1",
+    "file": "satie-gymnopedie-1.ogg",
+    "title": "吉诺佩蒂",
+    "aliases": [
+      "吉诺佩蒂第一号",
+      "萨蒂吉诺佩蒂",
+      "吉姆诺佩迪",
+      "金诺佩蒂",
+      "萨蒂钢琴曲",
+      "Gymnopedie",
+      "Gymnopedie No. 1",
+      "Satie Gymnopedie"
+    ],
+    "composer": "萨蒂 (Erik Satie)",
+    "performer": "Robin Alciatore (piano), via Musopen",
+    "tags": [
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 184,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Erik_Satie_-_gymnopedies_-_la_1_ere._lent_et_douloureux.ogg",
+    "attribution": "Erik Satie: Gymnopédie No. 1. Performed by Robin Alciatore; Recording courtesy of Musopen (musopen.org), released into the public domain.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "tchaikovsky-sugar-plum-fairy",
+    "file": "tchaikovsky-sugar-plum-fairy.ogg",
+    "title": "糖果仙子之舞",
+    "aliases": [
+      "糖梅仙子之舞",
+      "糖果仙子舞曲",
+      "糖果仙子",
+      "胡桃夹子",
+      "柴可夫斯基糖果仙子",
+      "Dance of the Sugar Plum Fairy",
+      "Sugar Plum Fairy",
+      "The Nutcracker",
+      "Nutcracker"
+    ],
+    "composer": "柴可夫斯基 (Pyotr Ilyich Tchaikovsky)",
+    "performer": "Kevin MacLeod (incompetech.com)",
+    "tags": [
+      "古典",
+      "欢快"
+    ],
+    "duration_s": 106,
+    "license": "CC BY 3.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Dance_of_the_Sugar_Plum_Fairies_(ISRC_USUAN1100270).oga",
+    "attribution": "Dance of the Sugar Plum Fairies Kevin MacLeod (incompetech.com) Licensed under Creative Commons: By Attribution 3.0 License https://creativecommons.org/licenses/by/3.0/ Changes: loudness-normalized, downmixed to mono, transcoded to Opus 16 kHz 32 kbps.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "grieg-morning-mood",
+    "file": "grieg-morning-mood.ogg",
+    "title": "晨景",
+    "aliases": [
+      "清晨",
+      "早晨",
+      "早晨的音乐",
+      "格里格晨景",
+      "培尔金特晨景",
+      "培尔金特",
+      "Morning Mood",
+      "Morning",
+      "Morgenstemning",
+      "Peer Gynt"
+    ],
+    "composer": "格里格 (Edvard Grieg)",
+    "performer": "Musopen Symphony Orchestra (Czech National Symphony Orchestra)",
+    "tags": [
+      "古典",
+      "安静"
+    ],
+    "duration_s": 229,
+    "license": "Public Domain",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Grieg_-_Peer_Gynt_Suite_No._1,_Op._46_-_I._Morning_Mood_(Musopen_Symphony).flac",
+    "attribution": "Edvard Grieg: Peer Gynt Suite No. 1, Op. 46, I. Morning Mood. Musopen Symphony. Recording courtesy of Musopen (musopen.org), released into the public domain.",
+    "verified_at": "2026-09-17"
+  },
+  {
+    "id": "bach-goldberg-aria",
+    "file": "bach-goldberg-aria.ogg",
+    "title": "哥德堡变奏曲咏叹调",
+    "aliases": [
+      "哥德堡变奏曲",
+      "哥德堡咏叹调",
+      "巴赫咏叹调",
+      "巴赫哥德堡变奏曲",
+      "Goldberg Variations",
+      "Goldberg Aria",
+      "Bach Aria",
+      "BWV 988"
+    ],
+    "composer": "巴赫 (Johann Sebastian Bach)",
+    "performer": "Kimiko Ishizaka (piano), Open Goldberg Variations",
+    "tags": [
+      "睡前",
+      "古典",
+      "钢琴",
+      "安静"
+    ],
+    "duration_s": 300,
+    "license": "CC0 1.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Goldberg_Variations_01_Aria.ogg",
+    "attribution": "J. S. Bach: Goldberg Variations BWV 988, Aria. Performed by Kimiko Ishizaka, Open Goldberg Variations (opengoldbergvariations.org), dedicated to the public domain under CC0 1.0.",
+    "verified_at": "2026-09-17"
+  }
+]

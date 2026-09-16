@@ -20,6 +20,8 @@ import { agentMcpRoutes, mcpRoutes } from './agent/mcp/routes.ts';
 import { agentSkillRoutes, skillRoutes } from './agent/skills/routes.ts';
 import { reminderRoutes } from './agent/reminders/routes.ts';
 import { serviceRoutes } from './agent/services-routes.ts';
+import { mediaAdminRoutes } from './agent/media/routes.ts';
+import { vocabRoutes } from './agent/vocab/routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 
@@ -318,6 +320,8 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/mcp-servers', mcpRoutes(deps.agent));
     app.route('/skills', skillRoutes(deps.agent));
     app.route('/reminders', reminderRoutes(deps.agent));
+    app.route('/media', mediaAdminRoutes(deps.agent));
+    app.route('/vocab', vocabRoutes(deps.agent));
     app.route('/agents', agentMcpRoutes(deps.agent));
     app.route('/agents', agentSkillRoutes(deps.agent));
   }

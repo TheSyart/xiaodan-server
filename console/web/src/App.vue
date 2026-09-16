@@ -91,6 +91,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
       { path: '/services', label: '工具与服务', icon: 'zap' },
       { path: '/mcp', label: 'MCP', icon: 'link' },
       { path: '/skills', label: '技能', icon: 'sparkles' },
+      { path: '/content', label: '内容库', icon: 'music' },
       { path: '/reminders', label: '提醒', icon: 'clock' },
     ],
   },

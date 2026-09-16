@@ -205,4 +205,70 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: 'content-library',
+    up(conn) {
+      conn.exec(`
+        -- 内容库:有声故事与音乐。音频文件在数据目录 media/ 下,file 是相对路径。
+        -- 故事有正文,音频由控制塔用千问合成(audio_status);音乐只有文件,带许可证与署名。
+        CREATE TABLE media_items (
+          id           TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64 AND id NOT GLOB '*[^a-z0-9-]*'),
+          kind         TEXT NOT NULL CHECK (kind IN ('story', 'music')),
+          title        TEXT NOT NULL,
+          aliases_json TEXT NOT NULL DEFAULT '[]',
+          tags_json    TEXT NOT NULL DEFAULT '[]',
+          summary      TEXT NOT NULL DEFAULT '',
+          body         TEXT NOT NULL DEFAULT '',
+          -- 给合成用的语气指令(故事)
+          voice_instruction TEXT NOT NULL DEFAULT '',
+          file         TEXT NOT NULL DEFAULT '',
+          audio_status TEXT NOT NULL DEFAULT 'none' CHECK (audio_status IN ('none', 'pending', 'ready', 'failed')),
+          audio_error  TEXT NOT NULL DEFAULT '',
+          duration_s   INTEGER NOT NULL DEFAULT 0,
+          age          TEXT NOT NULL DEFAULT '',
+          license      TEXT NOT NULL DEFAULT '',
+          source_url   TEXT NOT NULL DEFAULT '',
+          attribution  TEXT NOT NULL DEFAULT '',
+          builtin      INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+          enabled      INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_media_kind ON media_items (kind, enabled);
+
+        -- 单词书与学习进度(Leitner 盒子:0 刚学,1-5 越来越熟,到期复习)
+        CREATE TABLE vocab_books (
+          id          TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64 AND id NOT GLOB '*[^a-z0-9-]*'),
+          title       TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          builtin     INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE vocab_words (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id    TEXT NOT NULL REFERENCES vocab_books (id) ON DELETE CASCADE,
+          word       TEXT NOT NULL,
+          meaning    TEXT NOT NULL,
+          example    TEXT NOT NULL DEFAULT '',
+          example_cn TEXT NOT NULL DEFAULT '',
+          topic      TEXT NOT NULL DEFAULT '',
+          level      INTEGER NOT NULL DEFAULT 1,
+          sort       INTEGER NOT NULL DEFAULT 0,
+          UNIQUE (book_id, word)
+        );
+        CREATE TABLE vocab_progress (
+          learner      TEXT NOT NULL,
+          word_id      INTEGER NOT NULL REFERENCES vocab_words (id) ON DELETE CASCADE,
+          box          INTEGER NOT NULL DEFAULT 0 CHECK (box BETWEEN 0 AND 5),
+          due_at       TEXT NOT NULL,
+          right_count  INTEGER NOT NULL DEFAULT 0,
+          wrong_count  INTEGER NOT NULL DEFAULT 0,
+          last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (learner, word_id)
+        );
+        CREATE INDEX idx_vocab_progress_due ON vocab_progress (learner, due_at);
+      `);
+    },
+  },
 ];

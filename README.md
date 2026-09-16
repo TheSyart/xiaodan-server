@@ -183,6 +183,17 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   5 s; an offline one every 15 s and marked missed after 3 minutes; missed reminders from the last 12 hours are announced when the device next
   fetches its configuration. Repeating reminders (daily, weekdays, weekly) roll forward after delivery.
 
+- **Stories and music** (`list_stories`/`play_story`, `list_music`/`play_music`, plugin codes `stories`, `music`): managed on the
+  Content page. Ships 6 original children's stories (`media/stories/`, MIT) and 10 tracks whose recording licences were verified one by one
+  (`media/music/`, public domain, CC0 or CC BY; sources, licences and attributions in `media/music/LICENSES.md`, CC BY credits shown on the
+  Content page), copied into the data directory on startup when missing. Story audio is synthesised in the background once a Qwen TTS model
+  is configured (paragraph chunks joined into one mp3); stories without audio are told by the model directly (with a larger output limit).
+  Playback sends a `media` event; the engine downloads the file from the console's internal address (secret auth, same-origin check, cache),
+  queues it after the spoken introduction and sends a keepalive about every 20 s while it plays.
+- **Vocabulary** (`vocab_next`/`vocab_show`/`vocab_answer`/`vocab_progress`, plugin code `vocab`): ships an original 300-word starter book
+  (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
+  after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
+
 ## Qwen speech and voices
 
 Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:
@@ -228,6 +239,7 @@ server/             companion files for the xiaozhi server
   providers/          custom ASR / TTS providers: model gateway (chat endpoint) and Qwen speech (Model Studio)
   engine/             modules added to the engine: tool-call text conversion, pure logic for Qwen speech, device bridge and the xiaodan_agent provider
   assets/             reminder chime
+media/              content: original stories, licence-verified music, word books (baked into the console image, imported on startup)
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
   tests/              unit tests for the plugins, tool-call text conversion and Qwen speech (standard library only) and three image smoke scripts
   prompts/            prompt template

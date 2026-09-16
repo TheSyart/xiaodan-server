@@ -163,6 +163,7 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
   const turnSteps: ChatMessage[] = [];
   const maxSteps = Math.min(HARD_MAX_STEPS, Math.max(1, agent.max_steps || 6));
   const params = llmParams(agent);
+  let longAnswer = false;
   let error: string | undefined;
 
   try {
@@ -204,6 +205,8 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
         ...(lastStep || specs.length === 0 ? {} : { tools: specs }),
         thinking: params.thinking,
         ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+        // 讲整篇故事这类长回答:输出上限放宽,免得讲到一半被截断
+        ...(longAnswer ? { maxTokens: Math.max(4096, Number(llm.max_tokens) || 0) } : {}),
         signal,
       })) {
         if (event.type === 'text') emit(event.text);
@@ -264,6 +267,7 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
           { type: 'tool_result', text: content.slice(0, 500) },
         ]));
         if (result.endTurn) endTurn = true;
+        if (result.longAnswer) longAnswer = true;
       }
       if (endTurn || signal.aborted) break;
     }

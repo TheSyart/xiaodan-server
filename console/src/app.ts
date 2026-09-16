@@ -9,6 +9,7 @@ import type { Db } from './db.ts';
 import { dataDir, one } from './db.ts';
 import { Bridge } from './agent/bridge.ts';
 import { agentRoutes } from './agent/routes.ts';
+import { engineMediaRoutes } from './agent/media/routes.ts';
 import './agent/index.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { SECRET_KEY } from './seed.ts';
@@ -91,6 +92,7 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
     ...(options.agent?.now ? { now: options.agent.now } : {}),
   };
   app.route('/xiaodan', agentRoutes(agentDeps));
+  app.route('/xiaodan', engineMediaRoutes(agentDeps));
   options.onAgentDeps?.(agentDeps);
 
   app.route('/api', adminApi(conn, { ...options.admin, agent: agentDeps }));

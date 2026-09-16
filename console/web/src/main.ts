@@ -26,6 +26,7 @@ const router = createRouter({
     { path: '/mcp', component: () => import('./views/Mcp.vue'), meta: { title: 'MCP' } },
     { path: '/skills', component: () => import('./views/Skills.vue'), meta: { title: '技能' } },
     { path: '/reminders', component: () => import('./views/Reminders.vue'), meta: { title: '提醒' } },
+    { path: '/content', component: () => import('./views/Content.vue'), meta: { title: '内容库' } },
     { path: '/models', component: () => import('./views/Models.vue'), meta: { title: '模型' } },
     { path: '/chats', component: () => import('./views/Chats.vue'), meta: { title: '对话记录' } },
     { path: '/words', component: () => import('./views/Words.vue'), meta: { title: '读音替换' } },

@@ -80,6 +80,8 @@ export interface ToolResult {
   content: string;
   /** 为 true 时本轮到此结束,不再请求模型(例如已经开始播放音乐,再说话会排到音乐之后) */
   endTurn?: boolean;
+  /** 为 true 时下一次请求模型放宽输出长度(例如要把整篇故事讲出来) */
+  longAnswer?: boolean;
   ok?: boolean;
 }
 

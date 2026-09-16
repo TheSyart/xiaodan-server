@@ -58,6 +58,10 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
     label: '控制塔访问引擎设备桥的地址(内网)',
   },
 
+  // ---- 内容库 ----
+  { key: 'media.story_voice', value: 'longanhuan_v3.6', type: 'string', label: '有声故事的合成音色(千问音色名)' },
+  { key: 'media.story_tts_model', value: '', type: 'string', label: '合成有声故事用的语音合成模型 id(留空自动选千问合成模型)' },
+
   // ---- 对话行为 ----
   {
     key: 'device_max_output_size',

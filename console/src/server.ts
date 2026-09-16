@@ -7,6 +7,8 @@ import { closeDb, dataDir, dbPath, openDb } from './db.ts';
 import { seed } from './seed.ts';
 import { createApp } from './app.ts';
 import { startReminderScheduler } from './agent/reminders/scheduler.ts';
+import { seedMedia } from './agent/media/seed.ts';
+import { startStorySynthesis } from './agent/media/synth.ts';
 import { authMode, isInitialized } from './auth.ts';
 import { getSetting } from './settings.ts';
 
@@ -20,7 +22,18 @@ function main(): void {
   // 源码时目录层级不同,两处都找一下,都没有就只提供接口。
   const webRoot = [join(here, 'web'), join(here, '..', 'dist', 'web')].find((path) => existsSync(path));
 
-  const app = createApp(conn, { webRoot, onAgentDeps: (deps) => startReminderScheduler(deps) });
+  const app = createApp(conn, {
+    webRoot,
+    onAgentDeps: (deps) => {
+      // 内容素材(原创故事、曲库、单词书)缺了才补;故事音频在配好千问合成模型后于后台自动生成
+      const seeded = seedMedia(conn, deps.dataDir());
+      if (seeded.stories || seeded.music || seeded.words) {
+        console.log(`[小单控制台] 内容库新增 故事 ${seeded.stories} 个、曲目 ${seeded.music} 首、单词 ${seeded.words} 个`);
+      }
+      startReminderScheduler(deps);
+      startStorySynthesis(deps);
+    },
+  });
   const port = Number(process.env.PORT ?? 8002);
   const hostname = process.env.HOST ?? '0.0.0.0';
 

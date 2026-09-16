@@ -316,6 +316,33 @@ export const PLUGINS: PluginDef[] = [
     group: '生活',
     fields: [],
   },
+  {
+    code: 'stories',
+    label: '讲故事',
+    description: '播放故事库里的有声故事(原创故事,音频由千问合成);故事库里没有的就现编一个讲。内容在「内容库」页管理。',
+    keyless: true,
+    runtime: 'agent',
+    group: '陪伴',
+    fields: [],
+  },
+  {
+    code: 'music',
+    label: '放音乐',
+    description: '播放曲库里的音乐(许可核实过的古典与童谣录音,也可以自己上传)。播放中按设备上的说话键即可停止。',
+    keyless: true,
+    runtime: 'agent',
+    group: '陪伴',
+    fields: [],
+  },
+  {
+    code: 'vocab',
+    label: '学单词',
+    description: '陪小朋友学英语单词:取词、屏幕单词卡、小测验、按记忆曲线安排复习。配合技能 word-coach 使用效果最好。',
+    keyless: true,
+    runtime: 'agent',
+    group: '学习',
+    fields: [{ key: 'book', label: '单词书 id', type: 'string', hint: '留空用默认单词书(starter)' }],
+  },
   // ---- 以下是上游引擎自带的插件,只在引擎旧路径下生效 ----
   {
     code: 'change_role',
