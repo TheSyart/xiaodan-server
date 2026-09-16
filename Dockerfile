@@ -84,6 +84,11 @@ WORKDIR /opt/xiaozhi-esp32-server
 # 所以 ASR 与 TTS 都改走 chat/completions。`config_json.type` 按名字映射到这两个文件。
 COPY server/providers/gateway_chat.py core/providers/asr/gateway_chat.py
 COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
+# 千问语音(百炼 Qwen-Audio 3.0):识别走同步 HTTP,合成走 CosyVoice 协议的 WebSocket、每句一个任务。
+# 纯逻辑(请求体、解析、分段)在 qwen_audio.py,两个 provider 只管联网与线程。为什么不用上游 alibl_stream 见合成 provider 开头。
+COPY server/engine/qwen_audio.py core/utils/qwen_audio.py
+COPY server/providers/qwen_audio_asr.py core/providers/asr/qwen_audio_asr.py
+COPY server/providers/qwen_audio_tts.py core/providers/tts/qwen_audio_tts.py
 # 上游自带的模板在示例里演示放歌报天气,会让模型承诺它没有的能力,故整份替换。
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
@@ -216,7 +221,7 @@ RUN set -eux; \
     find /opt/xiaozhi-esp32-server -name __pycache__ -type d -prune -exec rm -rf {} +; \
     python -m compileall -q /opt/xiaozhi-esp32-server/app.py /opt/xiaozhi-esp32-server/config \
       /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/plugins_func || true; \
-    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py']]"; \
+    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py','/opt/xiaozhi-esp32-server/core/utils/qwen_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/qwen_audio_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/qwen_audio_tts.py']]"; \
     test -s /opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt
 
 FROM debian:trixie-slim AS engine

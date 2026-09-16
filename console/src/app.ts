@@ -6,13 +6,16 @@ import { secureHeaders } from 'hono/secure-headers';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Db } from './db.ts';
-import { adminApi } from './admin-api.ts';
+import { adminApi, type AdminDeps } from './admin-api.ts';
 import { managerApi } from './manager-api.ts';
 import { otaApi } from './ota.ts';
+import { sampleRoutes } from './voice/samples.ts';
 
 export interface AppOptions {
   /** 前端构建产物目录。不存在时只提供接口,便于纯后端开发与测试。 */
   webRoot?: string;
+  /** 管理接口访问外部服务的依赖,测试注入 */
+  admin?: AdminDeps;
 }
 
 export function createApp(conn: Db, options: AppOptions = {}): Hono {
@@ -31,6 +34,8 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", 'data:'],
+        // 音色试听:接口返回的音频转成 blob 地址交给 <audio> 播放
+        mediaSrc: ["'self'", 'blob:', 'data:'],
         fontSrc: ["'self'"],
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
@@ -57,11 +62,14 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
   // 因为服务端那边把 base_url 拼成 <host>/xiaozhi。
   // OTA 也在这个前缀下,但它不需要 Bearer —— 两者靠 manager-api 里
   // 精确的中间件前缀区分开,见那边的注释。
+  // 声音复刻样本的一次性链接。放在 OTA 前缀下是因为 nginx 对它关闭了统一鉴权,百炼才取得到(说明见 voice/samples.ts)。
+  // 必须先于 OTA 路由挂载。
+  app.route('/xiaozhi/ota/voice-sample', sampleRoutes());
   app.route('/xiaozhi/ota', otaApi(conn));
   app.route('/xiaozhi', managerApi(conn));
 
   // 控制台页面的接口
-  app.route('/api', adminApi(conn));
+  app.route('/api', adminApi(conn, options.admin));
 
   // 前端。SPA 路由要求"找不到文件就回 index.html",否则刷新子页面会 404。
   const webRoot = options.webRoot;

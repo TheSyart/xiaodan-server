@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
-import { api, type Agent, type Catalog, type Model, type PluginDef, type Voice } from '../api';
+import { api, type Agent, type Catalog, type Model, type PluginDef, type TtsParams, type Voice } from '../api';
+import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
 import PageHeader from '../components/PageHeader.vue';
@@ -20,6 +21,8 @@ const loadError = ref('');
 const editing = ref<Agent | null>(null);
 /** 插件代号 → 参数。只有被勾选的才在这个表里。 */
 const pluginState = ref<Record<string, Record<string, string>>>({});
+/** 千问合成的语速、音调、音量与语气指令;表单里一律是完整的数值,保存时再去掉默认值 */
+const ttsParams = ref({ rate: 1, pitch: 1, volume: 50, instruction: '' });
 const snapshot = ref('');
 const saving = ref(false);
 const nameError = ref('');
@@ -69,16 +72,79 @@ const voiceLanguages = computed(() => {
   return voice ? voice.languages.split('、').map((item) => item.trim()).filter(Boolean) : [];
 });
 const toolsEnabled = computed(() => !!editing.value && toolsOn(editing.value));
+const qwenTts = computed(() => modelById(editing.value?.tts_model_id ?? null)?.provider === 'qwen_audio_tts');
+const selectedVoice = computed(() => voices.value.find((v) => v.id === editing.value?.tts_voice_id));
+const VOICE_STATUS: Record<Voice['status'], string> = { ok: '', pending: '(审核中,暂不可用)', failed: '(未通过审核)' };
+
+function parseTtsParams(json: string | undefined) {
+  let parsed: TtsParams = {};
+  try {
+    parsed = JSON.parse(json || '{}') as TtsParams;
+  } catch {
+    /* 坏数据按默认值 */
+  }
+  return {
+    rate: typeof parsed.rate === 'number' ? parsed.rate : 1,
+    pitch: typeof parsed.pitch === 'number' ? parsed.pitch : 1,
+    volume: typeof parsed.volume === 'number' ? parsed.volume : 50,
+    instruction: typeof parsed.instruction === 'string' ? parsed.instruction : '',
+  };
+}
+
+/** 与默认值相同的参数不存:以后调默认值时,没改过的智能体跟着变。 */
+function ttsParamsPayload(): TtsParams {
+  const t = ttsParams.value;
+  const result: TtsParams = {};
+  if (Number(t.rate) !== 1) result.rate = Number(t.rate);
+  if (Number(t.pitch) !== 1) result.pitch = Number(t.pitch);
+  if (Number(t.volume) !== 50) result.volume = Number(t.volume);
+  if (t.instruction.trim()) result.instruction = t.instruction.trim();
+  return result;
+}
+
+const previewing = ref(false);
+async function previewVoice() {
+  const agent = editing.value;
+  if (!agent?.tts_model_id || previewing.value) return;
+  const model = modelById(agent.tts_model_id);
+  let voice = selectedVoice.value?.voice;
+  if (!voice) {
+    try {
+      voice = String((JSON.parse(model?.config_json ?? '{}') as Record<string, unknown>)['voice'] ?? '');
+    } catch {
+      voice = '';
+    }
+  }
+  if (!voice) {
+    toast('还没有选音色,模型也没有配默认音色。', 'warn');
+    return;
+  }
+  previewing.value = true;
+  try {
+    const blob = await api.postForBlob('/voices/preview', {
+      tts_model_id: agent.tts_model_id, voice,
+      text: `你好呀,我是${agent.name || '小单'},很高兴认识你。`,
+      ...ttsParamsPayload(),
+    });
+    await playBlob(blob);
+  } catch (e) {
+    toastError(e);
+  } finally {
+    previewing.value = false;
+  }
+}
+onBeforeUnmount(stopPlayback);
 const functionCallModel = computed(() =>
   models.value.find((m) => m.model_type === 'Intent' && m.enabled === 1 && m.provider === 'function_call'),
 );
 
-const draftJson = () => JSON.stringify({ agent: editing.value, plugins: pluginState.value });
+const draftJson = () => JSON.stringify({ agent: editing.value, plugins: pluginState.value, tts: ttsParams.value });
 const dirty = computed(() => !!editing.value && draftJson() !== snapshot.value);
 
 function startEditing(agent: Agent, plugins: Record<string, Record<string, string>>) {
   editing.value = agent;
   pluginState.value = plugins;
+  ttsParams.value = parseTtsParams(agent.tts_params_json);
   snapshot.value = draftJson();
   nameError.value = '';
 }
@@ -108,7 +174,8 @@ function create() {
       vad_model_id: defaultOf('VAD'), asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'),
       vllm_model_id: null, tts_model_id: defaultOf('TTS'),
       memory_model_id: defaultOf('Memory'), intent_model_id: defaultOf('Intent'),
-      tts_voice_id: null, tts_language: null, chat_history_conf: 1, is_default: 0, plugins: [], device_count: 0,
+      tts_voice_id: null, tts_language: null, chat_history_conf: 1, tts_params_json: '{}', is_default: 0,
+      plugins: [], device_count: 0,
     },
     {},
   );
@@ -159,6 +226,8 @@ async function save() {
     // 接口是整体覆盖,漏传这个字段会把已设的语言清空
     tts_language: agent.tts_language ?? null,
     chat_history_conf: agent.chat_history_conf,
+    // 同样是整体覆盖:不传会清空。非千问合成时也照存,换回千问时参数还在
+    tts_params: ttsParamsPayload(),
   };
   const creating = !agent.id;
   saving.value = true;
@@ -330,8 +399,12 @@ const PLUGIN_ICON: Record<string, IconName> = {
           <span class="field-label">音色</span>
           <select v-model="editing.tts_voice_id" class="select" @change="editing.tts_language = null">
             <option :value="null">用语音合成模型自带的默认音色</option>
-            <option v-for="voice in voicesOfModel" :key="voice.id" :value="voice.id">{{ voice.name }}</option>
+            <option
+              v-for="voice in voicesOfModel" :key="voice.id" :value="voice.id"
+              :disabled="voice.status !== 'ok' && voice.id !== editing.tts_voice_id"
+            >{{ voice.name }}{{ VOICE_STATUS[voice.status] }}</option>
           </select>
+          <span class="field-hint">音色在「音色」页管理;审核中的定制音色暂时不能选。</span>
         </label>
         <label v-if="voiceLanguages.length" class="field">
           <span class="field-label">合成语言</span>
@@ -340,6 +413,30 @@ const PLUGIN_ICON: Record<string, IconName> = {
             <option v-for="language in voiceLanguages" :key="language" :value="language">{{ language }}</option>
           </select>
         </label>
+        <template v-if="qwenTts">
+          <label class="field">
+            <span class="field-label">语速 {{ Number(ttsParams.rate).toFixed(2) }}</span>
+            <input v-model.number="ttsParams.rate" type="range" min="0.5" max="2" step="0.05" />
+          </label>
+          <label class="field">
+            <span class="field-label">音调 {{ Number(ttsParams.pitch).toFixed(2) }}</span>
+            <input v-model.number="ttsParams.pitch" type="range" min="0.5" max="2" step="0.05" />
+          </label>
+          <label class="field">
+            <span class="field-label">音量 {{ ttsParams.volume }}</span>
+            <input v-model.number="ttsParams.volume" type="range" min="0" max="100" step="1" />
+          </label>
+          <label class="field">
+            <span class="field-label">语气指令</span>
+            <input v-model="ttsParams.instruction" class="input" type="text" maxlength="50" placeholder="例如:像幼儿园老师一样温柔、耐心" />
+            <span class="field-hint">千问合成专用,至多 50 个汉字。</span>
+          </label>
+          <div class="field" style="justify-content: flex-end">
+            <button class="btn" type="button" style="align-self: flex-start" :aria-busy="previewing" @click="previewVoice">
+              <AppIcon name="volume" :size="16" /><span>试听当前声音</span>
+            </button>
+          </div>
+        </template>
         <label class="field">
           <span class="field-label">对话记录</span>
           <select v-model.number="editing.chat_history_conf" class="select">

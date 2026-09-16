@@ -104,3 +104,28 @@ test('迁移之后 seed 照常工作,且可以重复执行', () => {
   seed(conn);
   assert.ok(one(conn, 'SELECT 1 FROM agents WHERE id = ?', DEFAULT_AGENT_ID));
 });
+
+test('v1 的库升级到音色定制:原有音色记作系统音色且可用,智能体合成参数默认为空对象', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, MIGRATIONS.filter((migration) => migration.version <= 1));
+  seed(conn);
+  conn.prepare("INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Omni', 'TTS', 'Omni', 'gateway_omni_tts', '{}')").run();
+  conn.prepare("INSERT INTO voices (id, tts_model_id, name, voice, languages) VALUES ('v_ethan', 'TTS_Omni', 'Ethan', 'Ethan', '中文')").run();
+  conn.prepare('UPDATE agents SET tts_model_id = ?, tts_voice_id = ? WHERE id = ?').run('TTS_Omni', 'v_ethan', DEFAULT_AGENT_ID);
+  assert.equal(schemaVersion(conn), 1);
+
+  prepareDb(conn);
+
+  assert.equal(schemaVersion(conn), LATEST);
+  const voice = one<{ kind: string; status: string; voice: string; created_at: string | null }>(
+    conn, 'SELECT kind, status, voice, created_at FROM voices WHERE id = ?', 'v_ethan',
+  );
+  assert.deepEqual({ ...voice }, { kind: 'system', status: 'ok', voice: 'Ethan', created_at: null });
+  const agent = one<{ tts_voice_id: string; tts_params_json: string }>(
+    conn, 'SELECT tts_voice_id, tts_params_json FROM agents WHERE id = ?', DEFAULT_AGENT_ID,
+  );
+  assert.equal(agent?.tts_voice_id, 'v_ethan');
+  assert.equal(agent?.tts_params_json, '{}');
+  assert.throws(() => conn.prepare("UPDATE voices SET kind = 'bogus' WHERE id = 'v_ethan'").run(), /CHECK/u);
+});

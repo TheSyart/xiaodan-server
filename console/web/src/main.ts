@@ -20,6 +20,7 @@ const router = createRouter({
     { path: '/login', component: () => import('./views/Login.vue'), meta: { title: '登录' } },
     { path: '/devices', component: () => import('./views/Devices.vue'), meta: { title: '设备' } },
     { path: '/agents', component: () => import('./views/Agents.vue'), meta: { title: '智能体' } },
+    { path: '/voices', component: () => import('./views/Voices.vue'), meta: { title: '音色' } },
     { path: '/models', component: () => import('./views/Models.vue'), meta: { title: '模型' } },
     { path: '/chats', component: () => import('./views/Chats.vue'), meta: { title: '对话记录' } },
     { path: '/words', component: () => import('./views/Words.vue'), meta: { title: '读音替换' } },

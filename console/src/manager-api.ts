@@ -44,6 +44,7 @@ interface AgentRow {
   tts_voice_id: string | null;
   tts_language: string | null;
   chat_history_conf: number;
+  tts_params_json: string;
 }
 
 const ok = (data: unknown) => ({ code: 0, msg: 'success', data });
@@ -70,6 +71,33 @@ function loadModel(conn: Db, id: string | null | undefined): ModelRow | undefine
  * `skip` 里的类型会被整个略过 —— 用于服务端已经实例化过同一个模型的情况,
  * 省掉一次重复加载(VAD 要载模型文件,重载一次代价不小)。
  */
+/**
+ * 智能体单独调的合成参数。只认千问合成:它的 rate/pitch 是 0.5-2 的倍数、volume 是 0-100,
+ * 别家同名参数的量纲不同(EdgeTTS 的 rate 是 -100~100),硬合进去只会调坏。
+ */
+export function qwenTtsParams(json: string | null | undefined): Record<string, number | string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json ?? '{}');
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null) return {};
+  const source = parsed as Record<string, unknown>;
+  const result: Record<string, number | string> = {};
+  const number = (key: string, low: number, high: number) => {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= low && value <= high) result[key] = value;
+  };
+  number('rate', 0.5, 2);
+  number('pitch', 0.5, 2);
+  number('volume', 0, 100);
+  if (typeof source['instruction'] === 'string' && source['instruction'].trim()) {
+    result['instruction'] = source['instruction'].trim().slice(0, 100);
+  }
+  return result;
+}
+
 function buildModules(
   conn: Db,
   agent: AgentRow,
@@ -102,6 +130,7 @@ function buildModules(
       // 优先读 private_voice,读不到才回落到 voice。
       if (voice) config['private_voice'] = voice;
       if (language) config['language'] = language;
+      if (config['type'] === 'qwen_audio_tts') Object.assign(config, qwenTtsParams(agent.tts_params_json));
     }
 
     if (type === 'Intent') {
@@ -151,9 +180,10 @@ function buildModules(
 
 function agentVoice(conn: Db, agent: AgentRow): { voice?: string; language?: string } {
   if (!agent.tts_voice_id) return {};
+  // 声音设计与复刻的音色要等百炼审核通过(status = ok)才能合成;没通过就不下发,设备用模型的默认音色。
   const row = one<{ voice: string; languages: string }>(
     conn,
-    'SELECT voice, languages FROM voices WHERE id = ?',
+    "SELECT voice, languages FROM voices WHERE id = ? AND status = 'ok'",
     agent.tts_voice_id,
   );
   if (!row) return {};

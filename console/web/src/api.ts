@@ -24,11 +24,44 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+async function failure(response: Response): Promise<ApiError> {
+  if (response.status === 401) window.dispatchEvent(new Event('xiaodan:unauthorized'));
+  let message = `请求失败(${response.status})`;
+  try {
+    message = ((await response.json()) as { error?: string }).error ?? message;
+  } catch {
+    /* 非 JSON 错误体 */
+  }
+  const error = new Error(message) as ApiError;
+  error.status = response.status;
+  return error;
+}
+
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
+  /** 提交 JSON、拿回二进制(音频试听) */
+  async postForBlob(path: string, body: unknown): Promise<Blob> {
+    const response = await fetch(`/api${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw await failure(response);
+    return response.blob();
+  },
+  /** 以原始字节提交文件(声音复刻样本) */
+  async postBlob<T>(path: string, blob: Blob): Promise<T> {
+    const response = await fetch(`/api${path}`, {
+      method: 'POST',
+      headers: { 'content-type': blob.type || 'application/octet-stream' },
+      body: blob,
+    });
+    if (!response.ok) throw await failure(response);
+    return (await response.json()) as T;
+  },
 };
 
 // ---- 后端返回的数据形状 ----
@@ -87,6 +120,24 @@ export interface Voice {
   name: string;
   voice: string;
   languages: string;
+  /** system 服务商自带;design 声音设计;clone 声音复刻 */
+  kind: 'system' | 'design' | 'clone';
+  /** 设计与复刻的音色要百炼审核通过(ok)才能用 */
+  status: 'ok' | 'pending' | 'failed';
+  description: string;
+  tags: string;
+  prompt: string;
+  status_detail: string;
+  created_at: string | null;
+  agent_count: number;
+}
+
+/** 千问合成按智能体调的参数 */
+export interface TtsParams {
+  rate?: number;
+  pitch?: number;
+  volume?: number;
+  instruction?: string;
 }
 
 export interface Agent {
@@ -104,6 +155,8 @@ export interface Agent {
   /** 合成语言;为空时取所选音色支持列表里的第一个 */
   tts_language: string | null;
   chat_history_conf: number;
+  /** TtsParams 的 JSON */
+  tts_params_json: string;
   is_default: number;
   plugins: { plugin_code: string; params_json: string }[];
   device_count: number;

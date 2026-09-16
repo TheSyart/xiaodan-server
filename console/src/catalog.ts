@@ -59,6 +59,23 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
 
   ASR: [
     {
+      provider: 'qwen_audio_asr',
+      label: '千问语音识别(百炼 Qwen-Audio 3.0)',
+      note:
+        '松手后整段音频一次识别,走百炼同步接口,单段 5 分钟以内。业务空间 ID 在百炼控制台「业务空间」里;' +
+        '填了就走业务空间专属域名,不填走 dashscope.aliyuncs.com。热词每行一个,可写「词|权重」,权重 1-5。',
+      fields: [
+        { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
+        { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
+        { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
+        { key: 'model_name', label: '识别模型', type: 'string', default: 'qwen-audio-3.0-asr-flash' },
+        { key: 'vocabulary', label: '热词', type: 'text', default: '小单|5' },
+        { key: 'language_hints', label: '语种提示', type: 'string', hint: '逗号分隔,如 zh,en;留空自动识别' },
+        { key: 'timeout', label: '超时(秒)', type: 'number', default: 8 },
+        OUTPUT_DIR,
+      ],
+    },
+    {
       provider: 'gateway_chat',
       label: '网关识别(chat 接口)',
       note:
@@ -137,6 +154,21 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
   ],
 
   TTS: [
+    {
+      provider: 'qwen_audio_tts',
+      label: '千问语音合成(百炼 Qwen-Audio 3.0)',
+      note:
+        '每句话一个流式合成任务,边合成边播。音色在「音色」页管理:系统音色、声音设计、声音复刻都挂在这个模型下,' +
+        '复刻与设计出的音色只能用于这里填的合成模型。语速、音调、音量与语气指令按智能体单独设置。',
+      fields: [
+        { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
+        { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
+        { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
+        { key: 'model_name', label: '合成模型', type: 'string', default: 'qwen-audio-3.0-tts-flash' },
+        { key: 'voice', label: '默认音色', type: 'string', default: 'longanhuan_v3.6' },
+        OUTPUT_DIR,
+      ],
+    },
     {
       provider: 'gateway_omni_tts',
       label: '网关合成(Omni chat 接口)',

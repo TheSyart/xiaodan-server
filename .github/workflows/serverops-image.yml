@@ -187,6 +187,7 @@ jobs:
           docker exec xiaodan-engine-smoke python -c "
           import onnxruntime, opuslib_next, numpy
           import core.providers.asr.gateway_chat as a, core.providers.tts.gateway_omni_tts as t
+          import core.providers.asr.qwen_audio_asr as qa, core.providers.tts.qwen_audio_tts as qt
           onnxruntime.InferenceSession('/opt/xiaozhi-esp32-server/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx', providers=['CPUExecutionProvider'])
           opuslib_next.Decoder(16000, 1)
           print('audio stack ok', numpy.__version__)
@@ -201,6 +202,8 @@ jobs:
           docker exec xiaodan-engine-smoke grep -q '_xd_patched_response_with_functions' core/providers/llm/openai/openai.py
           # DSML 文本工具调用经真实的 openai provider 与引擎的合并逻辑走一遍(说明见 server/tests/smoke_engine.py 开头)
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_engine.py
+          # 千问识别与合成对着容器里假的百炼服务端走一遍:协议顺序、打断、失败重试、保活、上游 processed_chars 修复(说明见文件开头)
+          docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_qwen_audio.py
 
       - name: Record trusted build proof (console)
         shell: bash

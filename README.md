@@ -131,6 +131,29 @@ New installations default to function calling with these three plugins ticked. E
 switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
 function calling: OpenAI `tools` with streamed `tool_calls`, or one of the text forms described above.
 
+## Qwen speech and voices
+
+Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:
+
+- Recognition `qwen_audio_asr`: after the button is released the whole clip is wrapped as WAV and sent to the synchronous
+  `qwen-audio-3.0-asr-flash` endpoint, with optional hot words.
+- Synthesis `qwen_audio_tts`: `qwen-audio-3.0-tts-flash` over the CosyVoice WebSocket protocol, **one task per sentence**,
+  encoding PCM as it arrives. Upstream `alibl_stream` is not reused: it opens one task per turn, so pauses while the console runs
+  multi-step tools let the service close the idle task, and it holds audio files until the end of the turn.
+  The sample rate follows the engine connection's `sample_rate` (24000 in the handshake template), matching the engine's Opus encoder.
+- Two upstream base-class problems are fixed on the way: text after an audio file inserted mid-turn was skipped (a wrong
+  `processed_chars` increment), and audio-file playback now inserts a `sentence_start` about every 20 seconds so the device's
+  60-second playback watchdog does not cut long music or stories.
+- The pure logic of both providers lives in `server/engine/qwen_audio.py` (unit tests); `server/tests/smoke_qwen_audio.py` runs the
+  networking parts inside the image against fake Model Studio servers.
+
+The Voices page manages voices under a Qwen synthesis model: import the 12 named system voices (three of them child voices),
+preview, **voice design** (from a text description) and **voice cloning** (10–20 seconds of speech, consent checkbox required).
+Designed and cloned voices are only sent to devices after Model Studio approves them; until then devices use the model's default voice.
+Cloning samples go through Model Studio's temporary upload (`oss://`) first; if that fails the console serves a one-time link valid for
+10 minutes at `/xiaozhi/ota/voice-sample/<token>` (nginx does not apply unified auth to that prefix, so Model Studio can fetch it),
+revoked as soon as the create request returns. Each agent can tune rate, pitch, volume and a tone instruction.
+
 ## Layout
 
 ```
@@ -143,15 +166,16 @@ console/            the console (Node + Vue)
     catalog.ts        ← provider and plugin catalogue (code constants, not database rows)
     schema.sql        ← v0 baseline schema
     migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
+    voice/            ← voices: Model Studio preview, voice design and cloning, system voice list, one-time sample links
     cli.ts            ← CLI: set a password, import keys from an old config
-  web/                frontend: devices, agents, models, chat logs, pronunciation fixes, settings;
+  web/                frontend: devices, agents, voices, models, chat logs, pronunciation fixes, settings;
                       light and dark themes, no external assets (same-origin Content-Security-Policy)
   test/               contract tests
 server/             companion files for the xiaozhi server
-  providers/          custom gateway ASR / TTS providers
-  engine/             module added to the engine: turns tool calls written as text into structured calls
+  providers/          custom ASR / TTS providers: model gateway (chat endpoint) and Qwen speech (Model Studio)
+  engine/             modules added to the engine: tool-call text conversion, pure logic for Qwen speech
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
-  tests/              unit tests for the plugins and the tool-call text conversion (standard library only) and two image smoke scripts
+  tests/              unit tests for the plugins, tool-call text conversion and Qwen speech (standard library only) and three image smoke scripts
   prompts/            prompt template
   config.api.yaml     API-mode configuration template
 ```

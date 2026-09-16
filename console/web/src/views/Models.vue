@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { api, type Catalog, type Model, type ProviderDef, type Voice } from '../api';
+import { RouterLink } from 'vue-router';
+import { api, type Catalog, type Model, type ProviderDef } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
 import ModalDialog from '../components/ModalDialog.vue';
@@ -11,7 +12,6 @@ import type { IconName } from '../icons';
 import { confirmDialog, toast, toastError } from '../ui';
 
 const models = ref<Model[]>([]);
-const voices = ref<Voice[]>([]);
 const catalog = ref<Catalog | null>(null);
 const loading = ref(true);
 const loadError = ref('');
@@ -31,27 +31,14 @@ const revealed = ref<Record<string, boolean>>({});
 const draftError = ref('');
 const saving = ref(false);
 
-interface VoiceDraft {
-  tts_model_id: string;
-  id: string;
-  name: string;
-  voice: string;
-  languages: string;
-}
-const voiceDraft = ref<VoiceDraft | null>(null);
-const voiceError = ref('');
-const savingVoice = ref(false);
-
 async function load() {
   loadError.value = '';
   try {
-    const [m, v, c] = await Promise.all([
+    const [m, c] = await Promise.all([
       api.get<{ items: Model[] }>('/models'),
-      api.get<{ items: Voice[] }>('/voices'),
       api.get<Catalog>('/catalog'),
     ]);
     models.value = m.items;
-    voices.value = v.items;
     catalog.value = c;
   } catch (e) {
     loadError.value = (e as Error).message;
@@ -84,8 +71,6 @@ const modelsOf = (type: string) => models.value.filter((m) => m.model_type === t
 const currentProvider = computed<ProviderDef | undefined>(() =>
   draft.value ? providersOf(draft.value.model_type).find((p) => p.provider === draft.value!.provider) : undefined,
 );
-const ttsModels = computed(() => models.value.filter((m) => m.model_type === 'TTS'));
-const modelName = (id: string) => models.value.find((m) => m.id === id)?.name ?? id;
 
 function openCreate(type: string) {
   const provider = providersOf(type)[0];
@@ -191,49 +176,6 @@ async function remove(model: Model) {
   }
 }
 
-function openVoice() {
-  voiceDraft.value = { tts_model_id: ttsModels.value[0]?.id ?? '', id: '', name: '', voice: '', languages: '中文' };
-  voiceError.value = '';
-}
-
-async function saveVoice() {
-  const v = voiceDraft.value;
-  if (!v || savingVoice.value) return;
-  voiceError.value = '';
-  if (!v.tts_model_id || !v.id.trim() || !v.voice.trim()) {
-    voiceError.value = '请选择语音合成模型,并填写标识与音色值。';
-    return;
-  }
-  savingVoice.value = true;
-  try {
-    await api.post('/voices', {
-      tts_model_id: v.tts_model_id,
-      id: v.id.trim(),
-      name: v.name.trim() || v.voice.trim(),
-      voice: v.voice.trim(),
-      languages: v.languages.trim() || '中文',
-    });
-    toast('已添加音色');
-    voiceDraft.value = null;
-    await load();
-  } catch (e) {
-    voiceError.value = (e as Error).message;
-  } finally {
-    savingVoice.value = false;
-  }
-}
-
-async function removeVoice(voice: Voice) {
-  const ok = await confirmDialog({ title: `删除音色「${voice.name}」?`, confirmText: '删除', danger: true });
-  if (!ok) return;
-  try {
-    await api.del(`/voices/${voice.id}`);
-    toast('已删除音色');
-    await load();
-  } catch (e) {
-    toastError(e);
-  }
-}
 </script>
 
 <template>
@@ -292,39 +234,10 @@ async function removeVoice(voice: Voice) {
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-head">
-        <div>
-          <h2>
-            <span class="stat-icon tone-violet" style="width: 30px; height: 30px; border-radius: 9px"><AppIcon name="user" :size="16" /></span>
-            音色
-          </h2>
-          <p>音色挂在某个语音合成模型下,智能体再从中挑一个。不加也可以,那样会用模型自带的默认音色。</p>
-        </div>
-        <div class="card-actions">
-          <button class="btn btn-sm" type="button" :disabled="ttsModels.length === 0" @click="openVoice">
-            <AppIcon name="plus" :size="14" /><span>新增音色</span>
-          </button>
-        </div>
-      </div>
-      <EmptyState
-        v-if="voices.length === 0" title="还没有音色"
-        :description="ttsModels.length === 0 ? '先在上面添加一个语音合成模型。' : '点右上角的新增音色。'"
-      />
-      <div v-else>
-        <div v-for="voice in voices" :key="voice.id" class="model-row">
-          <div class="model-info">
-            <div class="model-name">{{ voice.name }}</div>
-            <div class="cell-sub">
-              <span class="chip-mono">{{ voice.voice }}</span> · {{ modelName(voice.tts_model_id) }} · {{ voice.languages }}
-            </div>
-          </div>
-          <button class="btn btn-ghost btn-sm danger" type="button" @click="removeVoice(voice)">
-            <AppIcon name="trash" :size="14" /><span>删除</span>
-          </button>
-        </div>
-      </div>
-    </section>
+    <div class="callout info">
+      <AppIcon name="info" :size="18" />
+      <div class="callout-body">音色(系统音色、声音设计、声音复刻)在 <RouterLink to="/voices">音色</RouterLink> 页管理。</div>
+    </div>
   </template>
 
   <ModalDialog
@@ -370,6 +283,10 @@ async function removeVoice(voice: Voice) {
               <AppIcon :name="revealed[field.key] ? 'eyeOff' : 'eye'" :size="15" />
             </button>
           </div>
+          <textarea
+            v-else-if="field.type === 'text'" v-model="draft.config[field.key]" class="textarea" rows="3"
+            :placeholder="String(field.default ?? '')"
+          ></textarea>
           <input
             v-else v-model="draft.config[field.key]" class="input" :type="field.type === 'number' ? 'number' : 'text'"
             :placeholder="String(field.default ?? '')"
@@ -387,42 +304,4 @@ async function removeVoice(voice: Voice) {
     </template>
   </ModalDialog>
 
-  <ModalDialog :open="!!voiceDraft" title="新增音色" @close="voiceDraft = null">
-    <form v-if="voiceDraft" id="voice-form" class="stack" @submit.prevent="saveVoice">
-      <div v-if="voiceError" class="callout danger" style="margin: 0" role="alert">
-        <AppIcon name="alert" :size="18" /><div class="callout-body">{{ voiceError }}</div>
-      </div>
-      <label class="field">
-        <span class="field-label">所属语音合成模型</span>
-        <select v-model="voiceDraft.tts_model_id" class="select">
-          <option v-for="model in ttsModels" :key="model.id" :value="model.id">{{ model.name }}</option>
-        </select>
-      </label>
-      <div class="form-grid">
-        <label class="field">
-          <span class="field-label">标识<span class="req">*</span></span>
-          <input v-model="voiceDraft.id" class="input mono" type="text" placeholder="voice_ethan" />
-        </label>
-        <label class="field">
-          <span class="field-label">显示名称</span>
-          <input v-model="voiceDraft.name" class="input" type="text" placeholder="Ethan" />
-        </label>
-      </div>
-      <label class="field">
-        <span class="field-label">音色值<span class="req">*</span></span>
-        <input v-model="voiceDraft.voice" class="input mono" type="text" placeholder="传给服务商的音色名,例如 Ethan" />
-      </label>
-      <label class="field">
-        <span class="field-label">支持的语言</span>
-        <input v-model="voiceDraft.languages" class="input" type="text" placeholder="中文" />
-        <span class="field-hint">多个语言用顿号分隔,例如 中文、粤语。智能体的「合成语言」从这里挑。</span>
-      </label>
-    </form>
-    <template #footer>
-      <button class="btn" type="button" @click="voiceDraft = null">取消</button>
-      <button class="btn btn-primary" type="submit" form="voice-form" :aria-busy="savingVoice">
-        <AppIcon name="check" :size="16" /><span>保存</span>
-      </button>
-    </template>
-  </ModalDialog>
 </template>

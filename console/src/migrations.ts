@@ -63,4 +63,33 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'voice-customization',
+    up(conn) {
+      conn.exec(`
+        -- 音色来源:system 服务商自带;design 声音设计(一段文字描述生成);clone 声音复刻(一段录音生成)。
+        -- 后两种在百炼侧有审核,状态从 pending 变成 ok 才能用于合成;failed 表示审核未过或创建失败。
+        ALTER TABLE voices ADD COLUMN kind TEXT NOT NULL DEFAULT 'system'
+          CHECK (kind IN ('system', 'design', 'clone'));
+        ALTER TABLE voices ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'
+          CHECK (status IN ('ok', 'pending', 'failed'));
+        -- 给人看的说明,例如「女 · 5 岁 · 儿童陪伴」;tags 逗号分隔,用于筛选(如「儿童」)
+        ALTER TABLE voices ADD COLUMN description TEXT NOT NULL DEFAULT '';
+        ALTER TABLE voices ADD COLUMN tags TEXT NOT NULL DEFAULT '';
+        -- 声音设计用的文字描述;复刻时留空
+        ALTER TABLE voices ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
+        -- 复刻样本在数据目录里的文件名(voice-samples/ 下),便于重新复刻;其余为空
+        ALTER TABLE voices ADD COLUMN sample_file TEXT NOT NULL DEFAULT '';
+        -- 最近一次状态查询或创建失败的原因
+        ALTER TABLE voices ADD COLUMN status_detail TEXT NOT NULL DEFAULT '';
+        -- ADD COLUMN 不允许非常量默认值,创建时间由写入方填
+        ALTER TABLE voices ADD COLUMN created_at TEXT;
+
+        -- 按智能体调的合成参数:{"rate":1.0,"pitch":1.0,"volume":50,"instruction":"…"}。
+        -- 只对千问合成生效,下发时合进 TTS 配置;其他服务商的同名参数含义不同,不合并。
+        ALTER TABLE agents ADD COLUMN tts_params_json TEXT NOT NULL DEFAULT '{}';
+      `);
+    },
+  },
 ];

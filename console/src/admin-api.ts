@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Db } from './db.ts';
-import { all, one, run, tx } from './db.ts';
+import { all, dataDir, one, run, tx } from './db.ts';
 import { MODEL_TYPES, PLUGINS, PROVIDERS, providerDef, type ModelType } from './catalog.ts';
 import { DEFAULT_SETTINGS, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
@@ -14,6 +14,8 @@ import {
   sessionToken, setAdmin,
 } from './auth.ts';
 import { bindByCode, canonicalMac, unbindDevice } from './identity.ts';
+import type { FetchLike } from './voice/dashscope.ts';
+import { voiceRoutes } from './voice/routes.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
 
@@ -56,11 +58,26 @@ const agentSchema = z.object({
   tts_voice_id: idSchema.nullish(),
   tts_language: z.string().max(32).nullish(),
   chat_history_conf: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
+  // 千问合成的语速、音调、音量与语气指令。整体覆盖:不传视为清空
+  tts_params: z
+    .object({
+      rate: z.number().min(0.5).max(2).optional(),
+      pitch: z.number().min(0.5).max(2).optional(),
+      volume: z.number().int().min(0).max(100).optional(),
+      instruction: z.string().max(100).optional(),
+    })
+    .default({}),
 });
 
 const nullable = (value: string | null | undefined) => (value === undefined || value === '' ? null : value);
 
-export function adminApi(conn: Db): Hono {
+export interface AdminDeps {
+  /** 访问百炼等外部服务用的 fetch,测试里换成假的 */
+  fetch?: FetchLike;
+  dataDir?: () => string;
+}
+
+export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   const app = new Hono({ strict: false });
 
   // ---- 无需登录 ----
@@ -275,40 +292,9 @@ export function adminApi(conn: Db): Hono {
     return c.json({ ok: true });
   });
 
-  // ---- 音色 ----
+  // ---- 音色(系统音色、声音设计、声音复刻,见 voice/routes.ts) ----
 
-  app.get('/voices', (c) =>
-    c.json({
-      items: all(conn, 'SELECT id, tts_model_id, name, voice, languages FROM voices ORDER BY tts_model_id, sort, id'),
-    }),
-  );
-
-  app.post('/voices', async (c) => {
-    const parsed = z
-      .object({
-        id: idSchema,
-        tts_model_id: idSchema,
-        name: z.string().min(1).max(64),
-        voice: z.string().min(1).max(128),
-        languages: z.string().max(64).default('中文'),
-      })
-      .safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
-    if (!one(conn, "SELECT 1 FROM models WHERE id = ? AND model_type = 'TTS'", parsed.data.tts_model_id)) {
-      return c.json({ error: '指定的 TTS 模型不存在' }, 400);
-    }
-    run(
-      conn,
-      'INSERT OR REPLACE INTO voices (id, tts_model_id, name, voice, languages) VALUES (?, ?, ?, ?, ?)',
-      parsed.data.id, parsed.data.tts_model_id, parsed.data.name, parsed.data.voice, parsed.data.languages,
-    );
-    return c.json({ ok: true });
-  });
-
-  app.delete('/voices/:id', (c) => {
-    run(conn, 'DELETE FROM voices WHERE id = ?', c.req.param('id'));
-    return c.json({ ok: true });
-  });
+  app.route('/voices', voiceRoutes(conn, { fetch: deps.fetch ?? fetch, dataDir: deps.dataDir ?? dataDir }));
 
   // ---- 智能体 ----
 
@@ -331,11 +317,11 @@ export function adminApi(conn: Db): Hono {
       conn,
       `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, vllm_model_id,
                            tts_model_id, memory_model_id, intent_model_id, tts_voice_id, tts_language,
-                           chat_history_conf, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                           chat_history_conf, tts_params_json, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       id, d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
-      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf,
+      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params),
     );
     return c.json({ ok: true, id });
   });
@@ -350,11 +336,12 @@ export function adminApi(conn: Db): Hono {
       conn,
       `UPDATE agents SET name = ?, system_prompt = ?, vad_model_id = ?, asr_model_id = ?, llm_model_id = ?,
                          vllm_model_id = ?, tts_model_id = ?, memory_model_id = ?, intent_model_id = ?,
-                         tts_voice_id = ?, tts_language = ?, chat_history_conf = ?, updated_at = datetime('now')
+                         tts_voice_id = ?, tts_language = ?, chat_history_conf = ?, tts_params_json = ?,
+                         updated_at = datetime('now')
        WHERE id = ?`,
       d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
-      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, id,
+      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params), id,
     );
     return c.json({ ok: true });
   });
