@@ -95,6 +95,9 @@ export interface PluginDef {
   description: string;
   keyless: boolean;
   fields: ProviderField[];
+  /** engine 只在引擎旧路径生效;agent 只在控制塔运行时生效;both 两边都行 */
+  runtime: 'engine' | 'agent' | 'both';
+  group?: string;
 }
 
 export interface Catalog {
@@ -157,6 +160,15 @@ export interface Agent {
   chat_history_conf: number;
   /** TtsParams 的 JSON */
   tts_params_json: string;
+  /** 大脑在哪:engine 引擎旧路径 / agent 控制塔智能体运行时 */
+  runtime: 'engine' | 'agent';
+  max_steps: number;
+  safety_level: 'standard' | 'child';
+  description: string;
+  greeting: string;
+  role_template: string;
+  /** {"thinking":false,"temperature":0.8} */
+  llm_params_json: string;
   is_default: number;
   plugins: { plugin_code: string; params_json: string }[];
   device_count: number;
@@ -240,4 +252,46 @@ export interface CorrectWord {
   agent_id: string;
   source: string;
   target: string;
+}
+
+export interface RuntimeStatus {
+  bridge: { ok: boolean; connections?: number; error?: string };
+  bridge_url: string;
+  turn_url: string;
+}
+
+/**
+ * 以流的方式读一个 text/event-stream 接口,每解析出一个事件回调一次。
+ * EventSource 只能发 GET,试聊要 POST 一段 JSON,所以自己解析。
+ */
+export async function postEventStream(
+  path: string, body: unknown, onEvent: (event: Record<string, unknown>) => void, signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok || !response.body) throw await failure(response);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    pending += decoder.decode(value, { stream: true });
+    let boundary: number;
+    while ((boundary = pending.indexOf('\n\n')) >= 0) {
+      const block = pending.slice(0, boundary);
+      pending = pending.slice(boundary + 2);
+      const data = block.split('\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6)).join('\n');
+      if (!data) continue;
+      try {
+        onEvent(JSON.parse(data) as Record<string, unknown>);
+      } catch {
+        /* 忽略坏事件 */
+      }
+    }
+  }
 }

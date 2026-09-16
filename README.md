@@ -131,6 +131,40 @@ New installations default to function calling with these three plugins ticked. E
 switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
 function calling: OpenAI `tools` with streamed `tool_calls`, or one of the text forms described above.
 
+## Agent brain (console runtime)
+
+Each agent (role) has one of two "brains", switchable on the Agents page; switching back is the rollback:
+
+- **Engine path (legacy)**: the upstream engine runs tools via function calling, at most five levels deep, with one global prompt template.
+- **Console agent**: each turn is handed to the console, which runs a multi-step loop (model → tools → model → … → answer).
+  Tools, MCP, skills, reminders and the content library all live in the console.
+
+```
+device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent" ──POST──▶ console /xiaodan/agent/turn
+                                               ◀── text/event-stream: text · device · media · close_after_turn · heartbeat · done
+          engine: TTS ◀─ text; device messages go straight to the device; audio files are queued for playback
+          engine device bridge :8003 /xiaodan/bridge/* ◀── console: call engine plugins (calendar/weather/volume), announcements, screen pushes
+```
+
+- For these agents agent-models sends the `xiaodan_agent` provider with a per-device token (`mac.HMAC(secret)`), fixes
+  Intent=nointent and Memory=nomem, sends no plugins and sets `chat_history_conf=0` (the console writes chat history itself, tagged with the agent ID).
+- Text streams to the engine as it is generated, so the device starts speaking immediately; tools run in parallel with
+  individual timeouts; when the step budget is used up, a final call without tools forces an answer. A heartbeat every
+  2 seconds lets the provider notice interruptions; interrupting closes the request and the console cancels the model call and tools.
+- The device reconnects (new session) after 150 idle seconds, so the console keeps the last 16 turns per device (the last 3 with
+  full tool exchanges); a new conversation starts after 30 silent minutes.
+- The system prompt is assembled per role: what it can and cannot do is generated from the tools available in the turn instead of
+  being hard-coded in a template; child mode adds child-safety rules.
+- Three more engine patches: register the connection when it is established, unregister in `close()` (the bridge finds connections by
+  session and MAC), and mount `/xiaodan/bridge/*` on the http server (manager-api secret auth). Two engine settings change their
+  defaults (migration v3, only where still at the old default): exit commands are cleared (saying "关闭" closed the connection), and the
+  no-voice disconnect becomes 600 s (with a 150 s device reconnect, speaking between 120 and 150 s triggered a goodbye first).
+- The console's Playground page runs the same loop without hardware and shows every tool step; it can borrow an online device to run
+  the engine-side tools.
+- Pure logic and tests: `server/engine/xiaodan_bridge_core.py` (unit tests), `console/src/agent/` (`console/test/agent.test.ts`);
+  `server/tests/smoke_agent.py` drives the real `chat()` inside the image against a fake console, including interruption,
+  fallbacks and every bridge endpoint.
+
 ## Qwen speech and voices
 
 Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:
@@ -167,13 +201,15 @@ console/            the console (Node + Vue)
     schema.sql        ← v0 baseline schema
     migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
     voice/            ← voices: Model Studio preview, voice design and cloning, system voice list, one-time sample links
+    agent/            ← agent runtime: turn endpoint, multi-step loop, prompts, context, tool registry, device-bridge client
     cli.ts            ← CLI: set a password, import keys from an old config
-  web/                frontend: devices, agents, voices, models, chat logs, pronunciation fixes, settings;
+  web/                frontend: devices, agents, voices, playground, models, chat logs, pronunciation fixes, settings;
                       light and dark themes, no external assets (same-origin Content-Security-Policy)
   test/               contract tests
 server/             companion files for the xiaozhi server
   providers/          custom ASR / TTS providers: model gateway (chat endpoint) and Qwen speech (Model Studio)
-  engine/             modules added to the engine: tool-call text conversion, pure logic for Qwen speech
+  engine/             modules added to the engine: tool-call text conversion, pure logic for Qwen speech, device bridge and the xiaodan_agent provider
+  assets/             reminder chime
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
   tests/              unit tests for the plugins, tool-call text conversion and Qwen speech (standard library only) and three image smoke scripts
   prompts/            prompt template

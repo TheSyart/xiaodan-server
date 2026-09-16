@@ -254,6 +254,13 @@ export interface PluginDef {
   fields: ProviderField[];
   /** 不需要任何密钥即可工作 */
   keyless: boolean;
+  /**
+   * 哪种大脑能用:engine 只在旧路径(引擎按函数调用跑)下生效;agent 只在控制塔运行时下生效;
+   * both 两边都能用(引擎里的插件,控制塔经设备桥调用)。
+   */
+  runtime: 'engine' | 'agent' | 'both';
+  /** 智能体页分组显示用 */
+  group?: string;
 }
 
 export const PLUGINS: PluginDef[] = [
@@ -263,6 +270,7 @@ export const PLUGINS: PluginDef[] = [
   // 库里残留的这类行不会再下发(见 manager-api.ts)。
   {
     code: 'show_calendar',
+    runtime: 'both',
     label: '日期与日历',
     description: '回答"今天几号""星期几""农历几号",并在设备屏幕上显示当月日历。用服务器时间,不联网。',
     keyless: true,
@@ -272,6 +280,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'get_weather',
+    runtime: 'both',
     label: '天气',
     description: '查实时天气与明天预报,并在设备屏幕上显示天气画面。没说城市时按设备 IP 所在城市查。数据来自 Open-Meteo,出错时改用 wttr.in,都不需要密钥。',
     keyless: true,
@@ -282,6 +291,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'set_volume',
+    runtime: 'both',
     label: '语音调音量',
     description: '听懂"大声点""音量调到一半",直接调节设备音量。需要小单固件,原版小智固件会回答"请用按键调"。',
     keyless: true,
@@ -289,6 +299,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'change_role',
+    runtime: 'engine',
     label: '切换人设',
     description: '让用户用一句话临时改变说话风格。',
     keyless: true,
@@ -296,6 +307,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'web_search',
+    runtime: 'engine',
     label: '联网搜索',
     description: '让模型能查它训练数据之外的信息。需要搜索服务的密钥。',
     keyless: false,
@@ -307,6 +319,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'get_news_from_newsnow',
+    runtime: 'engine',
     label: '新闻聚合',
     description: '从 newsnow 拉取热点。公共接口,不需要密钥。',
     keyless: true,
@@ -317,6 +330,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'get_news_from_chinanews',
+    runtime: 'engine',
     label: '中新网新闻',
     description: '读取中新网的 RSS。不需要密钥。',
     keyless: true,
@@ -331,6 +345,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'play_music',
+    runtime: 'engine',
     label: '播放本地音乐',
     description: '播放服务端 music 目录里的文件。设备扬声器很小,效果有限。',
     keyless: true,
@@ -338,6 +353,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'hass_state',
+    runtime: 'engine',
     label: 'HomeAssistant 设备控制',
     description: '通过 HomeAssistant 开关家里的灯与电器。需要 HA 地址与长期令牌。',
     keyless: false,

@@ -129,3 +129,26 @@ test('v1 的库升级到音色定制:原有音色记作系统音色且可用,智
   assert.equal(agent?.tts_params_json, '{}');
   assert.throws(() => conn.prepare("UPDATE voices SET kind = 'bogus' WHERE id = 'v_ethan'").run(), /CHECK/u);
 });
+
+test('v2 升级到智能体运行时:已有智能体保持旧路径,两项引擎参数只改默认值', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, MIGRATIONS.filter((migration) => migration.version <= 2));
+  seed(conn);
+  // 模拟生产库里仍是旧默认值的一项,和用户改过的一项
+  conn.prepare("UPDATE settings SET value = '退出;关闭' WHERE key = 'exit_commands'").run();
+  conn.prepare("UPDATE settings SET value = '300' WHERE key = 'close_connection_no_voice_time'").run();
+  conn.prepare("INSERT INTO chat_messages (mac, session_id, chat_type, content) VALUES ('m', 's', 1, 'hi')").run();
+
+  prepareDb(conn);
+
+  assert.equal(schemaVersion(conn), LATEST);
+  const agent = one<{ runtime: string; max_steps: number; safety_level: string }>(
+    conn, 'SELECT runtime, max_steps, safety_level FROM agents WHERE id = ?', DEFAULT_AGENT_ID,
+  );
+  assert.deepEqual({ ...agent }, { runtime: 'engine', max_steps: 6, safety_level: 'standard' });
+  assert.equal(one<{ value: string }>(conn, "SELECT value FROM settings WHERE key = 'exit_commands'")?.value, '');
+  assert.equal(one<{ value: string }>(conn, "SELECT value FROM settings WHERE key = 'close_connection_no_voice_time'")?.value, '300', '用户改过的值不动');
+  assert.equal(one<{ agent_id: string | null }>(conn, 'SELECT agent_id FROM chat_messages')?.agent_id, null);
+  assert.throws(() => conn.prepare("UPDATE agents SET runtime = 'cloud'").run(), /CHECK/u);
+});

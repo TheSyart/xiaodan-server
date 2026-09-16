@@ -162,7 +162,7 @@ jobs:
           chmod 0600 "$RUNNER_TEMP/engine-data/.config.yaml"
           sudo chown -R 1000:1000 "$RUNNER_TEMP/engine-data"
 
-          docker run --detach --name xiaodan-engine-smoke --network xiaodan-smoke \
+          docker run --detach --name xiaodan-engine-smoke --network xiaodan-smoke --network-alias engine \
             --user 1000:1000 --init --cap-drop ALL --security-opt no-new-privileges \
             --volume "$RUNNER_TEMP/engine-data:/opt/xiaozhi-esp32-server/data" \
             --publish 127.0.0.1:18000:8000 "$ENGINE"
@@ -204,6 +204,22 @@ jobs:
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_engine.py
           # 千问识别与合成对着容器里假的百炼服务端走一遍:协议顺序、打断、失败重试、保活、上游 processed_chars 修复(说明见文件开头)
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_qwen_audio.py
+          # 大脑在控制塔:真实的 chat() 经 xiaodan_agent 走一轮假控制塔,以及设备桥的全部接口(说明见文件开头)
+          docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_agent.py
+          docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.register(self)' core/connection.py
+          docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.unregister(self)' core/connection.py
+          docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.add_bridge_routes' core/http_server.py
+          # 运行中的引擎确实挂上了设备桥,而且控制塔按默认地址 http://engine:8003 够得着;不带密钥必须 401,带上 200
+          docker exec xiaodan-console-smoke node -e "
+            const s = process.argv[1];
+            (async () => {
+              const bare = await fetch('http://engine:8003/xiaodan/bridge/health');
+              if (bare.status !== 401) throw new Error('设备桥不带密钥应回 401,实际 ' + bare.status);
+              const ok = await fetch('http://engine:8003/xiaodan/bridge/health', { headers: { authorization: 'Bearer ' + s } });
+              if (ok.status !== 200) throw new Error('设备桥带密钥应回 200,实际 ' + ok.status);
+              console.log('bridge reachable', await ok.text());
+            })().catch((e) => { console.error(e); process.exit(1); });
+          " "$secret"
 
       - name: Record trusted build proof (console)
         shell: bash

@@ -6,6 +6,11 @@ import { secureHeaders } from 'hono/secure-headers';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Db } from './db.ts';
+import { dataDir, one } from './db.ts';
+import { Bridge } from './agent/bridge.ts';
+import { agentRoutes } from './agent/routes.ts';
+import type { AgentDeps } from './agent/types.ts';
+import { SECRET_KEY } from './seed.ts';
 import { adminApi, type AdminDeps } from './admin-api.ts';
 import { managerApi } from './manager-api.ts';
 import { otaApi } from './ota.ts';
@@ -16,6 +21,8 @@ export interface AppOptions {
   webRoot?: string;
   /** 管理接口访问外部服务的依赖,测试注入 */
   admin?: AdminDeps;
+  /** 智能体运行时的依赖(模型接口、设备桥),测试注入 */
+  agent?: Partial<AgentDeps>;
 }
 
 export function createApp(conn: Db, options: AppOptions = {}): Hono {
@@ -69,7 +76,20 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
   app.route('/xiaozhi', managerApi(conn));
 
   // 控制台页面的接口
-  app.route('/api', adminApi(conn, options.admin));
+  // 智能体运行时:引擎经内网调 /xiaodan/agent/turn(按设备令牌鉴权);控制塔经设备桥找设备
+  const setting = (key: string) => one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', key)?.value ?? '';
+  const fetchImpl = options.agent?.fetch ?? options.admin?.fetch ?? fetch;
+  const agentDeps: AgentDeps = {
+    conn,
+    fetch: fetchImpl,
+    bridge: options.agent?.bridge ?? new Bridge(() => setting('agent.bridge_url') || 'http://engine:8003', () => setting(SECRET_KEY), fetchImpl),
+    dataDir: options.agent?.dataDir ?? options.admin?.dataDir ?? dataDir,
+    log: options.agent?.log ?? ((message) => console.log(message)),
+    ...(options.agent?.now ? { now: options.agent.now } : {}),
+  };
+  app.route('/xiaodan', agentRoutes(agentDeps));
+
+  app.route('/api', adminApi(conn, { ...options.admin, agent: agentDeps }));
 
   // 前端。SPA 路由要求"找不到文件就回 index.html",否则刷新子页面会 404。
   const webRoot = options.webRoot;

@@ -89,6 +89,12 @@ COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
 COPY server/engine/qwen_audio.py core/utils/qwen_audio.py
 COPY server/providers/qwen_audio_asr.py core/providers/asr/qwen_audio_asr.py
 COPY server/providers/qwen_audio_tts.py core/providers/tts/qwen_audio_tts.py
+# 智能体大脑在控制塔:引擎的 LLM provider「xiaodan_agent」把一轮对话转给控制塔、执行它回来的事件;
+# 「设备桥」是引擎内网 HTTP 端口上的几个接口,控制塔借它调用引擎插件、主动播报(提醒)。补丁见下面第 4-6 处。
+COPY server/engine/xiaodan_bridge_core.py core/utils/xiaodan_bridge_core.py
+COPY server/engine/xiaodan_bridge.py core/xiaodan_bridge.py
+COPY server/engine/llm/xiaodan_agent.py core/providers/llm/xiaodan_agent/xiaodan_agent.py
+COPY server/assets/chime.wav xiaodan-assets/chime.wav
 # 上游自带的模板在示例里演示放歌报天气,会让模型承诺它没有的能力,故整份替换。
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
@@ -115,6 +121,8 @@ COPY server/engine/xiaodan_tool_text.py core/utils/xiaodan_tool_text.py
 #    而不是 delta.tool_calls。引擎只认后者,于是标记被念出来或整轮沉默,工具一个也没执行。在 openai provider
 #    模块末尾把 response_with_functions 包一层,把这些块转成结构化的工具调用(只放行本轮提供的工具);
 #    不带工具的 response 同样包一层,只删掉这些块。
+# 4-6. 设备桥:连接建立拿到 device-id 后登记、close() 开头注销(登记表按会话与 MAC 查连接);
+#    http 服务建 AppRunner 之前挂上 /xiaodan/bridge/* 路由(内网端口,manager-api secret 鉴权)。
 RUN python - <<'PY'
 import pathlib
 import py_compile
@@ -151,8 +159,39 @@ source = replace_once(
     " direct_answer 文本提取",
 )
 
+source = replace_once(
+    source,
+    '            self.device_id = self.headers.get("device-id", None)\n',
+    '            self.device_id = self.headers.get("device-id", None)\n'
+    + '            from core import xiaodan_bridge\n'
+    + '            xiaodan_bridge.register(self)\n',
+    "取设备 ID 的那一行",
+)
+
+source = replace_once(
+    source,
+    '    async def close(self, ws=None):\n        """资源清理方法"""\n',
+    '    async def close(self, ws=None):\n        """资源清理方法"""\n'
+    + '        from core import xiaodan_bridge\n'
+    + '        xiaodan_bridge.unregister(self)\n',
+    " close() 方法开头",
+)
+
 path.write_text(source, encoding="utf-8")
 py_compile.compile(str(path), doraise=True)
+
+http_path = pathlib.Path("core/http_server.py")
+http_source = replace_once(
+    http_path.read_text(encoding="utf-8"),
+    "                runner = web.AppRunner(app)\n",
+    "                from core import xiaodan_bridge\n"
+    + "                xiaodan_bridge.add_bridge_routes(app, self.config)\n"
+    + "                runner = web.AppRunner(app)\n",
+    " AppRunner 的创建",
+    where="core/http_server.py",
+)
+http_path.write_text(http_source, encoding="utf-8")
+py_compile.compile(str(http_path), doraise=True)
 
 provider_path = pathlib.Path("core/providers/llm/openai/openai.py")
 provider = provider_path.read_text(encoding="utf-8")
@@ -221,7 +260,7 @@ RUN set -eux; \
     find /opt/xiaozhi-esp32-server -name __pycache__ -type d -prune -exec rm -rf {} +; \
     python -m compileall -q /opt/xiaozhi-esp32-server/app.py /opt/xiaozhi-esp32-server/config \
       /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/plugins_func || true; \
-    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py','/opt/xiaozhi-esp32-server/core/utils/qwen_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/qwen_audio_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/qwen_audio_tts.py']]"; \
+    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py','/opt/xiaozhi-esp32-server/core/utils/qwen_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/qwen_audio_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/qwen_audio_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_bridge_core.py','/opt/xiaozhi-esp32-server/core/xiaodan_bridge.py','/opt/xiaozhi-esp32-server/core/providers/llm/xiaodan_agent/xiaodan_agent.py']]"; \
     test -s /opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt
 
 FROM debian:trixie-slim AS engine

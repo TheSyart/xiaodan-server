@@ -15,6 +15,8 @@ import {
 } from './auth.ts';
 import { bindByCode, canonicalMac, unbindDevice } from './identity.ts';
 import type { FetchLike } from './voice/dashscope.ts';
+import { agentAdminRoutes } from './agent/routes.ts';
+import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
@@ -58,6 +60,14 @@ const agentSchema = z.object({
   tts_voice_id: idSchema.nullish(),
   tts_language: z.string().max(32).nullish(),
   chat_history_conf: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
+  // 大脑在哪:engine 旧路径 / agent 控制塔运行时
+  runtime: z.enum(['engine', 'agent']).default('engine'),
+  max_steps: z.number().int().min(1).max(10).default(6),
+  safety_level: z.enum(['standard', 'child']).default('standard'),
+  description: z.string().max(200).default(''),
+  greeting: z.string().max(200).default(''),
+  role_template: z.string().max(64).default(''),
+  llm_params: z.object({ thinking: z.boolean().optional(), temperature: z.number().min(0).max(2).optional() }).default({}),
   // 千问合成的语速、音调、音量与语气指令。整体覆盖:不传视为清空
   tts_params: z
     .object({
@@ -75,6 +85,7 @@ export interface AdminDeps {
   /** 访问百炼等外部服务用的 fetch,测试里换成假的 */
   fetch?: FetchLike;
   dataDir?: () => string;
+  agent?: AgentDeps;
 }
 
 export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
@@ -296,6 +307,9 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
 
   app.route('/voices', voiceRoutes(conn, { fetch: deps.fetch ?? fetch, dataDir: deps.dataDir ?? dataDir }));
 
+  // ---- 智能体运行时:设备桥状态、网页试聊(见 agent/routes.ts) ----
+  if (deps.agent) app.route('/agent-runtime', agentAdminRoutes(deps.agent));
+
   // ---- 智能体 ----
 
   app.get('/agents', (c) => {
@@ -317,11 +331,13 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
       conn,
       `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, vllm_model_id,
                            tts_model_id, memory_model_id, intent_model_id, tts_voice_id, tts_language,
-                           chat_history_conf, tts_params_json, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                           chat_history_conf, tts_params_json, runtime, max_steps, safety_level, description,
+                           greeting, role_template, llm_params_json, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       id, d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
       nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params),
+      d.runtime, d.max_steps, d.safety_level, d.description, d.greeting, d.role_template, JSON.stringify(d.llm_params),
     );
     return c.json({ ok: true, id });
   });
@@ -337,11 +353,13 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
       `UPDATE agents SET name = ?, system_prompt = ?, vad_model_id = ?, asr_model_id = ?, llm_model_id = ?,
                          vllm_model_id = ?, tts_model_id = ?, memory_model_id = ?, intent_model_id = ?,
                          tts_voice_id = ?, tts_language = ?, chat_history_conf = ?, tts_params_json = ?,
-                         updated_at = datetime('now')
+                         runtime = ?, max_steps = ?, safety_level = ?, description = ?, greeting = ?, role_template = ?,
+                         llm_params_json = ?, updated_at = datetime('now')
        WHERE id = ?`,
       d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
-      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params), id,
+      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params),
+      d.runtime, d.max_steps, d.safety_level, d.description, d.greeting, d.role_template, JSON.stringify(d.llm_params), id,
     );
     return c.json({ ok: true });
   });

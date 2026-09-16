@@ -92,4 +92,38 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'agent-runtime',
+    up(conn) {
+      conn.exec(`
+        -- 智能体(角色)的大脑在哪:engine 旧路径,由引擎按函数调用跑工具;agent 新路径,由控制塔的智能体运行时跑多步循环。
+        -- 已有智能体保持 engine,在智能体页手动切换,切回去即回退。
+        ALTER TABLE agents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'engine' CHECK (runtime IN ('engine', 'agent'));
+        -- 一轮对话里最多调几次模型带工具(之后再强制回答一次)
+        ALTER TABLE agents ADD COLUMN max_steps INTEGER NOT NULL DEFAULT 6 CHECK (max_steps BETWEEN 1 AND 10);
+        -- child:提示词加儿童安全约束,内容类工具按儿童标准过滤
+        ALTER TABLE agents ADD COLUMN safety_level TEXT NOT NULL DEFAULT 'standard' CHECK (safety_level IN ('standard', 'child'));
+        -- 模型参数:{"thinking":false,"temperature":0.8}
+        ALTER TABLE agents ADD COLUMN llm_params_json TEXT NOT NULL DEFAULT '{}';
+        -- 给人看的一句话介绍;切换角色时模型据此挑选
+        ALTER TABLE agents ADD COLUMN description TEXT NOT NULL DEFAULT '';
+        -- 从哪个角色模板创建的,仅作标记
+        ALTER TABLE agents ADD COLUMN role_template TEXT NOT NULL DEFAULT '';
+        -- 切换到这个角色后的第一句招呼
+        ALTER TABLE agents ADD COLUMN greeting TEXT NOT NULL DEFAULT '';
+
+        -- 对话记录属于哪个智能体:同一台设备换过角色后仍能区分
+        ALTER TABLE chat_messages ADD COLUMN agent_id TEXT;
+        CREATE INDEX idx_chat_messages_agent ON chat_messages (agent_id, created_at);
+      `);
+      // 两项引擎参数的默认值不适合按键说话的设备,只在用户没改过(仍是旧默认值)时调整:
+      //   exit_commands「退出;关闭」:用户说"关闭"(比如想关掉音乐)会被引擎当成退出指令直接断线;
+      //   close_connection_no_voice_time 120:设备每 150 秒空闲重连,120 到 150 秒之间按键说话会被当成闲置、先念告别语。
+      conn.exec(`
+        UPDATE settings SET value = '', updated_at = datetime('now') WHERE key = 'exit_commands' AND value = '退出;关闭';
+        UPDATE settings SET value = '600', updated_at = datetime('now') WHERE key = 'close_connection_no_voice_time' AND value = '120';
+      `);
+    },
+  },
 ];

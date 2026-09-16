@@ -137,8 +137,10 @@ describe('server-base:服务端启动时拉的基础配置', () => {
     const data = json.data as Record<string, any>;
     assert.equal(typeof data['delete_audio'], 'boolean', 'boolean 型');
     assert.equal(typeof data['tts_timeout'], 'number', 'number 型');
+    // 退出指令默认为空(说"关闭"会被引擎当成断线指令,见迁移 v3);空串要拆成空数组,不是 [""]
     assert.ok(Array.isArray(data['exit_commands']), 'array 型应拆成数组');
-    assert.deepEqual(data['exit_commands'], ['退出', '关闭']);
+    assert.deepEqual(data['exit_commands'], []);
+    assert.deepEqual(data['wakeup_words'], ['你好小单', '小单小单', '你好小智'], '有值的 array 型按分号拆开');
     assert.equal(typeof data['xiaozhi'], 'object', 'json 型应解析成对象');
     assert.equal(data['xiaozhi']['type'], 'hello');
   });

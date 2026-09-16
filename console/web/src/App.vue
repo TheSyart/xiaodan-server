@@ -79,6 +79,7 @@ const NAV: { path: string; label: string; icon: IconName }[] = [
   { path: '/devices', label: '设备', icon: 'device' },
   { path: '/agents', label: '智能体', icon: 'bot' },
   { path: '/voices', label: '音色', icon: 'volume' },
+  { path: '/playground', label: '试聊', icon: 'message' },
   { path: '/models', label: '模型', icon: 'layers' },
   { path: '/chats', label: '对话记录', icon: 'message' },
   { path: '/words', label: '读音替换', icon: 'replace' },

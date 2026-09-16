@@ -15,6 +15,8 @@ import { all, one, run, tx } from './db.ts';
 import { nestSettings, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
 import { PLUGINS } from './catalog.ts';
+import { agentToken } from './agent/token.ts';
+import { onDeviceConfigFetched } from './agent/hooks.ts';
 import {
   canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
 } from './identity.ts';
@@ -45,6 +47,7 @@ interface AgentRow {
   tts_language: string | null;
   chat_history_conf: number;
   tts_params_json: string;
+  runtime: 'engine' | 'agent';
 }
 
 const ok = (data: unknown) => ({ code: 0, msg: 'success', data });
@@ -189,6 +192,36 @@ function agentVoice(conn: Db, agent: AgentRow): { voice?: string; language?: str
   if (!row) return {};
   const language = agent.tts_language ?? row.languages.split('、')[0]?.trim();
   return language ? { voice: row.voice, language } : { voice: row.voice };
+}
+
+/**
+ * 大脑在控制塔的智能体:引擎只保留听、说与设备桥。
+ *   - LLM 换成 xiaodan_agent provider,一轮对话交给控制塔的 /xiaodan/agent/turn;令牌按设备签发;
+ *   - Intent 固定 nointent、Memory 固定 nomem:工具、记忆都在控制塔,引擎再调一遍只会重复;
+ *   - 不下发插件,对话记录由控制塔自己写(引擎再上报会重复)。
+ */
+function applyAgentRuntime(conn: Db, result: Record<string, unknown>, mac: string): void {
+  const setting = (key: string) => one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', key)?.value ?? '';
+  const secret = setting(SECRET_KEY);
+  const selected = { ...((result['selected_module'] as Record<string, string> | undefined) ?? {}) };
+  result['LLM'] = {
+    LLM_XiaodanAgent: {
+      type: 'xiaodan_agent',
+      url: setting('agent.turn_url') || 'http://console:8002/xiaodan/agent/turn',
+      api_key: agentToken(secret, mac),
+      media_secret: secret,
+    },
+  };
+  selected['LLM'] = 'LLM_XiaodanAgent';
+  result['Intent'] = { Intent_nointent: { type: 'nointent' } };
+  selected['Intent'] = 'Intent_nointent';
+  result['Memory'] = { Memory_nomem: { type: 'nomem' } };
+  selected['Memory'] = 'Memory_nomem';
+  result['selected_module'] = selected;
+  delete result['plugins'];
+  result['chat_history_conf'] = 0;
+  // 引擎仍会把它放进自己的系统消息,但控制塔不读;留一句便于看日志时认出来
+  result['prompt'] = '(本智能体由控制塔的智能体运行时驱动,系统提示词在控制塔组装)';
 }
 
 /** 比较前先各自取摘要:两边长度恒为 32 字节,timingSafeEqual 才能用,也不泄露密钥长度。 */
@@ -339,6 +372,10 @@ export function managerApi(conn: Db): Hono {
 
     result['prompt'] = agent.system_prompt.replaceAll('{{assistant_name}}', agent.name || '小单');
     result['summaryMemory'] = agent.summary_memory;
+
+    if (agent.runtime === 'agent') applyAgentRuntime(conn, result, mac);
+    // 设备每次连接都会来取配置:借这个时机补报错过的提醒等(见 agent/hooks.ts),不阻塞响应
+    onDeviceConfigFetched(mac, agent.id);
 
     return c.json(ok(result));
   });

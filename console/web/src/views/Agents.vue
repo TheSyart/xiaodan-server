@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { onBeforeRouteLeave } from 'vue-router';
+import { onBeforeRouteLeave, RouterLink } from 'vue-router';
 import { api, type Agent, type Catalog, type Model, type PluginDef, type TtsParams, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
@@ -23,6 +23,8 @@ const editing = ref<Agent | null>(null);
 const pluginState = ref<Record<string, Record<string, string>>>({});
 /** 千问合成的语速、音调、音量与语气指令;表单里一律是完整的数值,保存时再去掉默认值 */
 const ttsParams = ref({ rate: 1, pitch: 1, volume: 50, instruction: '' });
+/** 模型参数:是否开思考 */
+const llmParams = ref({ thinking: false });
 const snapshot = ref('');
 const saving = ref(false);
 const nameError = ref('');
@@ -71,7 +73,16 @@ const voiceLanguages = computed(() => {
   const voice = voices.value.find((v) => v.id === editing.value?.tts_voice_id);
   return voice ? voice.languages.split('、').map((item) => item.trim()).filter(Boolean) : [];
 });
-const toolsEnabled = computed(() => !!editing.value && toolsOn(editing.value));
+const toolsEnabled = computed(() => !!editing.value && (editing.value.runtime === 'agent' || toolsOn(editing.value)));
+const isAgentRuntime = computed(() => editing.value?.runtime === 'agent');
+/** 控制塔智能体自己管工具与记忆,这两项选了也不生效,不显示 */
+const visibleModelLabels = computed(() =>
+  MODEL_LABELS.filter(([key]) => !isAgentRuntime.value || (key !== 'intent_model_id' && key !== 'memory_model_id')));
+/** 当前大脑能用的插件 */
+const visiblePlugins = computed(() =>
+  (catalog.value?.plugins ?? []).filter((plugin) =>
+    plugin.runtime === 'both' || plugin.runtime === (isAgentRuntime.value ? 'agent' : 'engine')),
+);
 const qwenTts = computed(() => modelById(editing.value?.tts_model_id ?? null)?.provider === 'qwen_audio_tts');
 const selectedVoice = computed(() => voices.value.find((v) => v.id === editing.value?.tts_voice_id));
 const VOICE_STATUS: Record<Voice['status'], string> = { ok: '', pending: '(审核中,暂不可用)', failed: '(未通过审核)' };
@@ -138,13 +149,18 @@ const functionCallModel = computed(() =>
   models.value.find((m) => m.model_type === 'Intent' && m.enabled === 1 && m.provider === 'function_call'),
 );
 
-const draftJson = () => JSON.stringify({ agent: editing.value, plugins: pluginState.value, tts: ttsParams.value });
+const draftJson = () => JSON.stringify({ agent: editing.value, plugins: pluginState.value, tts: ttsParams.value, llm: llmParams.value });
 const dirty = computed(() => !!editing.value && draftJson() !== snapshot.value);
 
 function startEditing(agent: Agent, plugins: Record<string, Record<string, string>>) {
   editing.value = agent;
   pluginState.value = plugins;
   ttsParams.value = parseTtsParams(agent.tts_params_json);
+  try {
+    llmParams.value = { thinking: (JSON.parse(agent.llm_params_json || '{}') as { thinking?: boolean }).thinking === true };
+  } catch {
+    llmParams.value = { thinking: false };
+  }
   snapshot.value = draftJson();
   nameError.value = '';
 }
@@ -175,7 +191,8 @@ function create() {
       vllm_model_id: null, tts_model_id: defaultOf('TTS'),
       memory_model_id: defaultOf('Memory'), intent_model_id: defaultOf('Intent'),
       tts_voice_id: null, tts_language: null, chat_history_conf: 1, tts_params_json: '{}', is_default: 0,
-      plugins: [], device_count: 0,
+      runtime: 'agent', max_steps: 6, safety_level: 'standard', description: '', greeting: '', role_template: '',
+      llm_params_json: '{}', plugins: [], device_count: 0,
     },
     {},
   );
@@ -228,6 +245,13 @@ async function save() {
     chat_history_conf: agent.chat_history_conf,
     // 同样是整体覆盖:不传会清空。非千问合成时也照存,换回千问时参数还在
     tts_params: ttsParamsPayload(),
+    runtime: agent.runtime,
+    max_steps: Number(agent.max_steps) || 6,
+    safety_level: agent.safety_level,
+    description: agent.description,
+    greeting: agent.greeting,
+    role_template: agent.role_template,
+    llm_params: llmParams.value.thinking ? { thinking: true } : {},
   };
   const creating = !agent.id;
   saving.value = true;
@@ -336,8 +360,11 @@ const PLUGIN_ICON: Record<string, IconName> = {
           </dd>
           <dt>语音识别</dt>
           <dd :class="{ muted: !modelById(agent.asr_model_id) }">{{ modelById(agent.asr_model_id)?.name ?? '未设置' }}</dd>
-          <dt>工具调用</dt>
-          <dd><span class="tag dot" :class="toolsOn(agent) ? 'ok' : ''">{{ toolsOn(agent) ? '已开启' : '未开启' }}</span></dd>
+          <dt>大脑</dt>
+          <dd>
+            <span v-if="agent.runtime === 'agent'" class="tag dot ok">控制塔智能体{{ agent.safety_level === 'child' ? ' · 儿童模式' : '' }}</span>
+            <span v-else class="tag dot" :class="toolsOn(agent) ? 'ok' : ''">引擎旧路径 · 工具{{ toolsOn(agent) ? '已开启' : '未开启' }}</span>
+          </dd>
         </dl>
         <div v-if="agentPluginLabels(agent).length" class="chips">
           <span v-for="label in agentPluginLabels(agent)" :key="label" class="tag">{{ label }}</span>
@@ -373,6 +400,11 @@ const PLUGIN_ICON: Record<string, IconName> = {
           <span v-else class="field-hint">人设里写 <code>{{ NAME_PLACEHOLDER }}</code> 会被替换成这个名字。</span>
         </label>
         <label class="field">
+          <span class="field-label">一句话介绍</span>
+          <input v-model="editing.description" class="input" type="text" maxlength="200" placeholder="例如:陪小朋友讲故事、学单词的童童" />
+          <span class="field-hint">设备上说「切换到…」时,智能体按这句话挑角色。</span>
+        </label>
+        <label class="field">
           <span class="field-label">人设</span>
           <textarea v-model="editing.system_prompt" class="textarea" rows="8"></textarea>
           <span class="field-hint">
@@ -384,10 +416,56 @@ const PLUGIN_ICON: Record<string, IconName> = {
 
     <section class="card">
       <div class="card-head">
+        <div>
+          <h2><AppIcon name="sparkles" :size="18" />大脑</h2>
+          <p>「控制塔智能体」支持一轮里连续调用多个工具、MCP、技能、提醒与内容库;「引擎旧路径」是原来的做法,切回去即回退。</p>
+        </div>
+        <div class="card-actions"><RouterLink class="btn btn-sm" to="/playground"><AppIcon name="message" :size="14" /><span>去试聊</span></RouterLink></div>
+      </div>
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">大脑</span>
+          <select v-model="editing.runtime" class="select">
+            <option value="agent">控制塔智能体(推荐)</option>
+            <option value="engine">引擎旧路径</option>
+          </select>
+        </label>
+        <label v-if="isAgentRuntime" class="field">
+          <span class="field-label">一轮最多调用几步工具</span>
+          <input v-model.number="editing.max_steps" class="input" type="number" min="1" max="10" />
+          <span class="field-hint">到上限后强制回答。步数越多越能办复杂的事,也越慢。</span>
+        </label>
+        <label v-if="isAgentRuntime" class="field">
+          <span class="field-label">内容安全</span>
+          <select v-model="editing.safety_level" class="select">
+            <option value="standard">标准</option>
+            <option value="child">儿童模式</option>
+          </select>
+          <span class="field-hint">儿童模式在提示词里加儿童安全规则,搜索与画画按儿童标准约束。</span>
+        </label>
+        <label v-if="isAgentRuntime" class="field">
+          <span class="field-label">深度思考</span>
+          <select v-model="llmParams.thinking" class="select">
+            <option :value="false">关闭(推荐,回答快)</option>
+            <option :value="true">开启(更慢,适合复杂推理)</option>
+          </select>
+        </label>
+        <label v-if="isAgentRuntime" class="field span-all">
+          <span class="field-label">切换到这个角色时的招呼</span>
+          <input v-model="editing.greeting" class="input" type="text" maxlength="200" placeholder="例如:嗨,我是童童,今天想听故事还是学单词呀?" />
+        </label>
+      </div>
+      <div v-if="isAgentRuntime && !editing.llm_model_id" class="callout warn" style="margin: 12px 0 0">
+        <AppIcon name="alert" :size="18" /><div class="callout-body">控制塔智能体需要在下面的「对话模型」里选一个模型(例如 DeepSeek)。</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <div><h2><AppIcon name="layers" :size="18" />模型组合</h2><p>选「不启用」表示不用这个模块。可选的模型在「模型」页维护。</p></div>
       </div>
       <div class="form-grid">
-        <label v-for="[key, type, label, hint] in MODEL_LABELS" :key="type" class="field">
+        <label v-for="[key, type, label, hint] in visibleModelLabels" :key="type" class="field">
           <span class="field-label">{{ label }}</span>
           <select v-model="(editing as any)[key]" class="select">
             <option :value="null">不启用</option>
@@ -452,7 +530,8 @@ const PLUGIN_ICON: Record<string, IconName> = {
       <div class="card-head">
         <div>
           <h2><AppIcon name="zap" :size="18" />工具</h2>
-          <p>打开后,模型会在需要时调用它们。识别告别与查农历由服务端始终开启,不在这里列出。</p>
+          <p v-if="isAgentRuntime">打开后,智能体会在需要时调用它们;一件事要好几步时会连续调用直到办完。</p>
+          <p v-else>打开后,模型会在需要时调用它们。识别告别与查农历由服务端始终开启,不在这里列出。</p>
         </div>
       </div>
       <div v-if="!toolsEnabled" class="callout warn">
@@ -465,7 +544,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
         </div>
       </div>
       <div class="plugin-grid">
-        <div v-for="plugin in catalog?.plugins ?? []" :key="plugin.code" class="plugin" :class="{ on: plugin.code in pluginState }">
+        <div v-for="plugin in visiblePlugins" :key="plugin.code" class="plugin" :class="{ on: plugin.code in pluginState }">
           <div class="plugin-head">
             <span class="plugin-icon"><AppIcon :name="PLUGIN_ICON[plugin.code] ?? 'zap'" :size="18" /></span>
             <span class="plugin-title">{{ plugin.label }}</span>

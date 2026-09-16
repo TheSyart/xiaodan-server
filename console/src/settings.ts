@@ -42,6 +42,22 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
     label: '设备连接需要令牌',
   },
 
+  // ---- 智能体大脑(控制塔运行时)----
+  // 两个地址都是容器内网地址:运维面板编排里组件名是 console 与 engine;用本仓库 compose.yaml 手工部署时是
+  // xiaodan-console 与 xiaodan-engine,要在设置页改。
+  {
+    key: 'agent.turn_url',
+    value: 'http://console:8002/xiaodan/agent/turn',
+    type: 'string',
+    label: '引擎访问控制塔对话接口的地址(内网)',
+  },
+  {
+    key: 'agent.bridge_url',
+    value: 'http://engine:8003',
+    type: 'string',
+    label: '控制塔访问引擎设备桥的地址(内网)',
+  },
+
   // ---- 对话行为 ----
   {
     key: 'device_max_output_size',
@@ -51,7 +67,7 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
   },
   {
     key: 'close_connection_no_voice_time',
-    value: '120',
+    value: '600',
     type: 'number',
     label: '无语音多久后断开连接(秒)',
   },
@@ -67,7 +83,7 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
   },
   {
     key: 'exit_commands',
-    value: '退出;关闭',
+    value: '',
     type: 'array',
     label: '退出指令(分号分隔)',
   },
