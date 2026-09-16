@@ -271,4 +271,26 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: 'images',
+    up(conn) {
+      conn.exec(`
+        -- 文生图的记录。原图、像素数据与预览存在数据目录 images/<id>.*
+        CREATE TABLE images (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          mac          TEXT,
+          agent_id     TEXT,
+          prompt       TEXT NOT NULL,
+          full_prompt  TEXT NOT NULL DEFAULT '',
+          provider     TEXT NOT NULL DEFAULT '',
+          model        TEXT NOT NULL DEFAULT '',
+          ext          TEXT NOT NULL DEFAULT 'png' CHECK (ext IN ('png', 'jpg')),
+          palette_json TEXT NOT NULL DEFAULT '[]',
+          created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_images_created ON images (created_at);
+      `);
+    },
+  },
 ];

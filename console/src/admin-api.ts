@@ -22,6 +22,7 @@ import { reminderRoutes } from './agent/reminders/routes.ts';
 import { serviceRoutes } from './agent/services-routes.ts';
 import { mediaAdminRoutes } from './agent/media/routes.ts';
 import { vocabRoutes } from './agent/vocab/routes.ts';
+import { imageRoutes } from './agent/image/routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 
@@ -322,6 +323,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/reminders', reminderRoutes(deps.agent));
     app.route('/media', mediaAdminRoutes(deps.agent));
     app.route('/vocab', vocabRoutes(deps.agent));
+    app.route('/images', imageRoutes(deps.agent));
     app.route('/agents', agentMcpRoutes(deps.agent));
     app.route('/agents', agentSkillRoutes(deps.agent));
   }

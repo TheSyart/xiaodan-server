@@ -152,6 +152,12 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 - **学单词**(`vocab_next`/`vocab_show`/`vocab_answer`/`vocab_progress`,插件代号 `vocab`):自带 300 词原创启蒙词书(`media/vocab/`),
   可导入 CSV/JSON;记忆曲线按 Leitner 盒子(答错 5 分钟后再考,答对依次 1/2/4/7/15 天);新固件显示单词卡;配合技能 `word-coach` 使用。
 
+- **画画**(`generate_image`,插件代号 `image`):画图服务在「工具与服务」页配置、可切换——千问 qwen-image(百炼 compatible-mode)、
+  百炼原生接口(z-image-turbo、wan2.7-image)、任意 OpenAI 兼容的 `/images/generations`(OpenAI、火山方舟 Seedream、硅基流动),
+  可沿用千问语音模型的密钥。提示词追加「主体居中、色块分明」的小屏风格(儿童模式再加儿童约束),原图存画廊;
+  工作线程里居中裁剪、面积平均缩到 128×128、中位切分 16 色、Floyd–Steinberg 抖动、4 位打包(8192 字节),
+  以 `{"type":"xiaodan_img","id","seq","n","w","h","pal","d"}` 分 4 片(每条 < 4 KB)发给 `features.xiaodan ≥ 2` 的设备;画廊页可对照原图与像素画、重新发到设备。
+
 ## 千问语音与音色
 
 语音识别与合成可以直接接百炼(Qwen-Audio 3.0),不经模型网关:

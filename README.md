@@ -194,6 +194,14 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
   after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
 
+- **Drawing** (`generate_image`, plugin code `image`): image providers are configured and switched on the Tools & services page — Qwen
+  qwen-image (Model Studio compatible-mode), Model Studio's native API (z-image-turbo, wan2.7-image) or any OpenAI-compatible
+  `/images/generations` (OpenAI, Volcengine Seedream, SiliconFlow); the Qwen speech model's key can be reused. The prompt gets a
+  small-screen style suffix (centred subject, flat colours; child mode adds child-safety wording) and the original goes to the Gallery.
+  A worker thread crops to a square, area-averages to 128×128, picks 16 colours by median cut, applies Floyd–Steinberg dithering and packs
+  4 bits per pixel (8192 bytes), sent as 4 chunks of `{"type":"xiaodan_img","id","seq","n","w","h","pal","d"}` (each under 4 KB) to devices
+  with `features.xiaodan ≥ 2`. The Gallery page compares the original with the pixel art and can resend it to a device.
+
 ## Qwen speech and voices
 
 Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:

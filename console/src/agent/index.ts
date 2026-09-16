@@ -7,3 +7,4 @@ import './skills/tools.ts';
 import './reminders/tools.ts';
 import './media/tools.ts';
 import './vocab/tools.ts';
+import './image/tool.ts';

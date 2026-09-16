@@ -343,6 +343,15 @@ export const PLUGINS: PluginDef[] = [
     group: '学习',
     fields: [{ key: 'book', label: '单词书 id', type: 'string', hint: '留空用默认单词书(starter)' }],
   },
+  {
+    code: 'image',
+    label: '画画',
+    description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。画图服务在「工具与服务」页配置。',
+    keyless: false,
+    runtime: 'agent',
+    group: '创作',
+    fields: [],
+  },
   // ---- 以下是上游引擎自带的插件,只在引擎旧路径下生效 ----
   {
     code: 'change_role',

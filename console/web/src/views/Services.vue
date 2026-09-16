@@ -116,10 +116,12 @@ async function save() {
 
 const testing = ref('');
 const testResult = ref<Record<string, string>>({});
+const testPreview = ref<Record<string, string>>({});
 async function test(item: ServiceProvider) {
   testing.value = item.id;
   try {
-    const result = await api.post<{ ms: number; count?: number; sample?: { title: string }[]; url?: string }>(`/service-providers/${item.id}/test`);
+    const result = await api.post<{ ms: number; count?: number; sample?: { title: string }[]; preview?: string }>(`/service-providers/${item.id}/test`);
+    if (result.preview) testPreview.value = { ...testPreview.value, [item.id]: result.preview };
     testResult.value = {
       ...testResult.value,
       [item.id]: item.kind === 'search'
@@ -184,6 +186,7 @@ async function remove(item: ServiceProvider) {
             <span v-if="item.enabled === 0" class="tag">已停用</span>
           </div>
           <div class="cell-sub">{{ defOf(item.kind, item.provider)?.label ?? item.provider }}<template v-if="testResult[item.id]"> · {{ testResult[item.id] }}</template></div>
+          <img v-if="testPreview[item.id]" :src="testPreview[item.id]" alt="设备上的像素画预览" style="width: 128px; height: 128px; image-rendering: pixelated; border-radius: 8px; margin-top: 8px" />
         </div>
         <div class="row" style="gap: 2px">
           <button class="btn btn-ghost btn-sm" type="button" :aria-busy="testing === item.id" @click="test(item)"><AppIcon name="zap" :size="14" /><span>测试</span></button>
