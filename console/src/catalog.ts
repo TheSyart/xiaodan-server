@@ -352,6 +352,24 @@ export const PLUGINS: PluginDef[] = [
     group: '创作',
     fields: [],
   },
+  {
+    code: 'memory',
+    label: '长期记忆',
+    description: '记住用户主动说起的名字、年龄、喜好、生日等,换了角色、过了几天也记得。在设备页可以查看和删除。住址、电话、学校这类隐私不记。',
+    keyless: true,
+    runtime: 'agent',
+    group: '陪伴',
+    fields: [],
+  },
+  {
+    code: 'roles',
+    label: '切换角色',
+    description: '"换童童来陪我""切换到英语老师"。能切到哪些角色在设备页设置;新角色的声音不同时,设备会重连一下,再用新声音打招呼。',
+    keyless: true,
+    runtime: 'agent',
+    group: '角色',
+    fields: [],
+  },
   // ---- 以下是上游引擎自带的插件,只在引擎旧路径下生效 ----
   {
     code: 'change_role',

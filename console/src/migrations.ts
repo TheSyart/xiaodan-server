@@ -293,4 +293,30 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    name: 'roles-memory',
+    up(conn) {
+      conn.exec(`
+        -- 一台设备用语音能切换到哪些角色。某台设备没有任何行时,可以切到所有由控制塔驱动(runtime = agent)的角色
+        CREATE TABLE device_roles (
+          mac      TEXT NOT NULL REFERENCES devices (mac) ON DELETE CASCADE,
+          agent_id TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+          PRIMARY KEY (mac, agent_id)
+        );
+
+        -- 长期记忆:按设备记关于用户的事实(名字、喜好、生日……),换了角色也记得
+        CREATE TABLE device_memory (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          mac        TEXT NOT NULL REFERENCES devices (mac) ON DELETE CASCADE,
+          text       TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 120),
+          source     TEXT NOT NULL DEFAULT 'agent' CHECK (source IN ('agent', 'admin')),
+          agent_id   TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_device_memory_mac ON device_memory (mac, updated_at);
+      `);
+    },
+  },
 ];

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { onBeforeRouteLeave, RouterLink } from 'vue-router';
-import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type Skill, type TtsParams, type Voice } from '../api';
+import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type RoleTemplate, type RoleTemplateApplied, type Skill, type TtsParams, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
+import ModalDialog from '../components/ModalDialog.vue';
 import PageHeader from '../components/PageHeader.vue';
 import SkeletonRows from '../components/SkeletonRows.vue';
 import SwitchToggle from '../components/SwitchToggle.vue';
@@ -109,7 +110,8 @@ function missingTools(skill: Skill): string[] {
   const PLUGIN_TOOLS: Record<string, string[]> = {
     search: ['web_search'], reminders: ['create_reminder', 'list_reminders', 'cancel_reminder'],
     stories: ['list_stories', 'play_story'], music: ['list_music', 'play_music', 'stop_media'],
-    vocab: ['vocab_next', 'vocab_answer', 'vocab_progress'], image: ['generate_image'], roles: ['switch_role'],
+    vocab: ['vocab_next', 'vocab_answer', 'vocab_progress'], image: ['generate_image'], roles: ['list_roles', 'switch_role'],
+    memory: ['remember', 'forget', 'list_memories'],
     show_calendar: ['show_calendar'], get_weather: ['get_weather'], set_volume: ['set_volume'],
   };
   for (const code of enabled) for (const name of PLUGIN_TOOLS[code] ?? []) toolNames.add(name);
@@ -248,6 +250,46 @@ function create() {
   );
 }
 
+// ---- 角色模板 ----
+
+const templates = ref<RoleTemplate[]>([]);
+const templatesOpen = ref(false);
+const templateNames = ref<Record<string, string>>({});
+const applying = ref('');
+
+async function openTemplates() {
+  try {
+    templates.value = (await api.get<{ items: RoleTemplate[] }>('/role-templates')).items;
+    templateNames.value = Object.fromEntries(templates.value.map((t) => [t.id, t.created ? `${t.name}${t.created + 1}` : t.name]));
+    templatesOpen.value = true;
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+const SYSTEM_VOICE_NAMES: Record<string, string> = {
+  'longanhuan_v3.6': '安欢', longanfengyue: '安风月', longanyuanfei: '安元妃', longanlingxi: '安灵犀', longanxiaoxin: '安小欣',
+  'longjielidou_v3.6': '杰力豆', 'longpaopao_v3.6': '泡泡', 'longhuohuo_v3.6': '火火',
+};
+
+async function applyTemplate(template: RoleTemplate) {
+  if (applying.value) return;
+  applying.value = template.id;
+  try {
+    const result = await api.post<RoleTemplateApplied>(`/role-templates/${template.id}/apply`, { name: templateNames.value[template.id] });
+    templatesOpen.value = false;
+    await load();
+    const created = agents.value.find((agent) => agent.id === result.id);
+    if (result.missing.length) toast(`已创建,但还缺:${result.missing.join('、')}`, 'warn');
+    else toast(`已创建「${created?.name ?? template.name}」`);
+    if (created) edit(created);
+  } catch (e) {
+    toastError(e);
+  } finally {
+    applying.value = '';
+  }
+}
+
 const DISCARD = { title: '放弃未保存的修改?', message: '离开后这次的修改不会保存。', confirmText: '放弃修改', danger: true };
 
 async function leaveEdit() {
@@ -369,6 +411,14 @@ const PLUGIN_ICON: Record<string, IconName> = {
   get_news_from_chinanews: 'news',
   play_music: 'music',
   hass_state: 'home',
+  search: 'globe',
+  reminders: 'clock',
+  stories: 'message',
+  music: 'music',
+  vocab: 'key',
+  image: 'sparkles',
+  memory: 'star',
+  roles: 'user',
 };
 </script>
 
@@ -376,11 +426,49 @@ const PLUGIN_ICON: Record<string, IconName> = {
   <template v-if="!editing">
     <PageHeader title="智能体" description="人设、模型组合与工具。每台设备绑定一个智能体。">
       <template #actions>
+        <button class="btn" type="button" :disabled="loading" @click="openTemplates">
+          <AppIcon name="sparkles" :size="16" /><span>从模板创建</span>
+        </button>
         <button class="btn btn-primary" type="button" :disabled="loading" @click="create">
           <AppIcon name="plus" :size="16" /><span>新建智能体</span>
         </button>
       </template>
     </PageHeader>
+
+    <ModalDialog :open="templatesOpen" wide title="从模板创建角色" @close="templatesOpen = false">
+      <p class="field-hint" style="margin: 0 0 12px">
+        建出来的是普通智能体:大脑在控制塔,模型沿用默认智能体的选择,之后在编辑页随意改。设备上说「换童童来陪我」就能切换(需要开启「切换角色」工具)。
+      </p>
+      <div class="template-grid">
+        <article v-for="template in templates" :key="template.id" class="card template-card">
+          <div class="agent-card-head">
+            <span class="avatar tone-sky">{{ template.name.slice(0, 1) }}</span>
+            <div style="flex: 1; min-width: 0">
+              <h3 class="truncate">{{ template.name }}</h3>
+              <div class="cell-sub">
+                音色 {{ SYSTEM_VOICE_NAMES[template.voice] ?? template.voice }}<template v-if="template.safety_level === 'child'"> · 儿童模式</template>
+                <template v-if="template.created"> · 已建 {{ template.created }} 个</template>
+              </div>
+            </div>
+          </div>
+          <p class="template-desc">{{ template.description }}</p>
+          <div class="chips">
+            <span v-for="code in template.plugins" :key="code" class="tag">{{ pluginLabel(code) ?? code }}</span>
+            <span v-for="name in template.skills" :key="name" class="tag sky">技能 {{ name }}</span>
+          </div>
+          <div v-if="template.note" class="callout info" style="margin: 0"><AppIcon name="info" :size="16" /><div class="callout-body">{{ template.note }}</div></div>
+          <div v-if="template.missing_skills.length" class="callout warn" style="margin: 0">
+            <AppIcon name="alert" :size="16" /><div class="callout-body">技能页里还没有:{{ template.missing_skills.join('、') }}</div>
+          </div>
+          <div class="row" style="gap: 8px; margin-top: auto">
+            <input v-model="templateNames[template.id]" class="input" type="text" maxlength="64" :aria-label="`${template.name} 的名字`" style="flex: 1; min-width: 0" />
+            <button class="btn btn-primary btn-sm" type="button" :aria-busy="applying === template.id" @click="applyTemplate(template)">
+              <AppIcon name="plus" :size="14" /><span>创建</span>
+            </button>
+          </div>
+        </article>
+      </div>
+    </ModalDialog>
 
     <div v-if="loadError" class="callout danger" role="alert">
       <AppIcon name="alert" :size="18" />

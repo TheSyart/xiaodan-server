@@ -72,7 +72,7 @@ function loadTtsModel(conn: Db, id: string): TtsModel | undefined {
 }
 
 /** 音色表的主键:模型 id + 音色值,换掉不允许的字符。 */
-function voiceKey(modelId: string, voice: string): string {
+export function voiceKey(modelId: string, voice: string): string {
   return `${modelId}__${voice}`.replace(/[^A-Za-z0-9_.-]/gu, '_').slice(0, 128);
 }
 

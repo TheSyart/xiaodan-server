@@ -199,8 +199,33 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   `/images/generations` (OpenAI, Volcengine Seedream, SiliconFlow); the Qwen speech model's key can be reused. The prompt gets a
   small-screen style suffix (centred subject, flat colours; child mode adds child-safety wording) and the original goes to the Gallery.
   A worker thread crops to a square, area-averages to 128×128, picks 16 colours by median cut, applies Floyd–Steinberg dithering and packs
-  4 bits per pixel (8192 bytes), sent as 4 chunks of `{"type":"xiaodan_img","id","seq","n","w","h","pal","d"}` (each under 4 KB) to devices
-  with `features.xiaodan ≥ 2`. The Gallery page compares the original with the pixel art and can resend it to a device.
+  4 bits per pixel (8192 bytes), sent as 16 chunks of `{"type":"xiaodan_img","id","seq","n","w","h","pal","d"}` to devices with
+  `features.xiaodan ≥ 2`. Each chunk carries 512 bytes, so a whole message stays under the firmware's 1024-byte receive buffer. The
+  Gallery page compares the original with the pixel art and can resend it to a device.
+
+- **Role templates**: "Create from template" on the Agents page builds a ready-made role. There are four templates:
+  - 小单: a general assistant.
+  - 童童: a children's companion with child safety rules and a child voice.
+  - 英语老师: an English tutor.
+  - AI资讯官: an AI news presenter that uses the `ai-news-brief` skill and links an MCP server whose name contains `aihot`.
+
+  Each template fills in the persona, tools, skills, greeting and a Qwen system voice (imported on the spot if missing). Models are
+  copied from the default agent. The result is an ordinary agent; anything missing, such as the aihot MCP server, is listed after
+  creation.
+- **Switching roles by voice** (`list_roles`/`switch_role`, plugin code `roles`): saying "换童童来陪我" rebinds the device.
+  - Persona, tools and memory rules come from the console, so they apply from the next turn.
+  - Voice, recognition and other engine-side settings are fixed when the connection opens. When those differ, the console closes
+    the connection after the turn; the device reconnects, fetches the new configuration and the new role greets in its own voice.
+  - The device page's "Roles & memory" dialog can restrict which roles a device may switch to. Without a restriction, every
+    console-driven role is allowed.
+- **Long-term memory** (`remember`/`forget`/`list_memories`, plugin code `memory`): roles with this tool record stable facts the user
+  mentions, such as name, age, likes and birthday, one short sentence each. Facts are stored per device and shared across roles.
+  - They are injected into the system prompt of roles that have the tool.
+  - A fact that contains or is contained in an existing one updates it instead of piling up. Each device keeps at most 40 facts, and
+    the oldest automatic one makes room; facts added by hand are never pushed out.
+  - Addresses, phone numbers, school names, ID numbers and passwords are refused in the tool and in the admin API.
+  - The "Roles & memory" dialog lists, adds, edits and clears facts.
+  - Unbinding a device deletes its memory.
 
 ## Qwen speech and voices
 
@@ -238,7 +263,8 @@ console/            the console (Node + Vue)
     schema.sql        ← v0 baseline schema
     migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
     voice/            ← voices: Model Studio preview, voice design and cloning, system voice list, one-time sample links
-    agent/            ← agent runtime: turn endpoint, multi-step loop, prompts, context, tool registry, device-bridge client
+    agent/            ← agent runtime: turn endpoint, multi-step loop, prompts, context, tool registry, device-bridge client;
+                        one subdirectory per capability (search, mcp, skills, reminders, media, vocab, image, roles, memory)
     cli.ts            ← CLI: set a password, import keys from an old config
   web/                frontend: devices, agents, voices, playground, models, chat logs, pronunciation fixes, settings;
                       light and dark themes, no external assets (same-origin Content-Security-Policy)
@@ -247,11 +273,11 @@ server/             companion files for the xiaozhi server
   providers/          custom ASR / TTS providers: model gateway (chat endpoint) and Qwen speech (Model Studio)
   engine/             modules added to the engine: tool-call text conversion, pure logic for Qwen speech, device bridge and the xiaodan_agent provider
   assets/             reminder chime
-media/              content: original stories, licence-verified music, word books (baked into the console image, imported on startup)
   plugins/            custom plugins: calendar, weather, volume, plus replacements for upstream weather and goodbye
   tests/              unit tests for the plugins, tool-call text conversion and Qwen speech (standard library only) and three image smoke scripts
   prompts/            prompt template
   config.api.yaml     API-mode configuration template
+media/              content: original stories, licence-verified music, word books (baked into the console image, imported on startup)
 ```
 
 ## Running locally

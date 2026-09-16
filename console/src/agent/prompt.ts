@@ -17,6 +17,7 @@ const FAMILIES: { match: (name: string) => boolean; can: string; cannot: string 
   { match: (n) => n === 'generate_image', can: '画画(文生图),画好显示在屏幕上', cannot: '画画或生成图片' },
   { match: (n) => n.startsWith('vocab_'), can: '陪用户学英语单词并记录进度', cannot: '记录单词学习进度' },
   { match: (n) => n === 'switch_role', can: '切换到别的角色', cannot: '切换角色' },
+  { match: (n) => n === 'remember', can: '记住用户告诉你的名字、喜好等,以后聊天还记得', cannot: '长期记住聊过的内容(过一阵就会忘)' },
 ];
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];

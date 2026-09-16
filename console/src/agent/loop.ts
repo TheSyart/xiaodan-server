@@ -9,7 +9,7 @@ import { conversations, historyMessages, sanitize, type StoredTurn } from './con
 import { emotionOf, LeadingEmoji } from './emoji.ts';
 import { LlmError, streamChat, type ChatMessage, type LlmConfig, type ToolCall, type ToolSpec } from './llm.ts';
 import { buildSystemPrompt } from './prompt.ts';
-import { collectTools, skillCatalog } from './registry.ts';
+import { collectTools, memoryFor, skillCatalog } from './registry.ts';
 import { ToolTextFilter } from './tool-text.ts';
 import {
   xiaodanVersion, type AgentDeps, type AgentRow, type AgentTool, type DeviceContext, type ToolContext, type TraceEvent,
@@ -152,7 +152,7 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
     hasScreen: xiaodanVersion(device) >= 1,
     skills: catalog.available,
     loadedSkills: catalog.loaded(conversation),
-    memory: catalog.memory,
+    memory: memoryFor(toolContext),
   });
 
   const messages: ChatMessage[] = [

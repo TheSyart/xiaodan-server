@@ -189,6 +189,44 @@ export interface Device {
   identity: 'verified' | 'legacy';
 }
 
+/** 角色模板:一键建出配好人设、工具、技能与音色的智能体 */
+export interface RoleTemplate {
+  id: string;
+  name: string;
+  description: string;
+  greeting: string;
+  safety_level: 'standard' | 'child';
+  plugins: string[];
+  skills: string[];
+  /** 千问系统音色名 */
+  voice: string;
+  note?: string;
+  /** 模板要用、但技能页里还没有的技能 */
+  missing_skills: string[];
+  /** 已经用这个模板建过几个 */
+  created: number;
+}
+
+export interface RoleTemplateApplied {
+  id: string;
+  voice: string | null;
+  plugins: string[];
+  skills: string[];
+  mcp_servers: string[];
+  missing: string[];
+}
+
+/** 设备的长期记忆:一条一件关于用户的事 */
+export interface MemoryItem {
+  id: number;
+  text: string;
+  source: 'agent' | 'admin';
+  agent_id: string | null;
+  agent_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** 正在等待绑定的设备身份。绑定码只显示在设备屏幕上,这里刻意没有。 */
 export interface PendingDevice {
   id: number;

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import {
-  api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type Overview, type PendingDevice,
+  api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type MemoryItem, type Overview, type PendingDevice,
 } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import CodeInput from '../components/CodeInput.vue';
 import EmptyState from '../components/EmptyState.vue';
+import ModalDialog from '../components/ModalDialog.vue';
 import PageHeader from '../components/PageHeader.vue';
+import SwitchToggle from '../components/SwitchToggle.vue';
 import SkeletonRows from '../components/SkeletonRows.vue';
 import type { IconName } from '../icons';
 import { confirmDialog, copyText, formatTime, promptDialog, relativeTime, toast, toastError } from '../ui';
@@ -158,6 +160,101 @@ async function moveAgent(device: Device, target: string) {
     toastError(e);
   }
   await load();   // 失败时把下拉框恢复成真实值
+}
+
+// ---- 角色与记忆 ----
+//
+// 可切换的角色:设备上说「换童童来陪我」时能切到哪些角色(需要当前角色开着「切换角色」工具)。
+// 长期记忆:开着「长期记忆」工具的角色记下的、关于用户的事,换了角色也共用。
+
+const roleDevice = ref<Device | null>(null);
+const restrictRoles = ref(false);
+const allowedRoles = ref<string[]>([]);
+const memories = ref<MemoryItem[]>([]);
+const newMemory = ref('');
+const savingRoles = ref(false);
+const addingMemory = ref(false);
+const agentRuntimeRoles = computed(() => agents.value.filter((agent) => agent.runtime === 'agent'));
+
+async function openRoles(device: Device) {
+  const mac = encodeURIComponent(device.mac);
+  try {
+    const [roles, memory] = await Promise.all([
+      api.get<{ agent_id: string; allowlist: string[] | null }>(`/devices/${mac}/roles`),
+      api.get<{ items: MemoryItem[] }>(`/devices/${mac}/memory`),
+    ]);
+    restrictRoles.value = roles.allowlist !== null;
+    allowedRoles.value = roles.allowlist ?? agentRuntimeRoles.value.map((agent) => agent.id);
+    memories.value = memory.items;
+    newMemory.value = '';
+    roleDevice.value = device;
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+function toggleRole(id: string, on: boolean) {
+  allowedRoles.value = on ? [...new Set([...allowedRoles.value, id])] : allowedRoles.value.filter((item) => item !== id);
+}
+
+async function saveRoles() {
+  const device = roleDevice.value;
+  if (!device || savingRoles.value) return;
+  savingRoles.value = true;
+  try {
+    const known = new Set(agentRuntimeRoles.value.map((agent) => agent.id));
+    await api.put(`/devices/${encodeURIComponent(device.mac)}/roles`, {
+      allowlist: restrictRoles.value ? allowedRoles.value.filter((id) => known.has(id)) : null,
+    });
+    toast('已保存可切换的角色');
+  } catch (e) {
+    toastError(e);
+  } finally {
+    savingRoles.value = false;
+  }
+}
+
+async function reloadMemory() {
+  if (!roleDevice.value) return;
+  memories.value = (await api.get<{ items: MemoryItem[] }>(`/devices/${encodeURIComponent(roleDevice.value.mac)}/memory`)).items;
+}
+
+async function addMemory() {
+  const device = roleDevice.value;
+  const text = newMemory.value.trim();
+  if (!device || !text || addingMemory.value) return;
+  addingMemory.value = true;
+  try {
+    await api.post(`/devices/${encodeURIComponent(device.mac)}/memory`, { text });
+    newMemory.value = '';
+    await reloadMemory();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    addingMemory.value = false;
+  }
+}
+
+async function removeMemory(item: MemoryItem) {
+  if (!roleDevice.value) return;
+  try {
+    await api.del(`/devices/${encodeURIComponent(roleDevice.value.mac)}/memory/${item.id}`);
+    await reloadMemory();
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+async function clearMemory() {
+  const device = roleDevice.value;
+  if (!device) return;
+  if (!(await confirmDialog({ title: '清空这台设备的全部记忆?', message: '所有角色都会忘掉这些事,不能恢复。', confirmText: '清空', danger: true }))) return;
+  try {
+    await api.del(`/devices/${encodeURIComponent(device.mac)}/memory`);
+    await reloadMemory();
+  } catch (e) {
+    toastError(e);
+  }
 }
 
 const EVENT_TEXT: Record<IdentityEvent['kind'], string> = {
@@ -402,6 +499,9 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
               <div v-if="device.app_version" class="cell-sub">固件 {{ device.app_version }}</div>
             </td>
             <td class="actions">
+              <button class="btn btn-ghost btn-sm" type="button" @click="openRoles(device)">
+                <AppIcon name="user" :size="14" /><span>角色与记忆</span>
+              </button>
               <button class="btn btn-ghost btn-sm" type="button" @click="rename(device)">
                 <AppIcon name="pencil" :size="14" /><span>改名</span>
               </button>
@@ -414,4 +514,47 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
       </table>
     </div>
   </section>
+
+  <ModalDialog :open="!!roleDevice" wide :title="`${roleDevice ? deviceName(roleDevice) : ''} · 角色与记忆`" @close="roleDevice = null">
+    <div v-if="roleDevice" class="stack">
+      <section class="stack" style="gap: 10px">
+        <h3 style="margin: 0; font-size: 15px">可以切换到的角色</h3>
+        <p class="field-hint" style="margin: 0">
+          在设备上说「换童童来陪我」时能切到哪些角色。当前角色要开着「切换角色」工具;新角色声音不同时设备会重连一下,再用新声音打招呼。
+        </p>
+        <SwitchToggle v-model="restrictRoles" label="只允许切换到勾选的角色" />
+        <p v-if="!restrictRoles" class="field-hint" style="margin: 0">不限制:所有由控制塔驱动的角色都能切换。</p>
+        <div v-else class="chips">
+          <label v-for="agent in agentRuntimeRoles" :key="agent.id" class="tag" style="cursor: pointer; gap: 6px">
+            <input type="checkbox" :checked="allowedRoles.includes(agent.id)" @change="toggleRole(agent.id, ($event.target as HTMLInputElement).checked)" />
+            {{ agent.name }}<template v-if="agent.id === roleDevice.agent_id">(当前)</template>
+          </label>
+          <span v-if="agentRuntimeRoles.length === 0" class="field-hint">还没有由控制塔驱动的角色。</span>
+        </div>
+        <div><button class="btn btn-sm" type="button" :aria-busy="savingRoles" @click="saveRoles"><AppIcon name="check" :size="14" /><span>保存角色设置</span></button></div>
+      </section>
+
+      <section class="stack" style="gap: 10px">
+        <div class="row" style="justify-content: space-between">
+          <h3 style="margin: 0; font-size: 15px">长期记忆 <span v-if="memories.length" class="count">{{ memories.length }}</span></h3>
+          <button v-if="memories.length" class="btn btn-ghost btn-sm danger" type="button" @click="clearMemory"><AppIcon name="trash" :size="14" /><span>全部清空</span></button>
+        </div>
+        <p class="field-hint" style="margin: 0">
+          开着「长期记忆」工具的角色会记下用户主动说起的名字、喜好等,换了角色也记得。住址、电话、学校这类隐私不会保存。
+        </p>
+        <EmptyState v-if="memories.length === 0" title="还没有记住什么" description="聊天时用户说起自己的事,角色会记下来;也可以在下面手动添加。" />
+        <ul v-else class="memory-list">
+          <li v-for="item in memories" :key="item.id">
+            <span class="memory-text">{{ item.text }}</span>
+            <span class="tag" :title="formatTime(item.updated_at)">{{ item.source === 'admin' ? '手动添加' : `${item.agent_name ?? '角色'}记下` }}</span>
+            <button class="btn btn-ghost btn-sm btn-icon danger" type="button" :aria-label="`删除:${item.text}`" @click="removeMemory(item)"><AppIcon name="trash" :size="14" /></button>
+          </li>
+        </ul>
+        <form class="row" style="gap: 8px" @submit.prevent="addMemory">
+          <input v-model="newMemory" class="input" type="text" maxlength="60" placeholder="比如:名字叫乐乐,最喜欢霸王龙" style="flex: 1; min-width: 0" />
+          <button class="btn btn-sm" type="submit" :disabled="!newMemory.trim()" :aria-busy="addingMemory"><AppIcon name="plus" :size="14" /><span>添加</span></button>
+        </form>
+      </section>
+    </div>
+  </ModalDialog>
 </template>

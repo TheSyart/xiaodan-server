@@ -21,12 +21,15 @@ export const EXTRA_TOOL_SOURCES: ((ctx: ToolContext) => AgentTool[] | Promise<Ag
 export interface SkillCatalog {
   available: { name: string; description: string }[];
   loaded: (conversation: Conversation) => { name: string; body: string }[];
-  memory?: string;
 }
 
-/** 技能目录与记忆的提供者(P3 技能、P6 记忆在导入时替换)。 */
-export const PROMPT_EXTRAS: { skills: (ctx: ToolContext) => SkillCatalog } = {
+/** 提示词里按智能体与设备追加的内容:技能目录(skills/tools.ts)、长期记忆(memory/tools.ts),各自在导入时替换。 */
+export const PROMPT_EXTRAS: {
+  skills: (ctx: ToolContext) => SkillCatalog;
+  memory: (ctx: ToolContext) => string | undefined;
+} = {
   skills: () => ({ available: [], loaded: () => [] }),
+  memory: () => undefined,
 };
 
 function parseParams(json: string): Record<string, unknown> {
@@ -74,4 +77,13 @@ export async function collectTools(ctx: ToolContext): Promise<AgentTool[]> {
 
 export function skillCatalog(ctx: ToolContext): SkillCatalog {
   return PROMPT_EXTRAS.skills(ctx);
+}
+
+export function memoryFor(ctx: ToolContext): string | undefined {
+  try {
+    return PROMPT_EXTRAS.memory(ctx);
+  } catch (error) {
+    ctx.deps.log?.(`读取长期记忆失败:${(error as Error).message}`);
+    return undefined;
+  }
 }

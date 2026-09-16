@@ -23,6 +23,7 @@ import { serviceRoutes } from './agent/services-routes.ts';
 import { mediaAdminRoutes } from './agent/media/routes.ts';
 import { vocabRoutes } from './agent/vocab/routes.ts';
 import { imageRoutes } from './agent/image/routes.ts';
+import { deviceRoleRoutes, roleTemplateRoutes } from './agent/roles/routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 
@@ -326,6 +327,8 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/images', imageRoutes(deps.agent));
     app.route('/agents', agentMcpRoutes(deps.agent));
     app.route('/agents', agentSkillRoutes(deps.agent));
+    app.route('/role-templates', roleTemplateRoutes(deps.agent));
+    app.route('/devices', deviceRoleRoutes(deps.agent));
   }
 
   // ---- 智能体 ----
