@@ -303,7 +303,9 @@ describe('多步循环', () => {
     assert.equal(calls[3]!.body.tools, undefined);
     assert.match(String(calls[3]!.body.messages.at(-1)!.content), /上限/u);
     assert.equal(summary.toolCalls, 3);
-    assert.ok(deviceMessages.some((m) => m['cmd'] === 'hint'), '新固件用 hint 命令');
+    assert.ok(deviceMessages.some((m) => m['cmd'] === 'hint' && m['text']), '新固件用 hint 命令');
+    const hints = deviceMessages.filter((m) => m['cmd'] === 'hint');
+    assert.equal(hints.at(-1)!['text'], '', '工具做完发空提示收起');
   });
 
   test('正文里的 DSML 调用也会执行', async () => {

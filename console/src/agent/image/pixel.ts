@@ -205,8 +205,12 @@ export function pixelate(buffer: Buffer, size = 128, colors = 16): PixelArt {
   return { size, palette, indices, packed: pack4(indices), preview: previewPng(indices, size, palette) };
 }
 
-/** 设备消息:第一片带尺寸与调色板,之后每片只带数据。每片 2048 字节(base64 后约 2.7 KB,整条消息不超过 4 KB) */
-export function imageMessages(id: number, art: Pick<PixelArt, 'size' | 'palette' | 'packed'>, chunkBytes = 2048): Record<string, unknown>[] {
+/**
+ * 设备消息:第一片带尺寸与调色板,之后每片只带数据。
+ * 每片 512 字节(base64 后 684 字符):加上引擎补的 session_id,整条也在固件 1024 字节的 WebSocket 接收缓冲之内,
+ * 固件不用为重组另要 4 KB —— 画图时它已经要为整张图要了 8 KB,对话中的空闲堆经不起两块一起要。
+ */
+export function imageMessages(id: number, art: Pick<PixelArt, 'size' | 'palette' | 'packed'>, chunkBytes = 512): Record<string, unknown>[] {
   const total = Math.ceil(art.packed.length / chunkBytes);
   const pal = art.palette.map(([r, g, b]) => [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')).join('');
   return Array.from({ length: total }, (_, seq) => ({

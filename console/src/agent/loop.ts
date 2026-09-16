@@ -255,6 +255,8 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
         }
       }));
       toolCallCount += results.length;
+      // 新固件的提示不随过渡语的字幕消失,工具做完要明确收起;老固件的 "% 工具名" 由下一句字幕清掉
+      if (xiaodanVersion(device) >= 2) sink.device({ type: 'xiaodan', cmd: 'hint', text: '' });
 
       let endTurn = false;
       for (const { call, tool, args, result } of results) {

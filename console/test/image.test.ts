@@ -76,15 +76,17 @@ describe('像素化', () => {
     assert.ok(threaded.packed.equals(inline.packed));
   });
 
-  test('设备消息:首片带尺寸与调色板,每条不超过 4 KB', () => {
+  test('设备消息:首片带尺寸与调色板,每条放得进固件 1024 字节的接收缓冲', () => {
     const art = pixelate(samplePng());
     const messages = imageMessages(70000, art);
-    assert.equal(messages.length, 4);
+    assert.equal(messages.length, 16);
     assert.equal(messages[0]!['id'], 70000 & 0xffff);
     assert.equal(messages[0]!['w'], 128);
     assert.match(String(messages[0]!['pal']), /^[0-9a-f]{96}$/u);
     assert.equal(messages[1]!['pal'], undefined);
-    assert.ok(messages.every((m) => Buffer.byteLength(JSON.stringify({ ...m, session_id: 'x'.repeat(36) })) < 4096));
+    // 引擎用紧凑分隔符序列化,并补上 36 字符的 session_id
+    const sizes = messages.map((m) => Buffer.byteLength(JSON.stringify({ ...m, id: 65535, session_id: 'x'.repeat(36) })));
+    assert.ok(Math.max(...sizes) < 1024, `最长 ${Math.max(...sizes)} 字节`);
     const joined = Buffer.concat(messages.map((m) => Buffer.from(String(m['d']), 'base64')));
     assert.ok(joined.equals(art.packed));
   });
@@ -175,7 +177,7 @@ describe('画画工具与画廊', () => {
     assert.match(result.content, /显示在设备屏幕上/u);
     assert.equal(auths[0], 'Bearer sk-qwen');
     assert.match(prompts[0]!, /^戴帽子的小猫。.*适合儿童/u);
-    assert.equal(device.filter((m) => m['type'] === 'xiaodan_img').length, 4);
+    assert.equal(device.filter((m) => m['type'] === 'xiaodan_img').length, 16);
     const row = one<{ id: number; prompt: string; mac: string }>(conn, 'SELECT id, prompt, mac FROM images')!;
     assert.deepEqual({ prompt: row.prompt, mac: row.mac }, { prompt: '戴帽子的小猫', mac: MAC });
     for (const suffix of ['.png', '.pixel.bin', '.pixel.png']) assert.ok(existsSync(join(dataDir, 'images', `${row.id}${suffix}`)), suffix);
@@ -189,7 +191,7 @@ describe('画画工具与画廊', () => {
     assert.equal((await app.request(`http://localhost/api/images/${row.id}/pixel`)).status, 200);
     const sent = await app.request(`http://localhost/api/images/${row.id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     assert.equal(sent.status, 200);
-    assert.equal(bridge.sent.length, 4);
+    assert.equal(bridge.sent.length, 16);
     await app.request(`http://localhost/api/images/${row.id}`, { method: 'DELETE' });
     assert.ok(!existsSync(join(dataDir, 'images', `${row.id}.png`)));
   });
