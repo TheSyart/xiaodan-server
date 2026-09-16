@@ -126,4 +126,83 @@ export const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    name: 'agent-capabilities',
+    up(conn) {
+      conn.exec(`
+        -- 外部服务:联网搜索(search)与文生图(image)的服务商配置。同一类可以配多家,默认那家生效。
+        CREATE TABLE service_providers (
+          id          TEXT PRIMARY KEY,
+          kind        TEXT NOT NULL CHECK (kind IN ('search', 'image')),
+          name        TEXT NOT NULL,
+          provider    TEXT NOT NULL,
+          config_json TEXT NOT NULL DEFAULT '{}',
+          is_default  INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+          enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- MCP 服务器(只支持远程 Streamable HTTP;不跑本地命令)。headers_json 里可能有密钥,接口返回时打码。
+        CREATE TABLE mcp_servers (
+          id               TEXT PRIMARY KEY,
+          name             TEXT NOT NULL,
+          url              TEXT NOT NULL,
+          headers_json     TEXT NOT NULL DEFAULT '{}',
+          enabled          INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          timeout_ms       INTEGER NOT NULL DEFAULT 20000 CHECK (timeout_ms BETWEEN 1000 AND 120000),
+          -- 最近一次 tools/list 的结果与时间,页面展示与离线兜底用
+          tools_json       TEXT NOT NULL DEFAULT '[]',
+          tools_updated_at TEXT,
+          last_error       TEXT NOT NULL DEFAULT '',
+          created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        -- 智能体启用哪些 MCP 服务器;tool_allowlist_json 为 null 表示该服务器的工具全部可用
+        CREATE TABLE agent_mcp_servers (
+          agent_id            TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+          server_id           TEXT NOT NULL REFERENCES mcp_servers (id) ON DELETE CASCADE,
+          tool_allowlist_json TEXT,
+          PRIMARY KEY (agent_id, server_id)
+        );
+
+        -- 技能:兼容 Agent Skills 的 SKILL.md(frontmatter 的 name/description + 正文)与附带的文本文件
+        CREATE TABLE skills (
+          name        TEXT PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 64 AND name NOT GLOB '*[^a-z0-9-]*'),
+          description TEXT NOT NULL,
+          body        TEXT NOT NULL,
+          -- {"references/words.md": "…"}
+          files_json  TEXT NOT NULL DEFAULT '{}',
+          -- 声明需要的工具(allowed-tools),逗号分隔,保存角色时据此提示
+          allowed_tools TEXT NOT NULL DEFAULT '',
+          source      TEXT NOT NULL DEFAULT 'custom' CHECK (source IN ('builtin', 'custom')),
+          enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE agent_skills (
+          agent_id   TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+          skill_name TEXT NOT NULL REFERENCES skills (name) ON DELETE CASCADE ON UPDATE CASCADE,
+          PRIMARY KEY (agent_id, skill_name)
+        );
+
+        -- 定时提醒。due_at 是 UTC 的 ISO 时间;重复提醒送达后滚到下一次
+        CREATE TABLE reminders (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          mac             TEXT NOT NULL,
+          agent_id        TEXT,
+          text            TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 200),
+          due_at          TEXT NOT NULL,
+          repeat          TEXT NOT NULL DEFAULT 'none' CHECK (repeat IN ('none', 'daily', 'weekdays', 'weekly')),
+          status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'delivered', 'missed', 'cancelled')),
+          attempts        INTEGER NOT NULL DEFAULT 0,
+          first_attempt_at TEXT,
+          last_attempt_at TEXT,
+          delivered_at    TEXT,
+          created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_reminders_due ON reminders (status, due_at);
+        CREATE INDEX idx_reminders_mac ON reminders (mac, status);
+      `);
+    },
+  },
 ];

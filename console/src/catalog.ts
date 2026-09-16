@@ -297,6 +297,26 @@ export const PLUGINS: PluginDef[] = [
     keyless: true,
     fields: [],
   },
+  // ---- 控制塔智能体专用的工具(console/src/agent/),引擎旧路径下不生效 ----
+  {
+    code: 'search',
+    label: '联网搜索',
+    description: '查新闻、赛事、股价、刚发生的事等实时信息。搜索服务在「工具与服务」页配置,默认可用 DeepSeek 官方联网搜索。',
+    keyless: false,
+    runtime: 'agent',
+    group: '信息',
+    fields: [],
+  },
+  {
+    code: 'reminders',
+    label: '定时提醒',
+    description: '"八点提醒我喝水""每天七点叫我起床"。到点设备响提示音并播报,屏幕显示提醒卡片;设备不在线时下次连上补报。',
+    keyless: true,
+    runtime: 'agent',
+    group: '生活',
+    fields: [],
+  },
+  // ---- 以下是上游引擎自带的插件,只在引擎旧路径下生效 ----
   {
     code: 'change_role',
     runtime: 'engine',

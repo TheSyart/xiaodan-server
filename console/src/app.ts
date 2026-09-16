@@ -9,6 +9,7 @@ import type { Db } from './db.ts';
 import { dataDir, one } from './db.ts';
 import { Bridge } from './agent/bridge.ts';
 import { agentRoutes } from './agent/routes.ts';
+import './agent/index.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { SECRET_KEY } from './seed.ts';
 import { adminApi, type AdminDeps } from './admin-api.ts';
@@ -23,6 +24,8 @@ export interface AppOptions {
   admin?: AdminDeps;
   /** 智能体运行时的依赖(模型接口、设备桥),测试注入 */
   agent?: Partial<AgentDeps>;
+  /** 建好智能体运行时依赖后回调;服务进程用它启动提醒调度等后台任务(测试里不启动) */
+  onAgentDeps?: (deps: AgentDeps) => void;
 }
 
 export function createApp(conn: Db, options: AppOptions = {}): Hono {
@@ -88,6 +91,7 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
     ...(options.agent?.now ? { now: options.agent.now } : {}),
   };
   app.route('/xiaodan', agentRoutes(agentDeps));
+  options.onAgentDeps?.(agentDeps);
 
   app.route('/api', adminApi(conn, { ...options.admin, agent: agentDeps }));
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { closeDb, dataDir, dbPath, openDb } from './db.ts';
 import { seed } from './seed.ts';
 import { createApp } from './app.ts';
+import { startReminderScheduler } from './agent/reminders/scheduler.ts';
 import { authMode, isInitialized } from './auth.ts';
 import { getSetting } from './settings.ts';
 
@@ -19,7 +20,7 @@ function main(): void {
   // 源码时目录层级不同,两处都找一下,都没有就只提供接口。
   const webRoot = [join(here, 'web'), join(here, '..', 'dist', 'web')].find((path) => existsSync(path));
 
-  const app = createApp(conn, { webRoot });
+  const app = createApp(conn, { webRoot, onAgentDeps: (deps) => startReminderScheduler(deps) });
   const port = Number(process.env.PORT ?? 8002);
   const hostname = process.env.HOST ?? '0.0.0.0';
 

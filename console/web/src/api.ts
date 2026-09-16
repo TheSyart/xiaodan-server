@@ -169,6 +169,8 @@ export interface Agent {
   role_template: string;
   /** {"thinking":false,"temperature":0.8} */
   llm_params_json: string;
+  mcp_servers: { server_id: string; tool_allowlist_json: string | null }[];
+  skills: string[];
   is_default: number;
   plugins: { plugin_code: string; params_json: string }[];
   device_count: number;
@@ -294,4 +296,69 @@ export async function postEventStream(
       }
     }
   }
+}
+
+export interface ServiceField {
+  key: string;
+  label: string;
+  type: 'string' | 'password' | 'number' | 'model';
+  default?: string | number;
+  required?: boolean;
+  hint?: string;
+}
+
+export interface ServiceDef {
+  provider: string;
+  label: string;
+  note: string;
+  fields: ServiceField[];
+}
+
+export interface ServiceProvider {
+  id: string;
+  kind: 'search' | 'image';
+  name: string;
+  provider: string;
+  config: Record<string, unknown>;
+  is_default: number;
+  enabled: number;
+}
+
+export interface McpServerView {
+  id: string;
+  name: string;
+  url_masked: string;
+  url?: string;
+  headers: Record<string, string>;
+  enabled: number;
+  timeout_ms: number;
+  tools: { name: string; description: string }[];
+  tools_updated_at: string | null;
+  last_error: string;
+  agents: { agent_id: string; tool_allowlist_json: string | null }[];
+}
+
+export interface Skill {
+  name: string;
+  description: string;
+  body: string;
+  files: string[];
+  allowed_tools: string;
+  source: 'builtin' | 'custom';
+  enabled: number;
+  updated_at: string;
+  agent_count: number;
+}
+
+export interface Reminder {
+  id: number;
+  mac: string;
+  alias: string | null;
+  text: string;
+  due_at: string;
+  due_local: string;
+  repeat: 'none' | 'daily' | 'weekdays' | 'weekly';
+  status: 'pending' | 'delivered' | 'missed' | 'cancelled';
+  attempts: number;
+  delivered_at: string | null;
 }

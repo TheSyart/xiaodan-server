@@ -165,6 +165,24 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   `server/tests/smoke_agent.py` drives the real `chat()` inside the image against a fake console, including interruption,
   fallbacks and every bridge endpoint.
 
+### Console agent capabilities
+
+- **Web search** (tool `web_search`, plugin code `search`): providers are configured and switched on the Tools & services page.
+  The default is DeepSeek's official web search: neither DeepSeek's Chat nor Responses API offers search, but its Anthropic-compatible
+  API supports the `web_search_20250305` server tool (the default search in deepseek-ai/deepseek-harness). One Messages request per query,
+  retried once when the model does not trigger a search; the chat model's key can be reused. Bocha and Tavily are also available.
+- **MCP**: a minimal Streamable HTTP client written here (initialize → paginated tools/list → tools/call, JSON and SSE responses,
+  re-initialising expired sessions), remote https servers only; add and test servers on the MCP page, enable them per role on the
+  Agents page with per-tool allowlists. Tools are named `mcp_<server>__<tool>` and results are handed to the model as external data.
+  Server URLs often carry personal tokens, so lists only show the origin and path, and no token is committed to the repository.
+- **Skills**: Agent Skills-compatible `SKILL.md` (paste, or upload .md or .zip; scripts are never executed). The prompt lists only names
+  and descriptions; `load_skill` reads the body when needed (kept for the rest of the conversation) and `read_skill_file` reads attached files.
+  Built in: `bedtime-story`, `word-coach`, `ai-news-brief`.
+- **Timed reminders** (`create_reminder`/`list_reminders`/`cancel_reminder`, plugin code `reminders`): the console scans due reminders every
+  5 seconds and announces them through the device bridge (chime + "提醒你:…" + a reminder card on new firmware). A busy device is retried after
+  5 s; an offline one every 15 s and marked missed after 3 minutes; missed reminders from the last 12 hours are announced when the device next
+  fetches its configuration. Repeating reminders (daily, weekdays, weekly) roll forward after delivery.
+
 ## Qwen speech and voices
 
 Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:

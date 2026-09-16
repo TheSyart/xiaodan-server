@@ -5,7 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { one, run } from '../db.ts';
-import { ConversationStore, historyMessages, sanitize, type StoredTurn } from './context.ts';
+import { conversations, historyMessages, sanitize, type StoredTurn } from './context.ts';
 import { emotionOf, LeadingEmoji } from './emoji.ts';
 import { LlmError, streamChat, type ChatMessage, type LlmConfig, type ToolCall, type ToolSpec } from './llm.ts';
 import { buildSystemPrompt } from './prompt.ts';
@@ -20,7 +20,7 @@ export const HARD_MAX_STEPS = 10;
 const TOOL_RESULT_CHARS = 4000;
 const DEFAULT_TOOL_TIMEOUT_MS = 20_000;
 
-export const conversations = new ConversationStore();
+export { conversations };
 
 export interface TurnInput {
   agent: AgentRow;

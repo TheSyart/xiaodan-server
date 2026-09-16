@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { onBeforeRouteLeave, RouterLink } from 'vue-router';
-import { api, type Agent, type Catalog, type Model, type PluginDef, type TtsParams, type Voice } from '../api';
+import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type Skill, type TtsParams, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -15,6 +15,11 @@ const agents = ref<Agent[]>([]);
 const models = ref<Model[]>([]);
 const voices = ref<Voice[]>([]);
 const catalog = ref<Catalog | null>(null);
+const mcpServers = ref<McpServerView[]>([]);
+const skills = ref<Skill[]>([]);
+/** MCP 服务器 id → 是否启用、只放行哪些工具(null 表示全部) */
+const mcpState = ref<Record<string, { on: boolean; allow: string[] | null }>>({});
+const skillState = ref<string[]>([]);
 const loading = ref(true);
 const loadError = ref('');
 
@@ -32,12 +37,16 @@ const nameError = ref('');
 async function load() {
   loadError.value = '';
   try {
-    const [a, m, v, c] = await Promise.all([
+    const [a, m, v, c, ms, sk] = await Promise.all([
       api.get<{ items: Agent[] }>('/agents'),
       api.get<{ items: Model[] }>('/models'),
       api.get<{ items: Voice[] }>('/voices'),
       api.get<Catalog>('/catalog'),
+      api.get<{ items: McpServerView[] }>('/mcp-servers'),
+      api.get<{ items: Skill[] }>('/skills'),
     ]);
+    mcpServers.value = ms.items;
+    skills.value = sk.items;
     agents.value = a.items;
     models.value = m.items;
     voices.value = v.items;
@@ -75,6 +84,41 @@ const voiceLanguages = computed(() => {
 });
 const toolsEnabled = computed(() => !!editing.value && (editing.value.runtime === 'agent' || toolsOn(editing.value)));
 const isAgentRuntime = computed(() => editing.value?.runtime === 'agent');
+
+function toggleMcp(server: McpServerView, on: boolean) {
+  mcpState.value = { ...mcpState.value, [server.id]: { on, allow: mcpState.value[server.id]?.allow ?? null } };
+}
+function toggleMcpTool(server: McpServerView, tool: string, on: boolean) {
+  const current = mcpState.value[server.id] ?? { on: true, allow: null };
+  const all = server.tools.map((t) => t.name);
+  let allow = current.allow ?? all;
+  allow = on ? [...new Set([...allow, tool])] : allow.filter((name) => name !== tool);
+  mcpState.value = { ...mcpState.value, [server.id]: { on: true, allow: allow.length === all.length ? null : allow } };
+}
+const mcpToolOn = (server: McpServerView, tool: string) => {
+  const state = mcpState.value[server.id];
+  return !!state?.on && (state.allow === null || state.allow.includes(tool));
+};
+function toggleSkill(name: string, on: boolean) {
+  skillState.value = on ? [...new Set([...skillState.value, name])].sort() : skillState.value.filter((n) => n !== name);
+}
+/** 技能声明需要、但这个智能体没开的工具(allowed-tools 里带 * 的按前缀判断) */
+function missingTools(skill: Skill): string[] {
+  const enabled = new Set(Object.keys(pluginState.value));
+  const toolNames = new Set<string>();
+  const PLUGIN_TOOLS: Record<string, string[]> = {
+    search: ['web_search'], reminders: ['create_reminder', 'list_reminders', 'cancel_reminder'],
+    stories: ['list_stories', 'play_story'], music: ['list_music', 'play_music', 'stop_media'],
+    vocab: ['vocab_next', 'vocab_answer', 'vocab_progress'], image: ['generate_image'], roles: ['switch_role'],
+    show_calendar: ['show_calendar'], get_weather: ['get_weather'], set_volume: ['set_volume'],
+  };
+  for (const code of enabled) for (const name of PLUGIN_TOOLS[code] ?? []) toolNames.add(name);
+  const mcpOn = Object.entries(mcpState.value).some(([, v]) => v.on);
+  return skill.allowed_tools.split(/[,\s]+/u).filter(Boolean).filter((tool) => {
+    if (tool.includes('*')) return !mcpOn;
+    return !toolNames.has(tool);
+  });
+}
 /** 控制塔智能体自己管工具与记忆,这两项选了也不生效,不显示 */
 const visibleModelLabels = computed(() =>
   MODEL_LABELS.filter(([key]) => !isAgentRuntime.value || (key !== 'intent_model_id' && key !== 'memory_model_id')));
@@ -149,13 +193,19 @@ const functionCallModel = computed(() =>
   models.value.find((m) => m.model_type === 'Intent' && m.enabled === 1 && m.provider === 'function_call'),
 );
 
-const draftJson = () => JSON.stringify({ agent: editing.value, plugins: pluginState.value, tts: ttsParams.value, llm: llmParams.value });
+const draftJson = () => JSON.stringify({
+  agent: editing.value, plugins: pluginState.value, tts: ttsParams.value, llm: llmParams.value, mcp: mcpState.value, skills: skillState.value,
+});
 const dirty = computed(() => !!editing.value && draftJson() !== snapshot.value);
 
 function startEditing(agent: Agent, plugins: Record<string, Record<string, string>>) {
   editing.value = agent;
   pluginState.value = plugins;
   ttsParams.value = parseTtsParams(agent.tts_params_json);
+  mcpState.value = Object.fromEntries((agent.mcp_servers ?? []).map((row) => [row.server_id, {
+    on: true, allow: row.tool_allowlist_json ? (JSON.parse(row.tool_allowlist_json) as string[]) : null,
+  }]));
+  skillState.value = [...(agent.skills ?? [])].sort();
   try {
     llmParams.value = { thinking: (JSON.parse(agent.llm_params_json || '{}') as { thinking?: boolean }).thinking === true };
   } catch {
@@ -192,7 +242,7 @@ function create() {
       memory_model_id: defaultOf('Memory'), intent_model_id: defaultOf('Intent'),
       tts_voice_id: null, tts_language: null, chat_history_conf: 1, tts_params_json: '{}', is_default: 0,
       runtime: 'agent', max_steps: 6, safety_level: 'standard', description: '', greeting: '', role_template: '',
-      llm_params_json: '{}', plugins: [], device_count: 0,
+      llm_params_json: '{}', plugins: [], device_count: 0, mcp_servers: [], skills: [],
     },
     {},
   );
@@ -264,6 +314,9 @@ async function save() {
     }
     await api.put(`/agents/${agent.id}/plugins`,
       Object.entries(pluginState.value).map(([code, params]) => ({ plugin_code: code, params })));
+    await api.put(`/agents/${agent.id}/mcp`, Object.entries(mcpState.value).filter(([, v]) => v.on)
+      .map(([server_id, v]) => ({ server_id, tool_allowlist: v.allow })));
+    await api.put(`/agents/${agent.id}/skills`, skillState.value);
     toast(creating ? `已创建「${payload.name}」` : '已保存。设备下次连接时生效。');
     editing.value = null;
     await load();
@@ -566,6 +619,58 @@ const PLUGIN_ICON: Record<string, IconName> = {
               />
               <span v-if="field.hint" class="field-hint">{{ field.hint }}</span>
             </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="isAgentRuntime" class="card">
+      <div class="card-head">
+        <div>
+          <h2><AppIcon name="link" :size="18" />MCP 服务器</h2>
+          <p>勾选这个角色能用的外部工具。服务器在 <RouterLink to="/mcp">MCP</RouterLink> 页添加。</p>
+        </div>
+      </div>
+      <EmptyState v-if="mcpServers.length === 0" title="还没有 MCP 服务器" description="先去 MCP 页添加,比如 AIHOT。" />
+      <div v-for="server in mcpServers" :key="server.id" class="plugin" :class="{ on: mcpState[server.id]?.on }" style="margin-bottom: 10px">
+        <div class="plugin-head">
+          <span class="plugin-icon"><AppIcon name="link" :size="18" /></span>
+          <span class="plugin-title">{{ server.name }}</span>
+          <SwitchToggle :model-value="!!mcpState[server.id]?.on" @update:model-value="toggleMcp(server, $event)">
+            <span class="visually-hidden">{{ server.name }}</span>
+          </SwitchToggle>
+        </div>
+        <p class="plugin-desc"><span class="chip-mono">{{ server.url_masked }}</span> · {{ server.tools.length }} 个工具</p>
+        <div v-if="mcpState[server.id]?.on && server.tools.length" class="chips" style="margin-top: 10px">
+          <label v-for="tool in server.tools" :key="tool.name" class="tag" :class="{ sky: mcpToolOn(server, tool.name) }" style="cursor: pointer" :title="tool.description">
+            <input type="checkbox" class="visually-hidden" :checked="mcpToolOn(server, tool.name)" @change="toggleMcpTool(server, tool.name, ($event.target as HTMLInputElement).checked)" />
+            {{ mcpToolOn(server, tool.name) ? '✓ ' : '' }}{{ tool.name }}
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="isAgentRuntime" class="card">
+      <div class="card-head">
+        <div>
+          <h2><AppIcon name="sparkles" :size="18" />技能</h2>
+          <p>勾选这个角色掌握的技能;平时只占一行描述,用到时才读全文。技能在 <RouterLink to="/skills">技能</RouterLink> 页管理。</p>
+        </div>
+      </div>
+      <EmptyState v-if="skills.length === 0" title="还没有技能" />
+      <div class="plugin-grid">
+        <div v-for="skill in skills" :key="skill.name" class="plugin" :class="{ on: skillState.includes(skill.name) }">
+          <div class="plugin-head">
+            <span class="plugin-icon"><AppIcon name="sparkles" :size="18" /></span>
+            <span class="plugin-title mono">{{ skill.name }}</span>
+            <SwitchToggle :model-value="skillState.includes(skill.name)" :disabled="skill.enabled === 0" @update:model-value="toggleSkill(skill.name, $event)">
+              <span class="visually-hidden">{{ skill.name }}</span>
+            </SwitchToggle>
+          </div>
+          <p class="plugin-desc">{{ skill.description }}</p>
+          <div v-if="skillState.includes(skill.name) && missingTools(skill).length" class="callout warn" style="margin: 10px 0 0; padding: 8px 10px">
+            <AppIcon name="alert" :size="15" />
+            <div class="callout-body small">需要的工具没开:{{ missingTools(skill).join('、') }}</div>
           </div>
         </div>
       </div>

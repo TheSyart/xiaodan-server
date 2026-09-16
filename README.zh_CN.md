@@ -130,6 +130,20 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 - 纯逻辑与测试:`server/engine/xiaodan_bridge_core.py`(单元测试)、`console/src/agent/`(`console/test/agent.test.ts`);
   `server/tests/smoke_agent.py` 在镜像里用真实的 `chat()` 对着假控制塔跑一轮、打断、兜底与设备桥全部接口。
 
+### 控制塔智能体的能力
+
+- **联网搜索**(工具 `web_search`,插件代号 `search`):服务商在「工具与服务」页配置、可切换。默认 DeepSeek 官方联网搜索——
+  DeepSeek 的 Chat 与 Responses 接口都不带搜索,但它的 Anthropic 兼容接口支持 `web_search_20250305` 服务端工具
+  (deepseek-ai/deepseek-harness 的默认搜索就是这么做的),每个查询一次 Messages 请求,偶尔不触发搜索时重试一次;可沿用对话模型的密钥。另有博查、Tavily。
+- **MCP**:自写的最小 Streamable HTTP 客户端(initialize → tools/list 分页 → tools/call,JSON 与 SSE 响应、会话过期重连),
+  只接远程 https 服务器;在「MCP」页添加与测试,在智能体页按角色勾选、可逐个工具放行。工具名 `mcp_<服务器>__<工具>`,结果作为外部资料交给模型。
+  地址里常带个人令牌,列表只显示域名与路径,令牌不进仓库。
+- **技能**:兼容 Agent Skills 的 `SKILL.md`(粘贴、上传 .md 或 .zip,不执行脚本);提示词里只列名字与描述,
+  需要时 `load_skill` 读正文(本段对话之后自动带上)、`read_skill_file` 读附带文件。内置 `bedtime-story`、`word-coach`、`ai-news-brief`。
+- **定时提醒**(`create_reminder`/`list_reminders`/`cancel_reminder`,插件代号 `reminders`):控制塔每 5 秒扫到期提醒,经设备桥播报
+  (提示音 + "提醒你:…" + 新固件的提醒卡片);设备忙 5 秒后重试,不在线每 15 秒重试、3 分钟后记为错过;
+  设备下次来取配置时补报 12 小时内错过的提醒。重复提醒(每天/工作日/每周)送达后滚到下一次。
+
 ## 千问语音与音色
 
 语音识别与合成可以直接接百炼(Qwen-Audio 3.0),不经模型网关:

@@ -16,6 +16,10 @@ import {
 import { bindByCode, canonicalMac, unbindDevice } from './identity.ts';
 import type { FetchLike } from './voice/dashscope.ts';
 import { agentAdminRoutes } from './agent/routes.ts';
+import { agentMcpRoutes, mcpRoutes } from './agent/mcp/routes.ts';
+import { agentSkillRoutes, skillRoutes } from './agent/skills/routes.ts';
+import { reminderRoutes } from './agent/reminders/routes.ts';
+import { serviceRoutes } from './agent/services-routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 
@@ -308,7 +312,15 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   app.route('/voices', voiceRoutes(conn, { fetch: deps.fetch ?? fetch, dataDir: deps.dataDir ?? dataDir }));
 
   // ---- 智能体运行时:设备桥状态、网页试聊(见 agent/routes.ts) ----
-  if (deps.agent) app.route('/agent-runtime', agentAdminRoutes(deps.agent));
+  if (deps.agent) {
+    app.route('/agent-runtime', agentAdminRoutes(deps.agent));
+    app.route('/service-providers', serviceRoutes(deps.agent));
+    app.route('/mcp-servers', mcpRoutes(deps.agent));
+    app.route('/skills', skillRoutes(deps.agent));
+    app.route('/reminders', reminderRoutes(deps.agent));
+    app.route('/agents', agentMcpRoutes(deps.agent));
+    app.route('/agents', agentSkillRoutes(deps.agent));
+  }
 
   // ---- 智能体 ----
 
@@ -317,6 +329,8 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const items = agents.map((agent) => ({
       ...agent,
       plugins: all(conn, 'SELECT plugin_code, params_json FROM agent_plugins WHERE agent_id = ?', agent.id),
+      mcp_servers: all(conn, 'SELECT server_id, tool_allowlist_json FROM agent_mcp_servers WHERE agent_id = ?', agent.id),
+      skills: all<{ skill_name: string }>(conn, 'SELECT skill_name FROM agent_skills WHERE agent_id = ?', agent.id).map((row) => row.skill_name),
       device_count: one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM devices WHERE agent_id = ?', agent.id)?.n ?? 0,
     }));
     return c.json({ items });

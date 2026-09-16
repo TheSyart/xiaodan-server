@@ -119,3 +119,6 @@ export function sanitize(messages: ChatMessage[]): ChatMessage[] {
   }
   return out;
 }
+
+/** 进程内唯一的对话存储:设备对话按 device:<mac>,网页试聊按 web:<智能体>:<对话>。 */
+export const conversations = new ConversationStore();

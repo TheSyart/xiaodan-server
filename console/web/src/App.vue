@@ -75,15 +75,34 @@ async function logout() {
   await router.replace('/login');
 }
 
-const NAV: { path: string; label: string; icon: IconName }[] = [
-  { path: '/devices', label: '设备', icon: 'device' },
-  { path: '/agents', label: '智能体', icon: 'bot' },
-  { path: '/voices', label: '音色', icon: 'volume' },
-  { path: '/playground', label: '试聊', icon: 'message' },
-  { path: '/models', label: '模型', icon: 'layers' },
-  { path: '/chats', label: '对话记录', icon: 'message' },
-  { path: '/words', label: '读音替换', icon: 'replace' },
-  { path: '/settings', label: '设置', icon: 'sliders' },
+const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: IconName }[] }[] = [
+  {
+    title: '设备与角色',
+    items: [
+      { path: '/devices', label: '设备', icon: 'device' },
+      { path: '/agents', label: '智能体', icon: 'bot' },
+      { path: '/voices', label: '音色', icon: 'volume' },
+      { path: '/playground', label: '试聊', icon: 'message' },
+    ],
+  },
+  {
+    title: '能力',
+    items: [
+      { path: '/services', label: '工具与服务', icon: 'zap' },
+      { path: '/mcp', label: 'MCP', icon: 'link' },
+      { path: '/skills', label: '技能', icon: 'sparkles' },
+      { path: '/reminders', label: '提醒', icon: 'clock' },
+    ],
+  },
+  {
+    title: '系统',
+    items: [
+      { path: '/models', label: '模型', icon: 'layers' },
+      { path: '/chats', label: '对话记录', icon: 'news' },
+      { path: '/words', label: '读音替换', icon: 'replace' },
+      { path: '/settings', label: '设置', icon: 'sliders' },
+    ],
+  },
 ];
 </script>
 
@@ -118,14 +137,17 @@ const NAV: { path: string; label: string; icon: IconName }[] = [
         </span>
       </router-link>
       <nav class="nav" aria-label="主导航">
-        <router-link
-          v-for="item in NAV" :key="item.path" :to="item.path" class="nav-link"
-          :class="{ active: route.path.startsWith(item.path) }"
-          :aria-current="route.path.startsWith(item.path) ? 'page' : undefined"
-        >
-          <AppIcon :name="item.icon" :size="18" />
-          <span class="nav-label">{{ item.label }}</span>
-        </router-link>
+        <template v-for="group in NAV_GROUPS" :key="group.title">
+          <span class="nav-group">{{ group.title }}</span>
+          <router-link
+            v-for="item in group.items" :key="item.path" :to="item.path" class="nav-link"
+            :class="{ active: route.path.startsWith(item.path) }"
+            :aria-current="route.path.startsWith(item.path) ? 'page' : undefined"
+          >
+            <AppIcon :name="item.icon" :size="18" />
+            <span class="nav-label">{{ item.label }}</span>
+          </router-link>
+        </template>
       </nav>
       <div class="sidebar-foot">
         <span class="auth-note">{{ mode === 'local' ? '本地管理员' : '由运维面板统一鉴权' }}</span>
