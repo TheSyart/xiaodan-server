@@ -90,10 +90,10 @@ them through the device bridge (see "Agent brain"). Besides answering, they push
 | `get_weather` | current weather and tomorrow's forecast; shows a weather screen; without a named city it uses the city of the device's IP for the session | Open-Meteo, or wttr.in when the place is uncertain or the call fails; IP lookup via the pconline IP database; none needs a key | the model summarises it |
 | `set_volume` | louder, quieter, or a given percentage | none | spoken directly |
 
-Two upstream plugins are replaced as well: `get_weather` (upstream queries QWeather and then scrapes a web page with a
-hard-coded shared key) and `handle_exit_intent` (upstream closes the connection after saying goodbye, so a push-to-talk
-device has to reconnect and its button does nothing for a few seconds). Goodbye detection and the lunar lookup are always
-on inside the engine, so the page does not list them.
+`get_weather` also replaces the upstream plugin of the same name (upstream queries QWeather and then scrapes a web page with a
+hard-coded shared key). The function descriptions the model sees come from the console (`console/src/agent/engine-tools.ts`);
+the engine plugins are only called by name through the device bridge, and settings such as how long a screen stays or the
+default city live on the console's Tools page and travel with each call.
 
 The device receives one flat JSON message, and only if its hello declared `features.xiaodan`; stock xiaozhi firmware
 never sees it:
@@ -127,7 +127,7 @@ build fails if any anchor is missing:
 The last two patches serve the removed engine path (the engine running function calls itself). They stay in the image, along with
 the model gateway provider files, until the production database is confirmed clean after migration.
 
-New agents have these three capabilities ticked. Capabilities are ticked per role on the Agents page; the Models page no longer has
+New agents have these three tools switched on. Which tools a role uses is decided on the Agents page; the Models page no longer has
 a *tool calling* setting. The chat model must support function calling: OpenAI `tools` with streamed `tool_calls`. When a model writes
 a call as one of the text forms above, the console recognises and runs it as well.
 
@@ -170,14 +170,26 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 
 ### Console agent capabilities
 
-- **Web search** (tool `web_search`, plugin code `search`): providers are configured and switched on the Tools & services page
-  (which now only covers search).
+Capabilities come in three kinds, each managed on its own page. The Agents page only decides which ones each role uses and holds
+no capability settings; migration v10 merged the per-role settings into one global copy:
+
+| Kind | What it is | What its page does | Where settings live |
+|---|---|---|---|
+| Tool | a function implemented in the server code (the items below) | view the description and the functions the model sees, edit settings; tools cannot be created or deleted | `tool_settings`, shared by all roles |
+| Skill | a `SKILL.md` playbook | create, import, edit, delete; shows the tools it needs and the roles using it | `skills` |
+| MCP | an external tool server | add, import JSON, edit, delete, test; choose which of its tools it offers | `mcp_servers` |
+
+When a role switches on a skill whose tools are off, the Agents page says so and can switch them on in one click. How to tell a
+story or run a vocabulary lesson is written only in the skills; tool descriptions only say what the tool does.
+
+- **Web search** (tool `web_search`, code `search`): providers are configured and switched under web search on the Tools page.
   The default is DeepSeek's official web search: neither DeepSeek's Chat nor Responses API offers search, but its Anthropic-compatible
   API supports the `web_search_20250305` server tool (the default search in deepseek-ai/deepseek-harness). One Messages request per query,
   retried once when the model does not trigger a search; the chat model's key can be reused. Bocha and Tavily are also available.
 - **MCP**: a minimal Streamable HTTP client written here (initialize → paginated tools/list → tools/call, JSON and SSE responses,
-  re-initialising expired sessions), remote https servers only; add and test servers on the MCP page, enable them per role on the
-  Agents page with per-tool allowlists. Tools are named `mcp_<server>__<tool>` and results are handed to the model as external data.
+  re-initialising expired sessions), remote https servers only; add and test servers on the MCP page and choose there which of each
+  server's tools it offers; the Agents page only switches servers on or off. Tools are named `mcp_<server>__<tool>` and results are
+  handed to the model as external data.
   Server URLs may carry tokens, so lists only show the origin and path.
   - **Built in: AIHOT (AI热点资讯)**. `https://aihot.news/api/mcp` is anonymous and read-only (no token) and offers 5 tools: latest
     news, search, hot topics, story timelines and the daily report. On first start the console adds it and enables it for every
@@ -206,7 +218,7 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   Story synthesis records each chunk's measured duration (`timing_json`, migration v9; older audio is measured by scanning the file's frames at
   play time). The story text is cut into short cues with an estimated narration time, and the engine inserts each cue into the audio stream when
   that many frames have played (`sentence_start` text starting with U+001E). The device types it out and scrolls after two lines.
-- **Vocabulary** (`vocab_next`/`vocab_show`/`vocab_answer`/`vocab_progress`, plugin code `vocab`): ships an original 300-word starter book
+- **Vocabulary** (`vocab_answer`/`vocab_progress`, plus `vocab_deck` for level-3 firmware or `vocab_next`/`vocab_show` for older firmware, code `vocab`): ships an original 300-word starter book
   (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
   after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
   Level-3 firmware gets a word deck, `vocab_deck`: the model first asks how many words to learn, then sends one
@@ -219,7 +231,7 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   - `qwen-image-3.0-pro` (recommended), `qwen-image-2.0` and `z-image-turbo` use the synchronous `multimodal-generation/generation` endpoint;
   - `wan2.7-image` and `wan2.7-image-pro` run as async tasks, polled every 2 seconds for at most 110 seconds, and can be interrupted.
   - A new image model is prefilled with the key and workspace of an existing Qwen model; "Draw a test image" on the Models page shows a pixel-art preview.
-  - An agent with drawing ticked can pick its own image model; otherwise the default one is used.
+  - The image model is chosen under drawing on the Tools page (shared by all roles); otherwise the default model from the Models page is used.
 
   The prompt gets a small-screen style suffix (centred subject, flat colours; child mode adds child-safety wording) and the original goes to the Gallery.
   A worker thread crops to a square, area-averages to 128×128, picks 16 colours by median cut, applies Floyd–Steinberg dithering and packs
@@ -507,6 +519,12 @@ largest so far, so take a data backup in the panel before deploying it. It:
 - once Qwen recognition or synthesis is configured, points agents at Qwen and deletes other synthesis models with their voices and
   unused other recognition models;
 - moves each agent's synthesis parameters onto its voice, splitting off variants where agents sharing a voice used different settings.
+
+Migration v10 (capabilities split into tool, skill and MCP pages) also deserves a backup first. It:
+- merges the per-role tool settings (default weather city, screen hold seconds, word book) and the image model into one global copy,
+  taking the default agent's values where roles disagree;
+- moves the MCP "only these tools" choice from roles to servers, again taking the default agent's choice;
+- removes skills and MCP servers that were globally disabled from every role, then drops the disabled state (the effect is unchanged).
 
 ## Measured in production (2026-09-13)
 

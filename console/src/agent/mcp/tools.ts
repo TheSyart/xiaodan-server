@@ -24,6 +24,8 @@ export interface McpServerRow {
   tools_json: string;
   tools_updated_at: string | null;
   last_error: string;
+  /** 对外提供哪些工具;null 表示全部(MCP 页设置) */
+  tool_allowlist_json: string | null;
 }
 
 export function toServer(row: McpServerRow): McpServer {
@@ -73,25 +75,28 @@ export async function serverTools(deps: Pick<AgentDeps, 'conn' | 'fetch'>, row: 
   }
 }
 
-export function agentServerRows(conn: Db, agentId: string): (McpServerRow & { tool_allowlist_json: string | null })[] {
+export function agentServerRows(conn: Db, agentId: string): McpServerRow[] {
   return all(conn,
-    `SELECT s.*, a.tool_allowlist_json FROM agent_mcp_servers a JOIN mcp_servers s ON s.id = a.server_id
-     WHERE a.agent_id = ? AND s.enabled = 1 ORDER BY s.name`, agentId);
+    `SELECT s.* FROM agent_mcp_servers a JOIN mcp_servers s ON s.id = a.server_id
+     WHERE a.agent_id = ? ORDER BY s.name`, agentId);
+}
+
+export function allowlistOf(row: Pick<McpServerRow, 'tool_allowlist_json'>): string[] | null {
+  if (!row.tool_allowlist_json) return null;
+  try {
+    const list = JSON.parse(row.tool_allowlist_json) as unknown;
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : null;
+  } catch {
+    return null;
+  }
 }
 
 EXTRA_TOOL_SOURCES.push(async (ctx) => {
   const rows = agentServerRows(ctx.deps.conn, ctx.agent.id);
   const tools: AgentTool[] = [];
   await Promise.all(rows.map(async (row) => {
-    let allow: Set<string> | null = null;
-    if (row.tool_allowlist_json) {
-      try {
-        const list = JSON.parse(row.tool_allowlist_json) as unknown;
-        if (Array.isArray(list)) allow = new Set(list.filter((x): x is string => typeof x === 'string'));
-      } catch {
-        allow = null;
-      }
-    }
+    const list = allowlistOf(row);
+    const allow = list ? new Set(list) : null;
     const server = toServer(row);
     for (const tool of await serverTools(ctx.deps, row)) {
       if (allow && !allow.has(tool.name)) continue;

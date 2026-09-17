@@ -279,10 +279,9 @@ async def bridge_checks():
     auth = {"Authorization": f"Bearer {SECRET}"}
     try:
         async with httpx.AsyncClient(trust_env=False, timeout=10) as client:
-            assert (await client.get(f"{base}/tools")).status_code == 401
-            assert (await client.get(f"{base}/tools", headers={"Authorization": "Bearer wrong"})).status_code == 401
-            names = [t["function"]["name"] for t in (await client.get(f"{base}/tools", headers=auth)).json()["tools"]]
-            assert {"show_calendar", "get_weather", "set_volume"} <= set(names) and "change_role" not in names, names
+            assert (await client.get(f"{base}/health")).status_code == 401
+            assert (await client.get(f"{base}/health", headers={"Authorization": "Bearer wrong"})).status_code == 401
+            assert (await client.get(f"{base}/health", headers=auth)).status_code == 200
 
             assert (await client.get(f"{base}/devices/aa:bb:cc:dd:ee:99", headers=auth)).json() == {"online": False}
             r = await client.post(f"{base}/devices/aa:bb:cc:dd:ee:99/announce", headers=auth, json={"text": "喝水"})

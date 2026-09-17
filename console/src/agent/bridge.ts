@@ -1,7 +1,6 @@
 // 引擎「设备桥」的客户端(server/engine/xiaodan_bridge.py)。地址默认 http://engine:8003,在设置页可改。
 
 import type { FetchLike } from '../voice/dashscope.ts';
-import type { ToolSpec } from './llm.ts';
 
 export interface DeviceStatus {
   online: boolean;
@@ -27,7 +26,6 @@ export class BridgeError extends Error {
 }
 
 export class Bridge {
-  private toolsCache: { at: number; specs: ToolSpec[] } | null = null;
   private readonly baseUrl: () => string;
   private readonly secret: () => string;
   private readonly fetchImpl: FetchLike;
@@ -71,19 +69,6 @@ export class Bridge {
       return status === 200 ? { ok: true, connections: data?.connections } : { ok: false, error: `HTTP ${status}` };
     } catch (error) {
       return { ok: false, error: (error as Error).message };
-    }
-  }
-
-  /** 引擎插件的函数描述,缓存 10 分钟。拿不到时返回 null,由调用方用内置的备份描述。 */
-  async tools(): Promise<ToolSpec[] | null> {
-    if (this.toolsCache && Date.now() - this.toolsCache.at < 10 * 60_000) return this.toolsCache.specs;
-    try {
-      const { status, data } = await this.request('GET', '/tools', undefined, 3000);
-      if (status !== 200 || !Array.isArray(data?.tools)) return null;
-      this.toolsCache = { at: Date.now(), specs: data.tools as ToolSpec[] };
-      return this.toolsCache.specs;
-    } catch {
-      return null;
     }
   }
 

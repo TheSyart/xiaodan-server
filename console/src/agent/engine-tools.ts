@@ -1,7 +1,7 @@
 // 住在引擎里的工具:查日期显示日历、查天气显示天气画面、调音量(server/plugins/)。
 //
 // 它们要拿着设备连接推卡片,只能在引擎里跑;控制塔经设备桥调用,结果交还模型。
-// 函数描述优先取引擎当前加载的版本(桥的 /tools),取不到时用这里的备份,两边内容保持一致。
+// 模型看到的函数说明以这里为准(引擎里的插件说明只是注册要求,不会交给模型)。
 
 import { BridgeError } from './bridge.ts';
 import type { ToolSpec } from './llm.ts';
@@ -12,7 +12,7 @@ interface EngineToolMeta {
   hint: string;
   act?: DeviceAct;
   progress?: string;
-  fallback: ToolSpec;
+  spec: ToolSpec;
 }
 
 const obj = (properties: Record<string, unknown>) => ({ type: 'object', properties, required: [] });
@@ -22,7 +22,7 @@ export const ENGINE_TOOL_META: Readonly<Record<string, EngineToolMeta>> = {
     label: '日期与日历',
     hint: '正在翻日历',
     act: 'calendar',
-    fallback: {
+    spec: {
       type: 'function',
       function: {
         name: 'show_calendar',
@@ -39,7 +39,7 @@ export const ENGINE_TOOL_META: Readonly<Record<string, EngineToolMeta>> = {
     hint: '正在查天气',
     act: 'weather',
     progress: '我看看天气哦。',
-    fallback: {
+    spec: {
       type: 'function',
       function: {
         name: 'get_weather',
@@ -53,7 +53,7 @@ export const ENGINE_TOOL_META: Readonly<Record<string, EngineToolMeta>> = {
   set_volume: {
     label: '调音量',
     hint: '正在调音量',
-    fallback: {
+    spec: {
       type: 'function',
       function: {
         name: 'set_volume',
@@ -95,15 +95,14 @@ async function runEngineTool(
   }
 }
 
-/** 按智能体勾选的插件生成引擎工具。 */
+/** 按智能体开着的工具生成引擎工具;enabled 的值是工具页里的全局设置,随调用交给引擎插件。 */
 export async function engineTools(
-  ctx: Pick<ToolContext, 'deps'>, enabled: ReadonlyMap<string, Record<string, unknown>>,
+  _ctx: Pick<ToolContext, 'deps'>, enabled: ReadonlyMap<string, Record<string, unknown>>,
 ): Promise<AgentTool[]> {
-  const live = await ctx.deps.bridge.tools();
   const tools: AgentTool[] = [];
   for (const [name, meta] of Object.entries(ENGINE_TOOL_META)) {
     if (!enabled.has(name)) continue;
-    const spec = live?.find((item) => item.function?.name === name) ?? meta.fallback;
+    const spec = meta.spec;
     const pluginConfig = enabled.get(name) ?? {};
     tools.push({
       name,

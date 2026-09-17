@@ -1,4 +1,5 @@
-// 技能管理接口(挂在 /api/skills)与智能体的技能勾选(/api/agents/:id/skills)。
+// 技能管理接口(挂在 /api/skills)与智能体的技能开关(/api/agents/:id/skills)。
+// 技能没有全局启用开关:哪个智能体用哪些技能只在智能体页决定。
 
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -14,12 +15,12 @@ export function skillRoutes(deps: AgentDeps): Hono {
 
   app.get('/', (c) => c.json({
     items: all<Record<string, unknown>>(conn,
-      `SELECT name, description, body, files_json, allowed_tools, source, enabled, updated_at,
-              (SELECT COUNT(*) FROM agent_skills a WHERE a.skill_name = skills.name) AS agent_count
-       FROM skills ORDER BY source DESC, name`).map((row) => ({
+      `SELECT name, description, body, files_json, allowed_tools, source, updated_at FROM skills ORDER BY source DESC, name`).map((row) => ({
       ...row,
       files: Object.keys(JSON.parse(String(row['files_json'] ?? '{}')) as Record<string, string>),
       files_json: undefined,
+      agents: all<{ id: string; name: string }>(conn,
+        'SELECT g.id, g.name FROM agent_skills a JOIN agents g ON g.id = a.agent_id WHERE a.skill_name = ? ORDER BY g.is_default DESC, g.created_at', row['name']),
     })),
   }));
 
@@ -67,14 +68,14 @@ export function skillRoutes(deps: AgentDeps): Hono {
     const name = c.req.param('name');
     const row = one<{ files_json: string }>(conn, 'SELECT files_json FROM skills WHERE name = ?', name);
     if (!row) return c.json({ error: '技能不存在' }, 404);
-    const body = z.object({ markdown: z.string().min(1).max(MAX_UPLOAD), enabled: z.boolean().default(true) })
+    const body = z.object({ markdown: z.string().min(1).max(MAX_UPLOAD) })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!body.success) return c.json({ error: '请提供 SKILL.md 内容' }, 400);
     try {
       const parsed = parseSkillMarkdown(body.data.markdown);
       if (parsed.name !== name) return c.json({ error: '不能修改技能名;要改名请导入一个新技能' }, 400);
-      run(conn, "UPDATE skills SET description = ?, body = ?, allowed_tools = ?, enabled = ?, updated_at = datetime('now') WHERE name = ?",
-        parsed.description, parsed.body, parsed.allowedTools.join(', '), body.data.enabled ? 1 : 0, name);
+      run(conn, "UPDATE skills SET description = ?, body = ?, allowed_tools = ?, updated_at = datetime('now') WHERE name = ?",
+        parsed.description, parsed.body, parsed.allowedTools.join(', '), name);
       return c.json({ ok: true });
     } catch (error) {
       return c.json({ error: (error as Error).message }, 400);

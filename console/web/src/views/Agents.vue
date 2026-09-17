@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { onBeforeRouteLeave, RouterLink } from 'vue-router';
-import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type RoleTemplate, type RoleTemplateApplied, type Skill, type Voice } from '../api';
+import { api, type Agent, type McpServerView, type Model, type RoleTemplate, type RoleTemplateApplied, type Skill, type ToolView, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -15,18 +15,17 @@ import { confirmDialog, toast, toastError } from '../ui';
 const agents = ref<Agent[]>([]);
 const models = ref<Model[]>([]);
 const voices = ref<Voice[]>([]);
-const catalog = ref<Catalog | null>(null);
+const tools = ref<ToolView[]>([]);
 const mcpServers = ref<McpServerView[]>([]);
 const skills = ref<Skill[]>([]);
-/** MCP 服务器 id → 是否启用、只放行哪些工具(null 表示全部) */
-const mcpState = ref<Record<string, { on: boolean; allow: string[] | null }>>({});
+// 智能体页只决定开不开:工具代号、MCP 服务器 id、技能名。能力自己的设置在工具、MCP、技能页
+const toolState = ref<string[]>([]);
+const mcpState = ref<string[]>([]);
 const skillState = ref<string[]>([]);
 const loading = ref(true);
 const loadError = ref('');
 
 const editing = ref<Agent | null>(null);
-/** 插件代号 → 参数。只有被勾选的才在这个表里。 */
-const pluginState = ref<Record<string, Record<string, string>>>({});
 /** 模型参数:是否开思考 */
 const llmParams = ref({ thinking: false });
 const snapshot = ref('');
@@ -36,11 +35,11 @@ const nameError = ref('');
 async function load() {
   loadError.value = '';
   try {
-    const [a, m, v, c, ms, sk] = await Promise.all([
+    const [a, m, v, t, ms, sk] = await Promise.all([
       api.get<{ items: Agent[] }>('/agents'),
       api.get<{ items: Model[] }>('/models'),
       api.get<{ items: Voice[] }>('/voices'),
-      api.get<Catalog>('/catalog'),
+      api.get<{ items: ToolView[] }>('/tools'),
       api.get<{ items: McpServerView[] }>('/mcp-servers'),
       api.get<{ items: Skill[] }>('/skills'),
     ]);
@@ -49,7 +48,7 @@ async function load() {
     agents.value = a.items;
     models.value = m.items;
     voices.value = v.items;
-    catalog.value = c;
+    tools.value = t.items;
   } catch (e) {
     loadError.value = (e as Error).message;
   } finally {
@@ -60,9 +59,9 @@ onMounted(load);
 
 const byType = (type: string) => models.value.filter((m) => m.model_type === type && m.enabled === 1);
 const modelById = (id: string | null) => (id ? models.value.find((m) => m.id === id) : undefined);
-const pluginLabel = (code: string) => catalog.value?.plugins.find((p) => p.code === code)?.label;
+const pluginLabel = (code: string) => tools.value.find((t) => t.code === code)?.label;
 const agentPluginLabels = (agent: Agent) =>
-  agent.plugins.map((p) => pluginLabel(p.plugin_code)).filter((label): label is string => !!label);
+  agent.plugins.map((code) => pluginLabel(code)).filter((label): label is string => !!label);
 
 /**
  * 某类型标为默认的模型;没有默认项就留空。不能取列表第一个:排序靠 id 而不是用户的选择,
@@ -83,53 +82,60 @@ const voiceById = (id: string | null) => voices.value.find((voice) => voice.id =
 const selectedVoice = computed(() => voiceById(editing.value?.tts_voice_id ?? null));
 const VOICE_GROUPS: [Voice['kind'], string][] = [['system', '系统音色'], ['clone', '复刻音色'], ['design', '设计音色']];
 const usableVoices = computed(() => voices.value.filter((voice) => voice.compatible));
-const hasImagePlugin = computed(() => 'image' in pluginState.value);
 /** 工具按分组显示 */
-const pluginGroups = computed(() => {
-  const groups = new Map<string, PluginDef[]>();
-  for (const plugin of catalog.value?.plugins ?? []) {
-    const list = groups.get(plugin.group) ?? [];
-    list.push(plugin);
-    groups.set(plugin.group, list);
-  }
+const toolGroups = computed(() => {
+  const groups = new Map<string, ToolView[]>();
+  for (const tool of tools.value) groups.set(tool.group, [...(groups.get(tool.group) ?? []), tool]);
   return [...groups.entries()];
 });
 
-function toggleMcp(server: McpServerView, on: boolean) {
-  mcpState.value = { ...mcpState.value, [server.id]: { on, allow: mcpState.value[server.id]?.allow ?? null } };
+const toggleIn = (list: string[], item: string, on: boolean) => (on ? [...new Set([...list, item])].sort() : list.filter((x) => x !== item));
+function toggleTool(code: string, on: boolean) {
+  toolState.value = toggleIn(toolState.value, code, on);
 }
-function toggleMcpTool(server: McpServerView, tool: string, on: boolean) {
-  const current = mcpState.value[server.id] ?? { on: true, allow: null };
-  const all = server.tools.map((t) => t.name);
-  let allow = current.allow ?? all;
-  allow = on ? [...new Set([...allow, tool])] : allow.filter((name) => name !== tool);
-  mcpState.value = { ...mcpState.value, [server.id]: { on: true, allow: allow.length === all.length ? null : allow } };
+function toggleMcp(id: string, on: boolean) {
+  mcpState.value = toggleIn(mcpState.value, id, on);
 }
-const mcpToolOn = (server: McpServerView, tool: string) => {
-  const state = mcpState.value[server.id];
-  return !!state?.on && (state.allow === null || state.allow.includes(tool));
-};
 function toggleSkill(name: string, on: boolean) {
-  skillState.value = on ? [...new Set([...skillState.value, name])].sort() : skillState.value.filter((n) => n !== name);
+  skillState.value = toggleIn(skillState.value, name, on);
 }
-/** 技能声明需要、但这个智能体没开的工具(allowed-tools 里带 * 的按前缀判断) */
+
+/** 技能 allowed-tools 里的一项(可以带 * 通配)能不能匹配这个函数名 */
+const matches = (pattern: string, name: string) =>
+  new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replaceAll('*', '.*')}$`, 'u').test(name);
+/** MCP 服务器对外提供的函数名(与控制塔 mcpToolName 的常见情形一致) */
+const mcpFunctions = (server: McpServerView) =>
+  server.tools.filter((t) => server.tool_allowlist === null || server.tool_allowlist.includes(t.name)).map((t) => `mcp_${server.id}__${t.name}`);
+
+/** 技能需要、但这个智能体没开的工具 */
 function missingTools(skill: Skill): string[] {
-  const enabled = new Set(Object.keys(pluginState.value));
-  const toolNames = new Set<string>();
-  const PLUGIN_TOOLS: Record<string, string[]> = {
-    search: ['web_search'], reminders: ['create_reminder', 'list_reminders', 'cancel_reminder'],
-    stories: ['list_stories', 'play_story'], music: ['list_music', 'play_music', 'stop_media'],
-    vocab: ['vocab_next', 'vocab_answer', 'vocab_progress'], image: ['generate_image'], roles: ['list_roles', 'switch_role'],
-    memory: ['remember', 'forget', 'list_memories'],
-    show_calendar: ['show_calendar'], get_weather: ['get_weather'], set_volume: ['set_volume'],
-  };
-  for (const code of enabled) for (const name of PLUGIN_TOOLS[code] ?? []) toolNames.add(name);
-  const mcpOn = Object.entries(mcpState.value).some(([, v]) => v.on);
-  return skill.allowed_tools.split(/[,\s]+/u).filter(Boolean).filter((tool) => {
-    if (tool.includes('*')) return !mcpOn;
-    return !toolNames.has(tool);
-  });
+  const available = [
+    ...tools.value.filter((t) => toolState.value.includes(t.code)).flatMap((t) => t.functions.map((fn) => fn.name)),
+    ...mcpServers.value.filter((s) => mcpState.value.includes(s.id)).flatMap(mcpFunctions),
+  ];
+  return skill.allowed_tools.split(/[,\s]+/u).filter(Boolean).filter((pattern) => !available.some((name) => matches(pattern, name)));
 }
+
+/** 把技能缺的工具一起打开:能找到提供它的工具或 MCP 服务器就开;找不到的留着提示 */
+function enableMissing(skill: Skill) {
+  const missing = missingTools(skill);
+  for (const tool of tools.value) {
+    if (tool.functions.some((fn) => missing.some((pattern) => matches(pattern, fn.name)))) toggleTool(tool.code, true);
+  }
+  for (const server of mcpServers.value) {
+    if (mcpFunctions(server).some((name) => missing.some((pattern) => matches(pattern, name)))) toggleMcp(server.id, true);
+  }
+  const still = missingTools(skill);
+  if (still.length) toast(`这些还找不到来源,先去工具或 MCP 页看看:${still.join('、')}`, 'warn');
+}
+const toolLabelsFor = (skill: Skill) => {
+  const missing = missingTools(skill);
+  const labels = [
+    ...tools.value.filter((t) => t.functions.some((fn) => missing.some((p) => matches(p, fn.name)))).map((t) => `工具「${t.label}」`),
+    ...mcpServers.value.filter((s) => mcpFunctions(s).some((name) => missing.some((p) => matches(p, name)))).map((s) => `MCP「${s.name}」`),
+  ];
+  return labels.length ? labels : missing;
+};
 const previewing = ref(false);
 async function previewVoice() {
   const agent = editing.value;
@@ -148,16 +154,16 @@ async function previewVoice() {
 onBeforeUnmount(stopPlayback);
 
 const draftJson = () => JSON.stringify({
-  agent: editing.value, plugins: pluginState.value, llm: llmParams.value, mcp: mcpState.value, skills: skillState.value,
+  agent: editing.value, tools: toolState.value, llm: llmParams.value, mcp: mcpState.value, skills: skillState.value,
 });
 const dirty = computed(() => !!editing.value && draftJson() !== snapshot.value);
 
-function startEditing(agent: Agent, plugins: Record<string, Record<string, string>>) {
+function startEditing(agent: Agent) {
   editing.value = agent;
-  pluginState.value = plugins;
-  mcpState.value = Object.fromEntries((agent.mcp_servers ?? []).map((row) => [row.server_id, {
-    on: true, allow: row.tool_allowlist_json ? (JSON.parse(row.tool_allowlist_json) as string[]) : null,
-  }]));
+  // 库里可能残留目录已移除的工具(比如早先的 get_time)。不带进表单:保存时接口会拒绝未知工具。
+  const known = new Set(tools.value.map((t) => t.code));
+  toolState.value = [...(agent.plugins ?? [])].filter((code) => known.has(code)).sort();
+  mcpState.value = [...(agent.mcp_servers ?? [])].sort();
   skillState.value = [...(agent.skills ?? [])].sort();
   try {
     llmParams.value = { thinking: (JSON.parse(agent.llm_params_json || '{}') as { thinking?: boolean }).thinking === true };
@@ -169,34 +175,19 @@ function startEditing(agent: Agent, plugins: Record<string, Record<string, strin
 }
 
 function edit(agent: Agent) {
-  const state: Record<string, Record<string, string>> = {};
-  // 库里可能残留目录已移除的插件(比如早先的 get_time)。不带进表单:保存时接口会拒绝未知插件。
-  const known = new Set((catalog.value?.plugins ?? []).map((plugin) => plugin.code));
-  for (const item of agent.plugins) {
-    if (!known.has(item.plugin_code)) continue;
-    try {
-      const params = JSON.parse(item.params_json) as Record<string, unknown>;
-      state[item.plugin_code] = Object.fromEntries(
-        Object.entries(params).map(([key, value]) => [key, String(value ?? '')]),
-      );
-    } catch {
-      state[item.plugin_code] = {};
-    }
-  }
-  startEditing(JSON.parse(JSON.stringify(agent)) as Agent, state);
+  startEditing(JSON.parse(JSON.stringify(agent)) as Agent);
 }
 
 function create() {
   startEditing(
     {
       id: '', name: '新的智能体', system_prompt: '',
-      asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'), image_model_id: null,
+      asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'),
       tts_voice_id: usableVoices.value.find((voice) => voice.status === 'ok' && voice.kind === 'system')?.id ?? null,
       chat_history_conf: 1, is_default: 0,
       max_steps: 6, safety_level: 'standard', description: '', greeting: '', role_template: '',
       llm_params_json: '{}', plugins: [], device_count: 0, mcp_servers: [], skills: [],
     },
-    {},
   );
 }
 
@@ -244,18 +235,6 @@ async function leaveEdit() {
 
 onBeforeRouteLeave(async () => (editing.value && dirty.value ? confirmDialog(DISCARD) : true));
 
-function togglePlugin(plugin: PluginDef, on: boolean) {
-  if (on) {
-    const defaults: Record<string, string> = {};
-    for (const field of plugin.fields) defaults[field.key] = String(field.default ?? '');
-    pluginState.value = { ...pluginState.value, [plugin.code]: defaults };
-  } else {
-    const next = { ...pluginState.value };
-    delete next[plugin.code];
-    pluginState.value = next;
-  }
-}
-
 async function save() {
   if (!editing.value || saving.value) return;
   const agent = editing.value;
@@ -269,7 +248,6 @@ async function save() {
     system_prompt: agent.system_prompt,
     asr_model_id: agent.asr_model_id,
     llm_model_id: agent.llm_model_id,
-    image_model_id: agent.image_model_id,
     tts_voice_id: agent.tts_voice_id,
     chat_history_conf: agent.chat_history_conf ? 1 : 0,
     max_steps: Number(agent.max_steps) || 6,
@@ -283,15 +261,13 @@ async function save() {
   saving.value = true;
   try {
     if (creating) {
-      // 先记下新 id:后面保存插件失败时再点保存,走的是更新而不是再建一个
+      // 先记下新 id:后面保存开关失败时再点保存,走的是更新而不是再建一个
       agent.id = (await api.post<{ id: string }>('/agents', payload)).id;
     } else {
       await api.put(`/agents/${agent.id}`, payload);
     }
-    await api.put(`/agents/${agent.id}/plugins`,
-      Object.entries(pluginState.value).map(([code, params]) => ({ plugin_code: code, params })));
-    await api.put(`/agents/${agent.id}/mcp`, Object.entries(mcpState.value).filter(([, v]) => v.on)
-      .map(([server_id, v]) => ({ server_id, tool_allowlist: v.allow })));
+    await api.put(`/agents/${agent.id}/plugins`, toolState.value);
+    await api.put(`/agents/${agent.id}/mcp`, mcpState.value);
     await api.put(`/agents/${agent.id}/skills`, skillState.value);
     toast(creating ? `已创建「${payload.name}」` : '已保存。设备下次连接时生效。');
     editing.value = null;
@@ -342,7 +318,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
 
 <template>
   <template v-if="!editing">
-    <PageHeader title="智能体" description="人设、模型组合与工具。每台设备绑定一个智能体。">
+    <PageHeader title="智能体" description="人设、模型组合,以及开哪些工具、技能与 MCP。每台设备绑定一个智能体。">
       <template #actions>
         <button class="btn" type="button" :disabled="loading" @click="openTemplates">
           <AppIcon name="sparkles" :size="16" /><span>从模板创建</span>
@@ -473,7 +449,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
 
     <section class="card">
       <div class="card-head">
-        <div><h2><AppIcon name="layers" :size="18" />模型与声音</h2><p>对话、识别、文生图模型在「模型」页维护;声音的音量、语速、方言与语气在「音色」页调。</p></div>
+        <div><h2><AppIcon name="layers" :size="18" />模型与声音</h2><p>对话、识别模型在「模型」页维护;声音的音量、语速、方言与语气在「音色」页调。画画用哪个文生图模型在「工具」页选。</p></div>
         <div class="card-actions"><RouterLink class="btn btn-sm" to="/playground"><AppIcon name="message" :size="14" /><span>去试聊</span></RouterLink></div>
       </div>
       <div class="form-grid">
@@ -511,14 +487,6 @@ const PLUGIN_ICON: Record<string, IconName> = {
           </div>
           <span class="field-hint">{{ selectedVoice ? selectedVoice.summary : '用默认千问合成模型的默认音色。' }}</span>
         </div>
-        <label v-if="hasImagePlugin" class="field">
-          <span class="field-label">文生图模型</span>
-          <select v-model="editing.image_model_id" class="select">
-            <option :value="null">默认{{ defaultOf('Image') ? `(${modelById(defaultOf('Image'))?.name})` : '' }}</option>
-            <option v-for="model in byType('Image')" :key="model.id" :value="model.id">{{ model.name }}</option>
-          </select>
-          <span class="field-hint">「画画」工具用它出图。</span>
-        </label>
         <label class="field">
           <span class="field-label">对话记录</span>
           <select v-model.number="editing.chat_history_conf" class="select">
@@ -568,37 +536,26 @@ const PLUGIN_ICON: Record<string, IconName> = {
       <div class="card-head">
         <div>
           <h2><AppIcon name="zap" :size="18" />工具</h2>
-          <p>这个智能体能做哪些事。打开后,它会在需要时调用;一件事要好几步时会连续调用直到办完。</p>
+          <p>这个角色能用哪些工具。工具的说明与设置在 <RouterLink to="/tools">工具</RouterLink> 页,所有角色共用。</p>
         </div>
       </div>
-      <template v-for="[group, plugins] in pluginGroups" :key="group">
-      <h3 class="plugin-group-title">{{ group }}</h3>
-      <div class="plugin-grid">
-        <div v-for="plugin in plugins" :key="plugin.code" class="plugin" :class="{ on: plugin.code in pluginState }">
-          <div class="plugin-head">
-            <span class="plugin-icon"><AppIcon :name="PLUGIN_ICON[plugin.code] ?? 'zap'" :size="18" /></span>
-            <span class="plugin-title">{{ plugin.label }}</span>
-            <SwitchToggle :model-value="plugin.code in pluginState" @update:model-value="togglePlugin(plugin, $event)">
-              <span class="visually-hidden">{{ plugin.label }}</span>
-            </SwitchToggle>
-          </div>
-          <p class="plugin-desc">{{ plugin.description }}</p>
-          <div class="chips" style="margin-top: 10px">
-            <span class="tag" :class="plugin.keyless ? 'ok' : 'warn'">{{ plugin.keyless ? '无需密钥' : '需要密钥' }}</span>
-          </div>
-          <div v-if="plugin.code in pluginState && plugin.fields.length" class="plugin-fields">
-            <label v-for="field in plugin.fields" :key="field.key" class="field">
-              <span class="field-label">{{ field.label }}<span v-if="field.required" class="req">*</span></span>
-              <input
-                v-model="pluginState[plugin.code]![field.key]" class="input"
-                :type="field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'"
-                :placeholder="String(field.default ?? '')"
-              />
-              <span v-if="field.hint" class="field-hint">{{ field.hint }}</span>
-            </label>
+      <template v-for="[group, items] in toolGroups" :key="group">
+        <h3 class="plugin-group-title">{{ group }}</h3>
+        <div class="plugin-grid">
+          <div v-for="tool in items" :key="tool.code" class="plugin" :class="{ on: toolState.includes(tool.code) }">
+            <div class="plugin-head">
+              <span class="plugin-icon"><AppIcon :name="PLUGIN_ICON[tool.code] ?? 'zap'" :size="18" /></span>
+              <span class="plugin-title">{{ tool.label }}</span>
+              <SwitchToggle :model-value="toolState.includes(tool.code)" @update:model-value="toggleTool(tool.code, $event)">
+                <span class="visually-hidden">{{ tool.label }}</span>
+              </SwitchToggle>
+            </div>
+            <p class="plugin-desc">{{ tool.description }}</p>
+            <div v-if="!tool.status.ready" class="chips" style="margin-top: 8px">
+              <RouterLink to="/tools" class="tag warn" style="text-decoration: none">{{ tool.status.message }}</RouterLink>
+            </div>
           </div>
         </div>
-      </div>
       </template>
     </section>
 
@@ -606,24 +563,23 @@ const PLUGIN_ICON: Record<string, IconName> = {
       <div class="card-head">
         <div>
           <h2><AppIcon name="link" :size="18" />MCP 服务器</h2>
-          <p>勾选这个角色能用的外部工具。服务器在 <RouterLink to="/mcp">MCP</RouterLink> 页添加。</p>
+          <p>这个角色能用哪些外部工具服务器。服务器的添加、编辑与对外提供哪些工具在 <RouterLink to="/mcp">MCP</RouterLink> 页。</p>
         </div>
       </div>
       <EmptyState v-if="mcpServers.length === 0" title="还没有 MCP 服务器" description="先去 MCP 页添加,比如 AIHOT。" />
-      <div v-for="server in mcpServers" :key="server.id" class="plugin" :class="{ on: mcpState[server.id]?.on }" style="margin-bottom: 10px">
-        <div class="plugin-head">
-          <span class="plugin-icon"><AppIcon name="link" :size="18" /></span>
-          <span class="plugin-title">{{ server.name }}</span>
-          <SwitchToggle :model-value="!!mcpState[server.id]?.on" @update:model-value="toggleMcp(server, $event)">
-            <span class="visually-hidden">{{ server.name }}</span>
-          </SwitchToggle>
-        </div>
-        <p class="plugin-desc"><span class="chip-mono">{{ server.url_masked }}</span> · {{ server.tools.length }} 个工具</p>
-        <div v-if="mcpState[server.id]?.on && server.tools.length" class="chips" style="margin-top: 10px">
-          <label v-for="tool in server.tools" :key="tool.name" class="tag" :class="{ sky: mcpToolOn(server, tool.name) }" style="cursor: pointer" :title="tool.description">
-            <input type="checkbox" class="visually-hidden" :checked="mcpToolOn(server, tool.name)" @change="toggleMcpTool(server, tool.name, ($event.target as HTMLInputElement).checked)" />
-            {{ mcpToolOn(server, tool.name) ? '✓ ' : '' }}{{ tool.name }}
-          </label>
+      <div class="plugin-grid">
+        <div v-for="server in mcpServers" :key="server.id" class="plugin" :class="{ on: mcpState.includes(server.id) }">
+          <div class="plugin-head">
+            <span class="plugin-icon"><AppIcon name="link" :size="18" /></span>
+            <span class="plugin-title">{{ server.name }}</span>
+            <SwitchToggle :model-value="mcpState.includes(server.id)" @update:model-value="toggleMcp(server.id, $event)">
+              <span class="visually-hidden">{{ server.name }}</span>
+            </SwitchToggle>
+          </div>
+          <p class="plugin-desc">
+            {{ server.tool_allowlist === null ? server.tools.length : server.tool_allowlist.length }} 个工具
+            <template v-if="server.last_error"> · <span class="tag danger">上次连接失败</span></template>
+          </p>
         </div>
       </div>
     </section>
@@ -632,7 +588,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
       <div class="card-head">
         <div>
           <h2><AppIcon name="sparkles" :size="18" />技能</h2>
-          <p>勾选这个角色掌握的技能;平时只占一行描述,用到时才读全文。技能在 <RouterLink to="/skills">技能</RouterLink> 页管理。</p>
+          <p>这个角色掌握哪些技能;平时只占一行描述,用到时才读全文。技能的新建与编辑在 <RouterLink to="/skills">技能</RouterLink> 页。</p>
         </div>
       </div>
       <EmptyState v-if="skills.length === 0" title="还没有技能" />
@@ -641,14 +597,17 @@ const PLUGIN_ICON: Record<string, IconName> = {
           <div class="plugin-head">
             <span class="plugin-icon"><AppIcon name="sparkles" :size="18" /></span>
             <span class="plugin-title mono">{{ skill.name }}</span>
-            <SwitchToggle :model-value="skillState.includes(skill.name)" :disabled="skill.enabled === 0" @update:model-value="toggleSkill(skill.name, $event)">
+            <SwitchToggle :model-value="skillState.includes(skill.name)" @update:model-value="toggleSkill(skill.name, $event)">
               <span class="visually-hidden">{{ skill.name }}</span>
             </SwitchToggle>
           </div>
           <p class="plugin-desc">{{ skill.description }}</p>
           <div v-if="skillState.includes(skill.name) && missingTools(skill).length" class="callout warn" style="margin: 10px 0 0; padding: 8px 10px">
             <AppIcon name="alert" :size="15" />
-            <div class="callout-body small">需要的工具没开:{{ missingTools(skill).join('、') }}</div>
+            <div class="callout-body small">
+              它需要的还没开:{{ toolLabelsFor(skill).join('、') }}
+              <button class="btn btn-sm" type="button" style="margin-left: 6px" @click="enableMissing(skill)">一起开启</button>
+            </div>
           </div>
         </div>
       </div>

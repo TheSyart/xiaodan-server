@@ -52,7 +52,7 @@ export interface ImageModel {
   config: Record<string, unknown>;
 }
 
-/** 智能体选的文生图模型;没选或已停用时用默认的那个 */
+/** 画画工具设置里选的文生图模型;没选或已停用时用默认的那个 */
 export function imageModel(deps: Pick<AgentDeps, 'conn'>, modelId: string | null | undefined): ImageModel | undefined {
   const row = (modelId
     ? one<{ id: string; name: string; config_json: string }>(deps.conn, "SELECT id, name, config_json FROM models WHERE id = ? AND model_type = 'Image' AND enabled = 1", modelId)

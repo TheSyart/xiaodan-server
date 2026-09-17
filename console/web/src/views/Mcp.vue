@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
-import { api, type Agent, type McpServerView } from '../api';
+import { api, type McpServerView } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
 import ModalDialog from '../components/ModalDialog.vue';
@@ -11,19 +11,16 @@ import SwitchToggle from '../components/SwitchToggle.vue';
 import { confirmDialog, relativeTime, toast, toastError } from '../ui';
 
 // MCP 服务器:给智能体接外部工具。只支持远程的 Streamable HTTP 地址,控制塔不在服务器上跑本地命令。
-// 在这里添加并测试连接;在「智能体」页给某个角色勾选启用。
+// 在这里增删改查、测试连接、选对外提供哪些工具;哪个智能体用哪些服务器只在智能体页决定,服务器本身没有启用开关。
 
 const servers = ref<McpServerView[]>([]);
-const agents = ref<Agent[]>([]);
 const loading = ref(true);
 const loadError = ref('');
 
 async function load() {
   loadError.value = '';
   try {
-    const [s, a] = await Promise.all([api.get<{ items: McpServerView[] }>('/mcp-servers'), api.get<{ items: Agent[] }>('/agents')]);
-    servers.value = s.items;
-    agents.value = a.items;
+    servers.value = (await api.get<{ items: McpServerView[] }>('/mcp-servers')).items;
   } catch (e) {
     loadError.value = (e as Error).message;
   } finally {
@@ -32,28 +29,40 @@ async function load() {
 }
 onMounted(load);
 
-const agentName = (id: string) => agents.value.find((a) => a.id === id)?.name ?? id;
+/** 对外提供的工具:勾选立刻保存。全部勾上时存成 null(以后服务器新增的工具也算) */
+const toolOn = (server: McpServerView, tool: string) => server.tool_allowlist === null || server.tool_allowlist.includes(tool);
+async function toggleTool(server: McpServerView, tool: string, on: boolean) {
+  const names = server.tools.map((t) => t.name);
+  const current = server.tool_allowlist ?? names;
+  const next = on ? [...new Set([...current, tool])] : current.filter((name) => name !== tool);
+  const allowlist = names.every((name) => next.includes(name)) ? null : next;
+  try {
+    await api.put(`/mcp-servers/${server.id}/tools`, { allowlist });
+    server.tool_allowlist = allowlist;
+  } catch (e) {
+    toastError(e);
+  }
+}
 
 interface Draft {
   id: string | null;
   name: string;
   url: string;
   headers: string;
-  enabled: boolean;
   timeout_s: number;
 }
 const draft = ref<Draft | null>(null);
 const saving = ref(false);
 
 function openCreate() {
-  draft.value = { id: null, name: '', url: '', headers: '', enabled: true, timeout_s: 20 };
+  draft.value = { id: null, name: '', url: '', headers: '', timeout_s: 20 };
 }
 
 async function openEdit(server: McpServerView) {
   try {
     const full = await api.get<McpServerView>(`/mcp-servers/${server.id}`);
     draft.value = {
-      id: server.id, name: full.name, url: full.url ?? '', enabled: full.enabled === 1, timeout_s: Math.round(full.timeout_ms / 1000),
+      id: server.id, name: full.name, url: full.url ?? '', timeout_s: Math.round(full.timeout_ms / 1000),
       // 请求头的值不回显,留着打码后的样子;原样提交表示不修改
       headers: Object.entries(full.headers).map(([k, v]) => `${k}: ${v}`).join('\n'),
     };
@@ -82,7 +91,7 @@ async function save() {
   }
   saving.value = true;
   try {
-    const payload = { name: d.name.trim(), url: d.url.trim(), headers, enabled: d.enabled, timeout_ms: Math.round(d.timeout_s * 1000) };
+    const payload = { name: d.name.trim(), url: d.url.trim(), headers, timeout_ms: Math.round(d.timeout_s * 1000) };
     let id = d.id;
     if (id) await api.put(`/mcp-servers/${id}`, payload);
     else id = (await api.post<{ id: string }>('/mcp-servers', payload)).id;
@@ -166,7 +175,7 @@ async function test(server: McpServerView) {
 async function remove(server: McpServerView) {
   const ok = await confirmDialog({
     title: `删除 MCP 服务器「${server.name}」?`,
-    message: server.agents.length ? `有 ${server.agents.length} 个智能体在用它,删除后它们不再能用这些工具。` : '删除后无法恢复。',
+    message: server.agents.length ? `${server.agents.map((a) => a.name).join('、')}在用它,删除后它们不再能用这些工具。` : '删除后无法恢复。',
     confirmText: '删除',
     danger: true,
   });
@@ -181,7 +190,7 @@ async function remove(server: McpServerView) {
 </script>
 
 <template>
-  <PageHeader title="MCP" description="给智能体接外部工具(Model Context Protocol)。添加远程 MCP 服务器后,在「智能体」页按角色勾选启用。">
+  <PageHeader title="MCP" description="给智能体接外部工具(Model Context Protocol)。这里添加、编辑、删除服务器并选它对外提供哪些工具;哪个智能体用哪些服务器,在「智能体」页。">
     <template #actions>
       <button class="btn" type="button" @click="openImport"><AppIcon name="copy" :size="16" /><span>粘贴 JSON 导入</span></button>
       <button class="btn btn-primary" type="button" @click="openCreate"><AppIcon name="plus" :size="16" /><span>添加服务器</span></button>
@@ -228,7 +237,6 @@ async function remove(server: McpServerView) {
         <div>
           <h2>
             <AppIcon name="link" :size="18" />{{ server.name }}
-            <span v-if="server.enabled === 0" class="tag">已停用</span>
             <span v-if="server.last_error" class="tag danger" :title="server.last_error">上次连接失败</span>
             <span v-else-if="server.tools_updated_at" class="tag ok">{{ server.tools.length }} 个工具</span>
           </h2>
@@ -243,9 +251,10 @@ async function remove(server: McpServerView) {
       <div v-if="server.last_error" class="callout danger" style="margin: 0 0 12px"><AppIcon name="alert" :size="18" /><div class="callout-body">{{ server.last_error }}</div></div>
       <div v-if="server.tools.length" class="table-wrap">
         <table class="table">
-          <thead><tr><th>工具</th><th>说明</th></tr></thead>
+          <thead><tr><th>提供</th><th>工具</th><th>说明</th></tr></thead>
           <tbody>
             <tr v-for="tool in server.tools" :key="tool.name">
+              <td><input type="checkbox" :checked="toolOn(server, tool.name)" :aria-label="`对外提供 ${tool.name}`" @change="toggleTool(server, tool.name, ($event.target as HTMLInputElement).checked)" /></td>
               <td class="mono nowrap">{{ tool.name }}</td>
               <td class="cell-sub">{{ tool.description }}</td>
             </tr>
@@ -254,8 +263,8 @@ async function remove(server: McpServerView) {
       </div>
       <EmptyState v-else title="还没有工具列表" description="点「测试连接」拉取。" />
       <p class="cell-sub" style="margin-top: 10px">
-        <template v-if="server.agents.length">启用它的智能体:{{ server.agents.map((a) => agentName(a.agent_id)).join('、') }}</template>
-        <template v-else>还没有智能体启用它,去 <RouterLink to="/agents">智能体</RouterLink> 页勾选。</template>
+        <template v-if="server.agents.length">在用它的智能体:{{ server.agents.map((a) => a.name).join('、') }}</template>
+        <template v-else>还没有智能体用它,去 <RouterLink to="/agents">智能体</RouterLink> 页打开。</template>
       </p>
     </section>
   </template>
@@ -282,7 +291,6 @@ async function remove(server: McpServerView) {
         <textarea v-model="draft.headers" class="textarea mono" rows="3" placeholder="Authorization: Bearer xxx"></textarea>
         <span class="field-hint">每行一个「名称: 值」。编辑时已有的值以打码形式显示,原样保留表示不修改。</span>
       </label>
-      <SwitchToggle v-model="draft.enabled" label="启用" />
     </form>
     <template #footer>
       <button class="btn" type="button" @click="draft = null">取消</button>

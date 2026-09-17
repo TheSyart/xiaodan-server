@@ -9,7 +9,6 @@ export interface AgentRow {
   name: string;
   system_prompt: string;
   llm_model_id: string | null;
-  image_model_id: string | null;
   /** 音色决定合成模型、音量语速、方言语气与允许的情感标签 */
   tts_voice_id: string | null;
   /** 0 不记对话记录,1 记 */

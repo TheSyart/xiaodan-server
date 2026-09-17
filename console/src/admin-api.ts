@@ -17,6 +17,8 @@ import { bindByCode, canonicalMac, unbindDevice } from './identity.ts';
 import type { FetchLike } from './voice/dashscope.ts';
 import { agentAdminRoutes } from './agent/routes.ts';
 import { agentMcpRoutes, mcpRoutes } from './agent/mcp/routes.ts';
+import { toolRoutes } from './agent/tools-routes.ts';
+import { toolConfig } from './agent/tool-settings.ts';
 import { agentSkillRoutes, skillRoutes } from './agent/skills/routes.ts';
 import { reminderRoutes } from './agent/reminders/routes.ts';
 import { serviceRoutes } from './agent/services-routes.ts';
@@ -66,7 +68,6 @@ const agentSchema = z.object({
   system_prompt: z.string().max(8000).default(''),
   asr_model_id: idSchema.nullish(),
   llm_model_id: idSchema.nullish(),
-  image_model_id: idSchema.nullish(),
   // 智能体绑一个音色;合成模型、音量、语速、方言、语气都跟着音色走
   tts_voice_id: voiceIdSchema.nullish(),
   chat_history_conf: z.union([z.literal(0), z.literal(1)]).default(1),
@@ -88,7 +89,6 @@ function agentRefError(conn: Db, d: z.infer<typeof agentSchema>): string | null 
   const checks: [string | null | undefined, string, string][] = [
     [d.asr_model_id, 'ASR', '语音识别模型'],
     [d.llm_model_id, 'LLM', '对话模型'],
-    [d.image_model_id, 'Image', '文生图模型'],
   ];
   for (const [id, type, label] of checks) {
     if (id && !one(conn, 'SELECT 1 FROM models WHERE id = ? AND model_type = ?', id, type)) return `所选的${label}不存在`;
@@ -351,11 +351,13 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const used = one<{ n: number }>(
       conn,
       `SELECT COUNT(*) AS n FROM agents
-       WHERE vad_model_id = ? OR asr_model_id = ? OR llm_model_id = ? OR image_model_id = ?
+       WHERE vad_model_id = ? OR asr_model_id = ? OR llm_model_id = ?
           OR tts_voice_id IN (SELECT id FROM voices WHERE tts_model_id = ?)`,
-      id, id, id, id, id,
+      id, id, id, id,
     );
     if ((used?.n ?? 0) > 0) return c.json({ error: '还有智能体在用这个模型,请先改掉它们的选择' }, 409);
+    // 文生图模型由「画画」工具选(工具页)
+    if (toolConfig(conn, 'image')['model_id'] === id) return c.json({ error: '「画画」工具正在用这个模型,请先在工具页改掉' }, 409);
     run(conn, 'DELETE FROM models WHERE id = ?', id);
     return c.json({ ok: true });
   });
@@ -367,6 +369,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   // ---- 智能体运行时:设备桥状态、网页试聊(见 agent/routes.ts) ----
   if (deps.agent) {
     app.route('/agent-runtime', agentAdminRoutes(deps.agent));
+    app.route('/tools', toolRoutes(deps.agent));
     app.route('/service-providers', serviceRoutes(deps.agent));
     app.route('/mcp-servers', mcpRoutes(deps.agent));
     app.route('/skills', skillRoutes(deps.agent));
@@ -384,10 +387,12 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
 
   app.get('/agents', (c) => {
     const agents = all<{ id: string }>(conn, 'SELECT * FROM agents ORDER BY is_default DESC, created_at');
+    // 智能体只记开了哪些能力:工具代号、MCP 服务器 id、技能名。能力自己的设置在工具、MCP、技能页
     const items = agents.map((agent) => ({
       ...agent,
-      plugins: all(conn, 'SELECT plugin_code, params_json FROM agent_plugins WHERE agent_id = ?', agent.id),
-      mcp_servers: all(conn, 'SELECT server_id, tool_allowlist_json FROM agent_mcp_servers WHERE agent_id = ?', agent.id),
+      image_model_id: undefined,
+      plugins: all<{ plugin_code: string }>(conn, 'SELECT plugin_code FROM agent_plugins WHERE agent_id = ? ORDER BY plugin_code', agent.id).map((row) => row.plugin_code),
+      mcp_servers: all<{ server_id: string }>(conn, 'SELECT server_id FROM agent_mcp_servers WHERE agent_id = ? ORDER BY server_id', agent.id).map((row) => row.server_id),
       skills: all<{ skill_name: string }>(conn, 'SELECT skill_name FROM agent_skills WHERE agent_id = ?', agent.id).map((row) => row.skill_name),
       device_count: one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM devices WHERE agent_id = ?', agent.id)?.n ?? 0,
     }));
@@ -403,10 +408,10 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const d = parsed.data;
     run(
       conn,
-      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, image_model_id, tts_voice_id,
+      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, tts_voice_id,
                            chat_history_conf, max_steps, safety_level, description, greeting, role_template, llm_params_json, is_default)
-       VALUES (?, ?, ?, (SELECT id FROM models WHERE model_type = 'VAD' ORDER BY is_default DESC, id LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      id, d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id), nullable(d.image_model_id),
+       VALUES (?, ?, ?, (SELECT id FROM models WHERE model_type = 'VAD' ORDER BY is_default DESC, id LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      id, d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.tts_voice_id) ?? defaultVoiceId(conn), d.chat_history_conf, d.max_steps, d.safety_level, d.description,
       d.greeting, d.role_template, JSON.stringify(d.llm_params),
     );
@@ -423,11 +428,11 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const d = parsed.data;
     run(
       conn,
-      `UPDATE agents SET name = ?, system_prompt = ?, asr_model_id = ?, llm_model_id = ?, image_model_id = ?,
+      `UPDATE agents SET name = ?, system_prompt = ?, asr_model_id = ?, llm_model_id = ?,
                          tts_voice_id = ?, chat_history_conf = ?, max_steps = ?, safety_level = ?, description = ?,
                          greeting = ?, role_template = ?, llm_params_json = ?, updated_at = datetime('now')
        WHERE id = ?`,
-      d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id), nullable(d.image_model_id),
+      d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id),
       nullable(d.tts_voice_id), d.chat_history_conf, d.max_steps, d.safety_level, d.description,
       d.greeting, d.role_template, JSON.stringify(d.llm_params), id,
     );
@@ -445,27 +450,21 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     return c.json({ ok: true });
   });
 
-  /** 整体覆盖某个智能体启用的插件。 */
+  /** 整体覆盖某个智能体开着的工具:工具代号列表。工具的设置是全局的,在工具页改。 */
   app.put('/agents/:id/plugins', async (c) => {
     const id = c.req.param('id');
     if (!one(conn, 'SELECT 1 FROM agents WHERE id = ?', id)) return c.json({ error: '智能体不存在' }, 404);
-    const parsed = z
-      .array(z.object({ plugin_code: z.string().min(1).max(64), params: z.record(z.string(), z.unknown()).default({}) }))
-      .safeParse(await c.req.json().catch(() => []));
+    const parsed = z.array(z.string().min(1).max(64)).max(100).safeParse(await c.req.json().catch(() => []));
     if (!parsed.success) return c.json({ error: '参数格式不正确' }, 400);
 
     const known = new Set(PLUGINS.map((p) => p.code));
-    const unknown = parsed.data.find((item) => !known.has(item.plugin_code));
-    if (unknown) return c.json({ error: `没有名为 ${unknown.plugin_code} 的插件` }, 400);
+    const unknown = parsed.data.find((code) => !known.has(code));
+    if (unknown) return c.json({ error: `没有名为 ${unknown} 的工具` }, 400);
 
     tx(conn, () => {
       run(conn, 'DELETE FROM agent_plugins WHERE agent_id = ?', id);
-      for (const item of parsed.data) {
-        run(
-          conn,
-          'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, ?, ?)',
-          id, item.plugin_code, JSON.stringify(item.params),
-        );
+      for (const code of new Set(parsed.data)) {
+        run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, ?, '{}')", id, code);
       }
     });
     return c.json({ ok: true });

@@ -12,6 +12,7 @@ import { confirmDialog, toast, toastError } from '../ui';
 
 // 技能:一份写给智能体的「做法说明」,兼容 Agent Skills 的 SKILL.md。
 // 智能体平时只看到技能的名字与描述,需要时才读正文,所以装很多技能也不会拖慢每轮对话。
+// 这里增删改查;哪个智能体用哪些技能只在智能体页决定,技能本身没有启用开关。
 
 const skills = ref<Skill[]>([]);
 const loading = ref(true);
@@ -36,17 +37,17 @@ function toMarkdown(skill: Skill): string {
 }
 
 // ---- 编辑 ----
-const editing = ref<{ name: string; markdown: string; enabled: boolean } | null>(null);
+const editing = ref<{ name: string; markdown: string } | null>(null);
 const saving = ref(false);
 function openEdit(skill: Skill) {
-  editing.value = { name: skill.name, markdown: toMarkdown(skill), enabled: skill.enabled === 1 };
+  editing.value = { name: skill.name, markdown: toMarkdown(skill) };
 }
 async function saveEdit() {
   const e = editing.value;
   if (!e || saving.value) return;
   saving.value = true;
   try {
-    await api.put(`/skills/${e.name}`, { markdown: e.markdown, enabled: e.enabled });
+    await api.put(`/skills/${e.name}`, { markdown: e.markdown });
     toast('已保存,下一轮对话生效');
     editing.value = null;
     await load();
@@ -111,19 +112,13 @@ async function importFile(event: Event) {
   }
 }
 
-async function toggle(skill: Skill, enabled: boolean) {
-  try {
-    await api.put(`/skills/${skill.name}`, { markdown: toMarkdown(skill), enabled });
-    await load();
-  } catch (e) {
-    toastError(e);
-  }
-}
-
 async function remove(skill: Skill) {
   const ok = await confirmDialog({
     title: `删除技能「${skill.name}」?`,
-    message: skill.source === 'builtin' ? '这是内置技能,删除后控制塔下次启动会重新创建默认版本。' : '删除后无法恢复。',
+    message: [
+      skill.agents.length ? `${skill.agents.map((a) => a.name).join('、')}在用它,删除后它们不再有这个技能。` : '',
+      skill.source === 'builtin' ? '这是内置技能,删除后控制塔下次启动会重新创建默认版本。' : '删除后无法恢复。',
+    ].filter(Boolean).join(''),
     confirmText: '删除',
     danger: true,
   });
@@ -138,7 +133,7 @@ async function remove(skill: Skill) {
 </script>
 
 <template>
-  <PageHeader title="技能" description="写给智能体的「做法说明」,兼容 Agent Skills 的 SKILL.md。在「智能体」页按角色勾选。">
+  <PageHeader title="技能" description="写给智能体的「做法说明」,兼容 Agent Skills 的 SKILL.md。这里新建、导入、编辑、删除;哪个智能体用哪些技能,在「智能体」页。">
     <template #actions>
       <button class="btn btn-primary" type="button" @click="importing = { markdown: TEMPLATE, replace: false }">
         <AppIcon name="plus" :size="16" /><span>导入或新建</span>
@@ -166,14 +161,15 @@ async function remove(skill: Skill) {
         <div class="model-name">
           <span class="mono">{{ skill.name }}</span>
           <span v-if="skill.source === 'builtin'" class="tag sky">内置</span>
-          <span v-if="skill.agent_count" class="tag ok">{{ skill.agent_count }} 个智能体在用</span>
           <span v-if="skill.files.length" class="tag">{{ skill.files.length }} 个附带文件</span>
         </div>
         <div class="cell-sub">{{ skill.description }}</div>
         <div v-if="skill.allowed_tools" class="cell-sub">需要的工具:<span class="chip-mono">{{ skill.allowed_tools }}</span></div>
+        <div class="cell-sub">
+          在用它的智能体:<template v-if="skill.agents.length">{{ skill.agents.map((a) => a.name).join('、') }}</template><template v-else>还没有</template>
+        </div>
       </div>
       <div class="row" style="gap: 2px">
-        <SwitchToggle :model-value="skill.enabled === 1" @update:model-value="toggle(skill, $event)"><span class="visually-hidden">启用</span></SwitchToggle>
         <button class="btn btn-ghost btn-sm" type="button" @click="expanded = expanded === skill.name ? null : skill.name">
           <AppIcon name="eye" :size="14" /><span>{{ expanded === skill.name ? '收起' : '查看' }}</span>
         </button>
@@ -182,14 +178,13 @@ async function remove(skill: Skill) {
       </div>
       <pre v-if="expanded === skill.name" class="code-block" style="width: 100%; white-space: pre-wrap; margin: 10px 0 0">{{ skill.body }}</pre>
     </div>
-    <p class="cell-sub" style="margin-top: 10px">在 <RouterLink to="/agents">智能体</RouterLink> 页给角色勾选要用的技能。</p>
+    <p class="cell-sub" style="margin-top: 10px">在 <RouterLink to="/agents">智能体</RouterLink> 页决定哪个角色用哪些技能。</p>
   </section>
 
   <ModalDialog :open="!!editing" wide :title="`编辑技能「${editing?.name}」`" @close="editing = null">
     <form v-if="editing" id="skill-edit" class="stack" @submit.prevent="saveEdit">
       <textarea v-model="editing.markdown" class="textarea mono" rows="22" spellcheck="false"></textarea>
-      <span class="field-hint">完整的 SKILL.md。name 不能改;要改名请导入一个新技能。</span>
-      <SwitchToggle v-model="editing.enabled" label="启用" />
+      <span class="field-hint">完整的 SKILL.md。name 不能改;要改名请导入一个新技能。allowed-tools 写它需要的工具,智能体开这个技能时会提示一起开启。</span>
     </form>
     <template #footer>
       <button class="btn" type="button" @click="editing = null">取消</button>

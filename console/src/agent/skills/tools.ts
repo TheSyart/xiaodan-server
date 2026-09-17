@@ -21,7 +21,7 @@ interface SkillRow {
 export function agentSkills(conn: Db, agentId: string): SkillRow[] {
   return all<SkillRow>(conn,
     `SELECT s.name, s.description, s.body, s.files_json FROM agent_skills a JOIN skills s ON s.name = a.skill_name
-     WHERE a.agent_id = ? AND s.enabled = 1 ORDER BY s.name`, agentId);
+     WHERE a.agent_id = ? ORDER BY s.name`, agentId);
 }
 
 function files(row: SkillRow): Record<string, string> {
@@ -59,7 +59,7 @@ EXTRA_TOOL_SOURCES.push((ctx) => {
     },
     hint: '正在想办法',
     async run(toolCtx, args) {
-      const row = one<SkillRow>(toolCtx.deps.conn, 'SELECT name, description, body, files_json FROM skills WHERE name = ? AND enabled = 1', String(args['name'] ?? ''));
+      const row = one<SkillRow>(toolCtx.deps.conn, 'SELECT name, description, body, files_json FROM skills WHERE name = ?', String(args['name'] ?? ''));
       if (!row || !names.includes(row.name)) return { ok: false, content: `没有名为 ${String(args['name'])} 的技能。` };
       conversations.get(toolCtx.conversationKey, toolCtx.agent.id).loadedSkills.add(row.name);
       const attached = Object.keys(files(row));

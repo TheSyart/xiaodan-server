@@ -67,9 +67,6 @@ class FakeBridge extends Bridge {
   constructor() {
     super(() => 'http://engine:8003', () => 's', async () => new Response('{}'));
   }
-  override async tools() {
-    return null;
-  }
   override async device() {
     return this.online ? { online: true, session_id: 'sess', features: this.features } : { online: false };
   }
@@ -245,7 +242,7 @@ describe('MCP', () => {
     assert.ok(long.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(long), long);
   });
 
-  test('智能体启用后工具进入本轮工具表,按白名单过滤;接口管理与打码', async () => {
+  test('智能体开了服务器后工具进入本轮工具表,按服务器的对外工具过滤;接口管理与打码', async () => {
     resetMcpSession(server);
     const mcp = fakeMcp();
     const { fetchImpl } = router([[/aihot\.example/u, mcp.handler], [/chat\/completions$/u, () => llmSse({ text: '🙂好' })]]);
@@ -259,7 +256,16 @@ describe('MCP', () => {
     assert.equal(tested.tools.length, 2);
     const list = await (await api('GET', '/mcp-servers')).json() as { items: { url_masked: string; tools: unknown[] }[] };
     assert.equal(list.items[0]!.url_masked, 'https://aihot.example/api/mcp?…', '地址里的参数(常含令牌)不在列表里露出');
-    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/mcp`, [{ server_id: created.id, tool_allowlist: ['aihot_search'] }])).status, 200);
+    // 对外提供哪些工具在 MCP 页按服务器设置;智能体页只开关服务器
+    assert.equal((await api('PUT', `/mcp-servers/${created.id}/tools`, { allowlist: ['aihot_search', 'aihot_search'] })).status, 200);
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/mcp`, [{ server_id: created.id }])).status, 400, '智能体页不再收逐个工具的设置');
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/mcp`, [created.id])).status, 200);
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/mcp`, ['nope'])).status, 400);
+    const view = await (await api('GET', `/mcp-servers/${created.id}`)).json() as { tool_allowlist: string[] | null; agents: { id: string }[]; enabled?: unknown };
+    assert.deepEqual(view.tool_allowlist, ['aihot_search']);
+    assert.deepEqual(view.agents.map((a) => a.id), [DEFAULT_AGENT_ID], '显示哪些智能体在用');
+    assert.equal(view.enabled, undefined, '没有全局启用开关');
+    assert.deepEqual(await (await api('GET', `/agents/${DEFAULT_AGENT_ID}/mcp`)).json(), { items: [created.id] });
 
     const deps = baseDeps(fetchImpl);
     const ctx: ToolContext = { deps, agent: loadAgent(deps, DEFAULT_AGENT_ID)!, device: device(), sink: { text() {}, device() {}, media() {}, closeAfterTurn() {} }, signal: new AbortController().signal, conversationKey: 'k' };
@@ -269,6 +275,10 @@ describe('MCP', () => {
     const result = await exposed[0]!.run(ctx, { q: 'AI' });
     assert.match(result.content, /外部服务「AIHOT」/u);
     assert.match(result.content, /aihot_search/u);
+
+    // 放开全部:null
+    assert.equal((await api('PUT', `/mcp-servers/${created.id}/tools`, { allowlist: null })).status, 200);
+    assert.equal((await collectTools(ctx)).filter((t) => t.name.startsWith('mcp_')).length, 2);
   });
 
   test('内置 AIHOT:第一次启动写入并给所有智能体启用,之后删了、手动加过都不再动', () => {

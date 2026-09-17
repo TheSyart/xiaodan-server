@@ -86,7 +86,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
       const all = itemsOfKind(ctx.deps.conn, 'story');
       const keyword = typeof args['keyword'] === 'string' ? args['keyword'] : '';
       const rows = keyword ? search(all, keyword) : all;
-      if (rows.length === 0) return { ok: true, content: keyword ? `故事库里没有和「${keyword}」相关的故事,可以自己现编一个。` : '故事库是空的,可以自己现编一个。' };
+      if (rows.length === 0) return { ok: true, content: keyword ? `故事库里没有和「${keyword}」相关的故事。` : '故事库是空的。' };
       return {
         ok: true,
         content: `故事库(${rows.length} 个):\n${rows.slice(0, 20).map((r) => `- ${r.id}《${r.title}》${r.summary ? `:${r.summary}` : ''}(${[minutes(r.duration_s), list(r.tags_json).join('、')].filter(Boolean).join(',')})`).join('\n')}`,
@@ -97,7 +97,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
     name: 'play_story',
     act: 'story',
     label: '讲故事',
-    description: '播放故事库里的一个故事。调用前先用一句话告诉用户要讲哪个故事;开始播放后这一轮不要再说话。',
+    description: '播放故事库里的一个故事。开始播放后这一轮就结束了,故事播完设备会自己停下。',
     parameters: {
       type: 'object',
       properties: { story: { type: 'string', description: '故事的 id 或名字,例如 moon-postman 或 月亮上的小邮差' } },
@@ -108,7 +108,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
     async run(ctx, args) {
       const query = String(args['story'] ?? '');
       const row = search(itemsOfKind(ctx.deps.conn, 'story'), query)[0];
-      if (!row) return { ok: false, content: `故事库里没有「${query}」。可以先调用 list_stories 看看,或者自己现编一个。` };
+      if (!row) return { ok: false, content: `故事库里没有「${query}」。可以先调用 list_stories 看看有哪些。` };
       if (row.audio_status === 'ready' && row.file) return play(ctx, row);
       return {
         ok: true,

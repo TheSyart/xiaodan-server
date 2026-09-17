@@ -1,13 +1,14 @@
-// 一个智能体在这一轮能用的全部工具与技能。
-//
-// 工具白名单沿用 agent_plugins 表(智能体页的勾选框):
-//   - 引擎工具(日历、天气、音量)经设备桥调用,见 engine-tools.ts;
-//   - 控制塔工具(搜索、提醒、故事、音乐、单词、画画、切换角色……)在 CONSOLE_TOOLS 里按插件代号注册;
-//   - MCP 服务器与技能按智能体各自的关联表加进来。
+// 一个智能体在这一轮能用的全部能力。三类:
+//   - 工具:服务端代码实现。智能体开了哪些在 agent_plugins,设置全局一份在 tool_settings(工具页)。
+//       引擎工具(日历、天气、音量)经设备桥调用,见 engine-tools.ts;
+//       控制塔工具(搜索、提醒、故事、音乐、单词、画画、切换角色……)在 CONSOLE_TOOLS 里按工具代号注册;
+//   - MCP:智能体开了哪些服务器在 agent_mcp_servers,服务器对外提供哪些工具在 MCP 页设置;
+//   - 技能:智能体开了哪些在 agent_skills。
 
 import { all } from '../db.ts';
 import type { Conversation } from './context.ts';
 import { ENGINE_TOOL_META, engineTools } from './engine-tools.ts';
+import { toolConfig } from './tool-settings.ts';
 import type { AgentTool, ToolContext } from './types.ts';
 
 export type ConsoleToolBuilder = (ctx: ToolContext, params: Record<string, unknown>) => AgentTool[] | Promise<AgentTool[]>;
@@ -32,23 +33,12 @@ export const PROMPT_EXTRAS: {
   memory: () => undefined,
 };
 
-function parseParams(json: string): Record<string, unknown> {
-  try {
-    const value = JSON.parse(json) as unknown;
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
 export async function collectTools(ctx: ToolContext): Promise<AgentTool[]> {
-  const rows = all<{ plugin_code: string; params_json: string }>(
-    ctx.deps.conn, 'SELECT plugin_code, params_json FROM agent_plugins WHERE agent_id = ?', ctx.agent.id,
-  );
+  const rows = all<{ plugin_code: string }>(ctx.deps.conn, 'SELECT plugin_code FROM agent_plugins WHERE agent_id = ?', ctx.agent.id);
   const enabledEngine = new Map<string, Record<string, unknown>>();
   const tools: AgentTool[] = [];
   for (const row of rows) {
-    const params = parseParams(row.params_json);
+    const params = toolConfig(ctx.deps.conn, row.plugin_code);
     if (ENGINE_TOOL_META[row.plugin_code]) {
       enabledEngine.set(row.plugin_code, params);
       continue;

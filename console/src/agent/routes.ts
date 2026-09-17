@@ -27,7 +27,6 @@ export function loadAgent(deps: AgentDeps, id: string): AgentRow | undefined {
     name: String(row['name'] ?? ''),
     system_prompt: String(row['system_prompt'] ?? ''),
     llm_model_id: (row['llm_model_id'] as string | null) ?? null,
-    image_model_id: (row['image_model_id'] as string | null) ?? null,
     tts_voice_id: (row['tts_voice_id'] as string | null) ?? null,
     chat_history_conf: Number(row['chat_history_conf'] ?? 1),
     description: String(row['description'] ?? ''),

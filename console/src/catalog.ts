@@ -29,6 +29,11 @@ export interface ProviderField {
   hint?: string;
   /** type 为 select 时的可选项 */
   options?: { value: string; label: string }[];
+  /** type 为 select 时,可选项由接口按库里的数据现填:文生图模型、单词书 */
+  optionsFrom?: 'image_models' | 'vocab_books';
+  /** type 为 number 时的范围 */
+  min?: number;
+  max?: number;
 }
 
 export interface ProviderDef {
@@ -174,21 +179,26 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
   ],
 };
 
+/**
+ * 工具:服务端代码实现的能力(另两类是技能与 MCP)。工具页查看说明、改设置;设置全局一份,存在 tool_settings;
+ * 智能体页只决定开不开(agent_plugins)。
+ */
 export interface PluginDef {
-  /** 与服务端 plugins_func/functions/<code>.py 的文件名一致 */
+  /** 工具代号。引擎工具与服务端 plugins_func/functions/<code>.py 的文件名一致 */
   code: string;
   label: string;
   description: string;
+  /** 工具页里可以改的设置,所有智能体共用 */
   fields: ProviderField[];
   /** 不需要任何密钥即可工作 */
   keyless: boolean;
-  /** 智能体页分组显示用 */
+  /** 分组显示用 */
   group: string;
 }
 
 export const PLUGINS: PluginDef[] = [
-  // 前三个是本仓库自写的引擎插件(server/plugins/,构建时覆盖进引擎镜像),控制塔经设备桥调用,会在设备屏幕上显示画面;
-  // 其余在控制塔里实现(console/src/agent/)。
+  // 前三个在引擎里执行(server/plugins/,构建时覆盖进引擎镜像),控制塔经设备桥调用,会在设备屏幕上显示画面;
+  // 其余在控制塔里实现(console/src/agent/)。模型看到的函数说明都以控制塔为准(engine-tools.ts 与各工具模块)。
   {
     code: 'show_calendar',
     group: '生活',
@@ -196,7 +206,7 @@ export const PLUGINS: PluginDef[] = [
     description: '回答"今天几号""星期几""农历几号",并在设备屏幕上显示当月日历。用服务器时间,不联网。',
     keyless: true,
     fields: [
-      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, hint: '回答说完后日历停留多久,5 到 60' },
+      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, min: 5, max: 60, hint: '回答说完后日历停留多久,5 到 60' },
     ],
   },
   {
@@ -207,7 +217,7 @@ export const PLUGINS: PluginDef[] = [
     keyless: true,
     fields: [
       { key: 'default_location', label: '默认城市', type: 'string', default: '广州', hint: '按设备 IP 查不到所在城市时查这里' },
-      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, hint: '回答说完后天气画面停留多久,5 到 60' },
+      { key: 'hold_s', label: '屏幕停留秒数', type: 'number', default: 20, min: 5, max: 60, hint: '回答说完后天气画面停留多久,5 到 60' },
     ],
   },
   {
@@ -221,7 +231,7 @@ export const PLUGINS: PluginDef[] = [
   {
     code: 'search',
     label: '联网搜索',
-    description: '查新闻、赛事、股价、刚发生的事等实时信息。搜索服务在「工具与服务」页配置,默认可用 DeepSeek 官方联网搜索。',
+    description: '查新闻、赛事、股价、刚发生的事等实时信息。用哪家搜索服务在工具页配置,可以配多家,默认那家生效。',
     keyless: false,
     group: '信息',
     fields: [],
@@ -237,7 +247,7 @@ export const PLUGINS: PluginDef[] = [
   {
     code: 'stories',
     label: '讲故事',
-    description: '播放故事库里的有声故事(原创故事,音频由千问合成);故事库里没有的就现编一个讲。内容在「内容库」页管理。',
+    description: '播放故事库里的有声故事(原创故事,音频由千问合成)。故事在「内容库」页管理。',
     keyless: true,
     group: '陪伴',
     fields: [],
@@ -253,18 +263,18 @@ export const PLUGINS: PluginDef[] = [
   {
     code: 'vocab',
     label: '学单词',
-    description: '陪小朋友学英语单词:取词、屏幕单词卡、小测验、按记忆曲线安排复习。配合技能 word-coach 使用效果最好。',
+    description: '陪小朋友学英语单词:在设备上显示单词卡组(新固件,按键翻看、听读音)、记录答题、按记忆曲线安排复习。单词书在「内容库」页管理。',
     keyless: true,
     group: '学习',
-    fields: [{ key: 'book', label: '单词书 id', type: 'string', hint: '留空用默认单词书(starter)' }],
+    fields: [{ key: 'book', label: '单词书', type: 'select', optionsFrom: 'vocab_books', hint: '留空用内容库里排第一的那本' }],
   },
   {
     code: 'image',
     label: '画画',
-    description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。文生图模型在「模型」页配置,也可以在智能体里单独选。',
+    description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。文生图模型在「模型」页添加。',
     keyless: false,
     group: '创作',
-    fields: [],
+    fields: [{ key: 'model_id', label: '文生图模型', type: 'select', optionsFrom: 'image_models', hint: '留空用「模型」页里标为默认的那个' }],
   },
   {
     code: 'memory',

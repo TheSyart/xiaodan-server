@@ -81,6 +81,10 @@ export interface ProviderField {
   required?: boolean;
   hint?: string;
   options?: { value: string; label: string }[];
+  /** 下拉选项由接口按库里的数据现填(工具页) */
+  optionsFrom?: 'image_models' | 'vocab_books';
+  min?: number;
+  max?: number;
 }
 
 export interface ProviderDef {
@@ -180,7 +184,6 @@ export interface Agent {
   system_prompt: string;
   asr_model_id: string | null;
   llm_model_id: string | null;
-  image_model_id: string | null;
   /** 智能体绑一个音色:合成模型、音量语速、方言语气都跟着它 */
   tts_voice_id: string | null;
   chat_history_conf: number;
@@ -191,11 +194,28 @@ export interface Agent {
   role_template: string;
   /** {"thinking":false,"temperature":0.8} */
   llm_params_json: string;
-  mcp_servers: { server_id: string; tool_allowlist_json: string | null }[];
+  /** 开着的能力:MCP 服务器 id、技能名、工具代号。能力自己的设置在各自的页面 */
+  mcp_servers: string[];
   skills: string[];
   is_default: number;
-  plugins: { plugin_code: string; params_json: string }[];
+  plugins: string[];
   device_count: number;
+}
+
+/** 工具页的一项:服务端代码实现的能力,只能查看和改设置 */
+export interface ToolView {
+  code: string;
+  label: string;
+  description: string;
+  group: string;
+  keyless: boolean;
+  runs_in: 'engine' | 'console';
+  fields: ProviderField[];
+  config: Record<string, unknown>;
+  functions: { name: string; description: string }[];
+  status: { ready: boolean; message: string };
+  agents: { id: string; name: string }[];
+  skills: string[];
 }
 
 export interface Device {
@@ -391,12 +411,13 @@ export interface McpServerView {
   url_masked: string;
   url?: string;
   headers: Record<string, string>;
-  enabled: number;
   timeout_ms: number;
   tools: { name: string; description: string }[];
+  /** 对外提供哪些工具;null 表示全部 */
+  tool_allowlist: string[] | null;
   tools_updated_at: string | null;
   last_error: string;
-  agents: { agent_id: string; tool_allowlist_json: string | null }[];
+  agents: { id: string; name: string }[];
 }
 
 export interface Skill {
@@ -406,9 +427,8 @@ export interface Skill {
   files: string[];
   allowed_tools: string;
   source: 'builtin' | 'custom';
-  enabled: number;
   updated_at: string;
-  agent_count: number;
+  agents: { id: string; name: string }[];
 }
 
 export interface Reminder {

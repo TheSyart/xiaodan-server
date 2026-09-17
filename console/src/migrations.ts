@@ -8,6 +8,7 @@
 
 import type { Db } from './db.ts';
 import { migrateQwenOnly } from './migrations/v8-qwen-only.ts';
+import { migrateCapabilityPages } from './migrations/v10-capability-pages.ts';
 
 export interface Migration {
   version: number;
@@ -342,5 +343,11 @@ export const MIGRATIONS: readonly Migration[] = [
         ALTER TABLE media_items ADD COLUMN timing_json TEXT NOT NULL DEFAULT '';
       `);
     },
+  },
+  {
+    version: 10,
+    name: 'capability-pages',
+    // 工具设置收拢成全局一份、MCP 对外工具挪到服务器级、去掉技能与 MCP 的全局启用开关。见迁移文件开头
+    up: migrateCapabilityPages,
   },
 ];

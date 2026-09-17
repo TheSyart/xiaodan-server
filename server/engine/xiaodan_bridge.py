@@ -326,16 +326,6 @@ def add_bridge_routes(app, config):
     async def health(_request):
         return web.json_response({"ok": True, "connections": len(REGISTRY)})
 
-    async def tools(_request):
-        from plugins_func.register import all_function_registry
-
-        items = []
-        for name in ENGINE_TOOLS:
-            item = all_function_registry.get(name)
-            if item is not None:
-                items.append(item.description)
-        return web.json_response({"tools": items})
-
     async def call_tool(request):
         from core.providers.tools.server_plugins.plugin_executor import ServerPluginExecutor
         from plugins_func.register import Action
@@ -425,7 +415,6 @@ def add_bridge_routes(app, config):
 
     app.add_routes([
         web.get("/xiaodan/bridge/health", guard(health)),
-        web.get("/xiaodan/bridge/tools", guard(tools)),
         web.post("/xiaodan/bridge/tool", guard(call_tool)),
         web.get("/xiaodan/bridge/devices/{mac}", guard(device_info)),
         web.post("/xiaodan/bridge/devices/{mac}/announce", guard(announce)),

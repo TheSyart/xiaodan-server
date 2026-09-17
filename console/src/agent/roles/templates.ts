@@ -129,7 +129,6 @@ interface DefaultModels {
   vad_model_id: string | null;
   asr_model_id: string | null;
   llm_model_id: string | null;
-  image_model_id: string | null;
 }
 
 /**
@@ -184,11 +183,11 @@ export function applyTemplate(conn: Db, template: RoleTemplate, overrides: { nam
     if (!voiceId) missing.push(`音色 ${template.voice}(需要千问语音合成模型)`);
     run(
       conn,
-      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, image_model_id, tts_voice_id,
+      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, tts_voice_id,
                            chat_history_conf, max_steps, safety_level, description, greeting, role_template, llm_params_json, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, '{}', 0)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, '{}', 0)`,
       id, overrides.name?.trim() || template.name, template.system_prompt,
-      base?.vad_model_id ?? null, base?.asr_model_id ?? null, llmModelId, base?.image_model_id ?? null, voiceId,
+      base?.vad_model_id ?? null, base?.asr_model_id ?? null, llmModelId, voiceId,
       template.max_steps, template.safety_level, template.description, template.greeting, template.id,
     );
 

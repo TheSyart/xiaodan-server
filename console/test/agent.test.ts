@@ -74,9 +74,6 @@ class FakeBridge extends Bridge {
   constructor() {
     super(() => 'http://engine:8003', () => 'secret', async () => new Response('{}'));
   }
-  override async tools() {
-    return null;
-  }
   override async callTool(body: { session_id: string; turn_id: string | null; name: string; arguments: Record<string, unknown>; plugin_config: Record<string, unknown> }) {
     this.toolCalls.push(body);
     return this.results[body.name] ?? { action: 'REQLLM', result: `${body.name} 的结果`, response: null };

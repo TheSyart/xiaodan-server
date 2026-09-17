@@ -101,13 +101,12 @@ COPY server/assets/chime.wav xiaodan-assets/chime.wav
 COPY server/prompts/xiaodan-base-prompt.txt ./xiaodan-base-prompt.txt
 
 # 自写的服务端插件(server/plugins/):查日期并显示日历、查天气并显示天气卡片、调音量三个工具;
-# 另外覆盖上游两个同名插件:get_weather(上游抓网页、靠写死的共享密钥)与 handle_exit_intent(上游道别后断开连接)。
+# 其中 get_weather 覆盖上游同名插件(上游抓网页、靠写死的共享密钥)。模型看到的说明以控制塔为准,引擎里只按名字被设备桥调用。
 # 引擎启动时自动导入 plugins_func/functions/ 下的全部模块,xiaodan_cards.py 是它们共用的纯逻辑。
 COPY server/plugins/xiaodan_cards.py plugins_func/functions/xiaodan_cards.py
 COPY server/plugins/show_calendar.py plugins_func/functions/show_calendar.py
 COPY server/plugins/get_weather.py plugins_func/functions/get_weather.py
 COPY server/plugins/set_volume.py plugins_func/functions/set_volume.py
-COPY server/plugins/handle_exit_intent.py plugins_func/functions/handle_exit_intent.py
 # DeepSeek 以 DSML 文本给出工具调用时的转换模块,由下面第 3 处修补引用(原理见文件开头)。
 COPY server/engine/xiaodan_tool_text.py core/utils/xiaodan_tool_text.py
 

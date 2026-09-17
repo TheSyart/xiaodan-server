@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { api, type Model, type ServiceDef, type ServiceProvider } from '../api';
-import AppIcon from '../components/AppIcon.vue';
-import EmptyState from '../components/EmptyState.vue';
-import ModalDialog from '../components/ModalDialog.vue';
-import PageHeader from '../components/PageHeader.vue';
-import SkeletonRows from '../components/SkeletonRows.vue';
-import SwitchToggle from '../components/SwitchToggle.vue';
+import AppIcon from './AppIcon.vue';
+import EmptyState from './EmptyState.vue';
+import ModalDialog from './ModalDialog.vue';
+import SkeletonRows from './SkeletonRows.vue';
+import SwitchToggle from './SwitchToggle.vue';
 import { confirmDialog, toast, toastError } from '../ui';
 
-// 智能体工具背后的外部服务:联网搜索。可以配多家,默认那家生效,随时切换。文生图是「模型」页里的一种模型。
+// 「联网搜索」工具用的搜索服务:可以配多家,默认那家生效,随时切换。嵌在工具页的联网搜索里。
+
+const emit = defineEmits<{ changed: [] }>();
 
 type Kind = 'search';
 
@@ -38,9 +39,6 @@ async function load() {
 }
 onMounted(load);
 
-const KINDS: { kind: Kind; title: string; hint: string; icon: 'globe' }[] = [
-  { kind: 'search', title: '联网搜索', hint: '「联网搜索」工具用这里的默认服务。DeepSeek 官方联网搜索可以直接沿用 DeepSeek 对话模型的密钥。', icon: 'globe' },
-];
 const ofKind = (kind: Kind) => items.value.filter((item) => item.kind === kind);
 const defOf = (kind: Kind, provider: string) => catalog.value[kind].find((d) => d.provider === provider);
 
@@ -106,6 +104,7 @@ async function save() {
     toast('已保存');
     draft.value = null;
     await load();
+    emit('changed');
   } catch (e) {
     toastError(e);
   } finally {
@@ -135,6 +134,7 @@ async function setDefault(item: ServiceProvider) {
     await api.post(`/service-providers/${item.id}/default`);
     toast(`已切换到「${item.name}」`);
     await load();
+    emit('changed');
   } catch (e) {
     toastError(e);
   }
@@ -145,6 +145,7 @@ async function remove(item: ServiceProvider) {
   try {
     await api.del(`/service-providers/${item.id}`);
     await load();
+    emit('changed');
   } catch (e) {
     toastError(e);
   }
@@ -152,28 +153,20 @@ async function remove(item: ServiceProvider) {
 </script>
 
 <template>
-  <PageHeader title="工具与服务" description="智能体工具背后用到的外部服务。可以配多家,点「设为默认」随时切换。文生图模型在「模型」页。" />
-
-  <div v-if="loadError" class="callout danger" role="alert">
-    <AppIcon name="alert" :size="18" /><div class="callout-body"><strong>加载失败。</strong>{{ loadError }}</div>
-  </div>
-  <div v-if="loading" class="card"><SkeletonRows :rows="3" /></div>
-
-  <template v-else>
-    <section v-for="group in KINDS" :key="group.kind" class="card">
-      <div class="card-head">
-        <div><h2><AppIcon :name="group.icon" :size="18" />{{ group.title }}</h2><p>{{ group.hint }}</p></div>
-        <div class="card-actions">
-          <button class="btn btn-sm" type="button" :disabled="catalog[group.kind].length === 0" @click="openCreate(group.kind)">
-            <AppIcon name="plus" :size="14" /><span>添加</span>
-          </button>
-        </div>
-      </div>
-      <EmptyState
-        v-if="ofKind(group.kind).length === 0" :title="`还没有配置${group.title}服务`"
-        :description="catalog[group.kind].length ? '点右上角添加。' : '这一类的服务商会在后续版本加入。'"
-      />
-      <div v-for="item in ofKind(group.kind)" :key="item.id" class="model-row">
+  <div class="provider-block">
+    <div class="row" style="gap: 8px; align-items: center">
+      <span class="field-label" style="flex: 1">搜索服务 · 可以配多家,默认那家生效。DeepSeek 官方联网搜索可以直接沿用 DeepSeek 对话模型的密钥。</span>
+      <button class="btn btn-sm" type="button" :disabled="loading || catalog.search.length === 0" @click="openCreate('search')">
+        <AppIcon name="plus" :size="14" /><span>添加</span>
+      </button>
+    </div>
+    <div v-if="loadError" class="callout danger" role="alert" style="margin: 8px 0 0">
+      <AppIcon name="alert" :size="18" /><div class="callout-body"><strong>加载失败。</strong>{{ loadError }}</div>
+    </div>
+    <SkeletonRows v-if="loading" :rows="2" />
+    <template v-else>
+      <EmptyState v-if="ofKind('search').length === 0" title="还没有配置搜索服务" description="点右上角添加。" />
+      <div v-for="item in ofKind('search')" :key="item.id" class="model-row">
         <div class="model-info">
           <div class="model-name">
             {{ item.name }}
@@ -182,15 +175,15 @@ async function remove(item: ServiceProvider) {
           </div>
           <div class="cell-sub">{{ defOf(item.kind, item.provider)?.label ?? item.provider }}<template v-if="testResult[item.id]"> · {{ testResult[item.id] }}</template></div>
         </div>
-        <div class="row" style="gap: 2px">
+        <div class="row" style="gap: 2px; flex-wrap: wrap">
           <button class="btn btn-ghost btn-sm" type="button" :aria-busy="testing === item.id" @click="test(item)"><AppIcon name="zap" :size="14" /><span>测试</span></button>
           <button v-if="!item.is_default" class="btn btn-ghost btn-sm" type="button" @click="setDefault(item)"><AppIcon name="star" :size="14" /><span>设为默认</span></button>
           <button class="btn btn-ghost btn-sm" type="button" @click="openEdit(item)"><AppIcon name="pencil" :size="14" /><span>编辑</span></button>
           <button class="btn btn-ghost btn-sm danger" type="button" @click="remove(item)"><AppIcon name="trash" :size="14" /><span>删除</span></button>
         </div>
       </div>
-    </section>
-  </template>
+    </template>
+  </div>
 
   <ModalDialog :open="!!draft" wide :title="draft?.id ? `编辑「${draft.name}」` : '添加服务'" @close="draft = null">
     <form v-if="draft" id="service-form" class="stack" @submit.prevent="save">

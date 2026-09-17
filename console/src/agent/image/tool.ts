@@ -8,7 +8,9 @@ import { generateImage } from './run.ts';
 
 export const IMAGE_PLUGIN = 'image';
 
-CONSOLE_TOOLS.set(IMAGE_PLUGIN, () => {
+CONSOLE_TOOLS.set(IMAGE_PLUGIN, (_ctx, params) => {
+  // 工具页选的文生图模型;没选用「模型」页里默认的那个
+  const modelId = typeof params['model_id'] === 'string' ? params['model_id'] : null;
   const tool: AgentTool = {
     name: 'generate_image',
     act: 'paint',
@@ -30,7 +32,7 @@ CONSOLE_TOOLS.set(IMAGE_PLUGIN, () => {
       if (!prompt) return { ok: false, content: '没有说要画什么,问一下用户。' };
       try {
         const record = await generateImage(ctx.deps, {
-          prompt, mac: ctx.device.mac, agentId: ctx.agent.id, modelId: ctx.agent.image_model_id,
+          prompt, mac: ctx.device.mac, agentId: ctx.agent.id, modelId,
           childSafe: ctx.agent.safety_level === 'child', signal: ctx.signal,
         });
         const canShow = xiaodanVersion(ctx.device) >= 2;

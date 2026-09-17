@@ -17,7 +17,7 @@ from plugins_func.register import Action, all_function_registry
 
 auto_import_modules("plugins_func.functions")
 
-for name in ("show_calendar", "get_weather", "set_volume", "handle_exit_intent", "get_lunar"):
+for name in ("show_calendar", "get_weather", "set_volume"):
     assert name in all_function_registry, f"注册表里没有 {name}"
 
 
@@ -57,9 +57,6 @@ assert cards_of(conn)[-1] == {"type": "xiaodan", "cmd": "volume", "value": 55, "
 stock = Conn({"mcp": True})
 result = asyncio.run(all_function_registry["set_volume"].func(stock, change="up"))
 assert stock.websocket.sent == [] and "按键" in result.response, "原版固件不应收到卡片消息"
-
-result = all_function_registry["handle_exit_intent"].func(conn, say_goodbye="拜拜")
-assert result.action == Action.RESPONSE and result.response == "拜拜" and conn.close_after_chat is False
 
 weather = importlib.import_module("plugins_func.functions.get_weather")
 behind_proxy = Conn({"xiaodan": True})

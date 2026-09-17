@@ -86,11 +86,17 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     ],
   },
   {
+    // 能力分三类:工具(服务端代码)、技能(做法说明)、MCP(外部工具服务器)。各自页面增删改查,智能体页只决定开不开
     title: '能力',
     items: [
-      { path: '/services', label: '工具与服务', icon: 'zap' },
-      { path: '/mcp', label: 'MCP', icon: 'link' },
+      { path: '/tools', label: '工具', icon: 'zap' },
       { path: '/skills', label: '技能', icon: 'sparkles' },
+      { path: '/mcp', label: 'MCP', icon: 'link' },
+    ],
+  },
+  {
+    title: '内容',
+    items: [
       { path: '/content', label: '内容库', icon: 'music' },
       { path: '/gallery', label: '画廊', icon: 'star' },
       { path: '/reminders', label: '提醒', icon: 'clock' },

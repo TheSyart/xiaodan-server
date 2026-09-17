@@ -131,8 +131,8 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
     name: 'vocab_deck',
     act: 'learn',
     label: '单词卡',
-    description: '把这一轮要学的单词做成卡片显示在设备上,小朋友自己用按键翻看、听读音。' +
-      '调用前必须先问小朋友这次想学几个单词(1 到 10 个),听到回答后再调用;小朋友说随便或没想好就用 5。',
+    description: '把这一轮要学的单词做成卡片显示在设备上,小朋友自己用按键翻看、听读音。',
+    // 「先问学几个、不逐个讲解、结束后问要不要测验」这类做法写在技能 word-coach 里,这里只说工具本身
     parameters: {
       type: 'object',
       properties: {
@@ -156,8 +156,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
       return {
         ok: true,
         content: `单词卡已经显示在设备上(${picks.length} 个):\n${picks.map((p, i) => `${i + 1}. ${describe(p.word)}`).join('\n')}\n` +
-          '用一句话告诉小朋友:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束。不要逐个讲解这些词。' +
-          '小朋友结束卡片再来说话时,问问要不要做个小测验,考完每个词用 vocab_answer 记录。',
+          '设备上的操作:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束卡片。',
         screen: '单词卡片',
       };
     },

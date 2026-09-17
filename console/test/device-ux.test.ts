@@ -32,9 +32,6 @@ class QuietBridge extends Bridge {
   constructor() {
     super(() => 'http://engine:8003', () => 's', async () => new Response('{}'));
   }
-  override async tools() {
-    return null;
-  }
 }
 
 beforeEach(() => {
@@ -181,9 +178,10 @@ describe('单词卡组', () => {
     const tools = await collectTools(context);
     const deck = tools.find((t) => t.name === 'vocab_deck')!;
     assert.deepEqual((deck.parameters as { required: string[] }).required, ['count']);
-    assert.match(deck.description, /先问小朋友这次想学几个/u);
+    assert.doesNotMatch(deck.description, /先问/u, '做法写在技能 word-coach 里,工具说明不重复');
     const result = await deck.run(context, { count: 3 });
-    assert.match(result.content, /长按确定键结束/u);
+    assert.match(result.content, /设备上的操作:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束卡片/u);
+    assert.doesNotMatch(result.content, /小测验|逐个讲解/u, '做法只在技能里');
     assert.equal(events.device.length, 3);
     const ids = new Set(events.device.map((m) => m['id']));
     assert.equal(ids.size, 1);

@@ -227,12 +227,13 @@ describe('智能体', () => {
 
     let response = await put({ tts_voice_id: 'TTS_Qwen__longpaopao_v3.6', llm_model_id: 'LLM_A', image_model_id: 'Image_Q', chat_history_conf: 0 });
     assert.equal(response.status, 200, await response.clone().text());
+    // 文生图模型不再挂在智能体上(画画工具在工具页选):提交了也不存
     assert.deepEqual({ ...one(conn, 'SELECT tts_voice_id, image_model_id, chat_history_conf FROM agents WHERE id = ?', DEFAULT_AGENT_ID) },
-      { tts_voice_id: 'TTS_Qwen__longpaopao_v3.6', image_model_id: 'Image_Q', chat_history_conf: 0 });
+      { tts_voice_id: 'TTS_Qwen__longpaopao_v3.6', image_model_id: null, chat_history_conf: 0 });
 
-    response = await put({ image_model_id: 'LLM_A' });
+    response = await put({ llm_model_id: 'Image_Q' });
     assert.equal(response.status, 400);
-    assert.match((await json(response)).error, /文生图模型不存在/u);
+    assert.match((await json(response)).error, /对话模型不存在/u);
     assert.equal((await put({ tts_voice_id: 'nope' })).status, 400);
     assert.equal((await put({ chat_history_conf: 2 })).status, 400, '只分记与不记');
 
@@ -242,25 +243,22 @@ describe('智能体', () => {
       { tts_voice_id: 'TTS_Qwen__longanhuan_v3.6', vad_model_id: 'VAD_SileroVAD' });
   });
 
-  test('插件整体覆盖,且拒绝未知插件', async () => {
-    const good = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [
-      { plugin_code: 'show_calendar', params: {} },
-      { plugin_code: 'get_weather', params: { default_location: '杭州' } },
-    ]);
+  test('工具开关整体覆盖,只收工具代号,拒绝未知工具', async () => {
+    const good = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, ['show_calendar', 'get_weather', 'get_weather']);
     assert.equal(good.status, 200);
     assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM agent_plugins').get<any>()!.n, 2);
+    const listed = (await json(await api('GET', '/agents'))).items.find((a: { id: string }) => a.id === DEFAULT_AGENT_ID);
+    assert.deepEqual(listed.plugins, ['get_weather', 'show_calendar'], '智能体只记开了哪些,没有设置');
+    assert.equal(listed.image_model_id, undefined);
 
     // 再覆盖成一个
-    await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'show_calendar', params: {} }]);
+    await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, ['show_calendar']);
     assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM agent_plugins').get<any>()!.n, 1);
 
-    const bad = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [
-      { plugin_code: 'rm-rf-slash', params: {} },
-    ]);
-    assert.equal(bad.status, 400);
-    // 目录里已移除的旧插件同样按未知处理
-    const stale = await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'get_time', params: {} }]);
-    assert.equal(stale.status, 400);
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, ['rm-rf-slash'])).status, 400);
+    // 目录里已移除的旧插件同样按未知处理;老格式(带参数的对象)不再接受
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, ['get_time'])).status, 400);
+    assert.equal((await api('PUT', `/agents/${DEFAULT_AGENT_ID}/plugins`, [{ plugin_code: 'show_calendar', params: {} }])).status, 400);
   });
 });
 

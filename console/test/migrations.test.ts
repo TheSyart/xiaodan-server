@@ -303,9 +303,55 @@ test('v7 的千问画图服务转成文生图模型,开了画画插件的智能�
   });
   assert.equal(one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM models WHERE model_type = 'Image'")!.n, 1, '别家的画图接口不再支持');
   assert.deepEqual(all<{ id: string }>(conn, 'SELECT id FROM service_providers').map((row) => row.id), ['search']);
-  assert.equal(one<{ image_model_id: string }>(conn, 'SELECT image_model_id FROM agents WHERE id = ?', DEFAULT_AGENT_ID)?.image_model_id, 'Image_Qwen');
-  assert.equal(one<{ image_model_id: string | null }>(conn, "SELECT image_model_id FROM agents WHERE id = 'a_plain'")?.image_model_id, null);
+  // v8 给开了画画插件的智能体填上文生图模型;v10 再把它收进画画工具的全局设置
+  assert.equal(one<{ config_json: string }>(conn, "SELECT config_json FROM tool_settings WHERE code = 'image'")?.config_json, '{"model_id":"Image_Qwen"}');
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM agents WHERE image_model_id IS NOT NULL')?.n, 0);
   assert.ok(one(conn, "SELECT 1 FROM agent_plugins WHERE agent_id = ? AND plugin_code = 'image'", DEFAULT_AGENT_ID), '已经在控制塔大脑上的智能体插件不动');
+});
+
+test('v10:工具设置收拢成全局、MCP 对外工具挪到服务器级、去掉技能与 MCP 的全局停用', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(9));
+  seed(conn);
+  exec(conn, "INSERT INTO agents (id, name, created_at) VALUES ('a_old', '先建的', '2020-01-01 00:00:00')");
+  exec(conn, "INSERT INTO agents (id, name) VALUES ('a_new', '后建的')");
+  exec(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('Image_A', 'Image', 'a', 'qwen_image', '{}')");
+  // 默认智能体填了天气,先建的智能体填了不同的天气和单词书:天气以默认智能体为准,单词书只有它填了就用它的
+  exec(conn, `INSERT OR REPLACE INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'get_weather', '{"default_location":"广州","hold_s":30}')`, DEFAULT_AGENT_ID);
+  exec(conn, `INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES ('a_old', 'get_weather', '{"default_location":"北京"}')`);
+  exec(conn, `INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES ('a_old', 'vocab', '{"book":"starter","extra":""}')`);
+  exec(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES ('a_new', 'search', '{}')");
+  exec(conn, "UPDATE agents SET image_model_id = 'Image_A' WHERE id = 'a_new'");
+  // MCP:两个智能体放行的工具不同,以默认智能体为准;停用的服务器从智能体上摘掉
+  exec(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('m1', 'M1', 'https://m1.example/mcp')");
+  exec(conn, "INSERT INTO mcp_servers (id, name, url, enabled) VALUES ('m_off', '停用的', 'https://off.example/mcp', 0)");
+  exec(conn, `INSERT INTO agent_mcp_servers (agent_id, server_id, tool_allowlist_json) VALUES ('a_old', 'm1', '["b"]')`);
+  exec(conn, `INSERT INTO agent_mcp_servers (agent_id, server_id, tool_allowlist_json) VALUES (?, 'm1', '["a"]')`, DEFAULT_AGENT_ID);
+  exec(conn, "INSERT INTO agent_mcp_servers (agent_id, server_id) VALUES ('a_new', 'm_off')");
+  // 技能:停用的从智能体上摘掉
+  exec(conn, "INSERT INTO skills (name, description, body, enabled) VALUES ('off-skill', 'd', 'b', 0)");
+  exec(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES ('a_new', 'off-skill'), ('a_new', 'word-coach')");
+
+  runMigrations(conn);
+
+  const settings = Object.fromEntries(all<{ code: string; config_json: string }>(conn, 'SELECT code, config_json FROM tool_settings').map((r) => [r.code, JSON.parse(r.config_json)]));
+  assert.deepEqual(settings, {
+    get_weather: { default_location: '广州', hold_s: 30 },
+    vocab: { book: 'starter' },
+    image: { model_id: 'Image_A' },
+  });
+  assert.equal(one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM agent_plugins WHERE params_json != '{}'")?.n, 0);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM agents WHERE image_model_id IS NOT NULL')?.n, 0);
+  assert.ok(one(conn, "SELECT 1 FROM agent_plugins WHERE agent_id = 'a_old' AND plugin_code = 'vocab'"), '开关本身不动');
+
+  assert.equal(one<{ tool_allowlist_json: string }>(conn, "SELECT tool_allowlist_json FROM mcp_servers WHERE id = 'm1'")?.tool_allowlist_json, '["a"]');
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM agent_mcp_servers WHERE tool_allowlist_json IS NOT NULL')?.n, 0);
+  assert.equal(one(conn, "SELECT 1 FROM agent_mcp_servers WHERE server_id = 'm_off'"), undefined);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM mcp_servers WHERE enabled = 0')?.n, 0);
+
+  assert.deepEqual(all<{ skill_name: string }>(conn, "SELECT skill_name FROM agent_skills WHERE agent_id = 'a_new'").map((r) => r.skill_name), ['word-coach']);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM skills WHERE enabled = 0')?.n, 0);
 });
 
 describe('关外键执行的迁移', () => {

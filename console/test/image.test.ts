@@ -39,9 +39,6 @@ class SendBridge extends Bridge {
   constructor() {
     super(() => 'http://engine:8003', () => 's', async () => new Response('{}'));
   }
-  override async tools() {
-    return null;
-  }
   override async device() {
     return { online: true, session_id: 's', features: { xiaodan: 2 } };
   }
@@ -242,10 +239,10 @@ describe('画画工具与画廊', () => {
     assert.equal((await app.request('http://localhost/api/images/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model_id":"nope"}' })).status, 404);
   });
 
-  test('智能体单独选的文生图模型优先于默认的', async () => {
+  test('画画工具设置里选的文生图模型优先于默认的', async () => {
     run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('Image_Wan', 'Image', '万相', 'qwen_image', ?)",
       JSON.stringify({ type: 'qwen_image', api_key: 'sk-wan', model_name: 'z-image-turbo' }));
-    run(conn, "UPDATE agents SET image_model_id = 'Image_Wan' WHERE id = ?", DEFAULT_AGENT_ID);
+    run(conn, `INSERT INTO tool_settings (code, config_json) VALUES ('image', '{"model_id":"Image_Wan"}')`);
     const png = samplePng();
     const models: string[] = [];
     const fetchImpl = async (url: string, init: RequestInit = {}) => {

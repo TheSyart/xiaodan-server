@@ -30,9 +30,6 @@ class QuietBridge extends Bridge {
   constructor() {
     super(() => 'http://engine:8003', () => 's', async () => new Response('{}'));
   }
-  override async tools() {
-    return null;
-  }
 }
 
 beforeEach(() => {

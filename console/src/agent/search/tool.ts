@@ -1,4 +1,4 @@
-// 联网搜索工具。用「工具与服务」页里默认的搜索服务商。
+// 联网搜索工具。用「工具」页联网搜索里默认的搜索服务商。
 
 import { CONSOLE_TOOLS } from '../registry.ts';
 import { defaultService } from '../services.ts';
@@ -27,7 +27,7 @@ CONSOLE_TOOLS.set(SEARCH_PLUGIN, (ctx) => {
       const query = typeof args['query'] === 'string' ? args['query'].trim().slice(0, 200) : '';
       if (!query) return { ok: false, content: '没有给出搜索词。' };
       const service = defaultService(toolCtx.deps.conn, 'search');
-      if (!service) return { ok: false, content: '还没有配置搜索服务(控制塔「工具与服务」页)。如实告诉用户现在查不了。' };
+      if (!service) return { ok: false, content: '还没有配置搜索服务(控制塔「工具」页的联网搜索)。如实告诉用户现在查不了。' };
       const provider = SEARCH_PROVIDERS[service.provider];
       if (!provider) return { ok: false, content: `不认识的搜索服务商:${service.provider}` };
       try {
