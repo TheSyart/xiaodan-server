@@ -162,6 +162,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
       };
     },
   };
-  // 单词卡组只给认得它的固件
-  return xiaodanVersion(ctx.device) >= 3 ? [deck, next, show, answer, stats] : [next, show, answer, stats];
+  // 认得卡组的固件只用卡组显示单词:单个单词卡片不接管按键,确定键仍是按住说话,和卡组混在一起孩子会按乱。
+  // 所以 3 级固件不提供 vocab_next / vocab_show,学词一律出卡组,小测验只靠说话。
+  return xiaodanVersion(ctx.device) >= 3 ? [deck, answer, stats] : [next, show, answer, stats];
 });

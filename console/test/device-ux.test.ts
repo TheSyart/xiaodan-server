@@ -79,9 +79,11 @@ describe('工具提示带活动动画', () => {
     const tools = await collectTools(ctx({ media: [], device: [] }, 3));
     const act = (name: string) => tools.find((t) => t.name === name)?.act;
     assert.deepEqual(
-      ['generate_image', 'play_story', 'list_stories', 'play_music', 'vocab_deck', 'vocab_next', 'web_search', 'create_reminder', 'remember', 'switch_role'].map(act),
+      ['generate_image', 'play_story', 'list_stories', 'play_music', 'vocab_deck', 'vocab_answer', 'web_search', 'create_reminder', 'remember', 'switch_role'].map(act),
       ['paint', 'story', 'story', 'music', 'learn', 'learn', 'search', 'remind', 'memory', 'role'],
     );
+    // 3 级固件学词只出卡组:单个单词卡片不接管按键,不提供
+    assert.ok(!tools.some((t) => t.name === 'vocab_next' || t.name === 'vocab_show'));
   });
 });
 
