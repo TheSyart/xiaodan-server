@@ -24,13 +24,18 @@ export interface SkillCatalog {
   loaded: (conversation: Conversation) => { name: string; body: string }[];
 }
 
-/** 提示词里按智能体与设备追加的内容:技能目录(skills/tools.ts)、长期记忆(memory/tools.ts),各自在导入时替换。 */
+/**
+ * 提示词里按智能体与设备追加的内容:技能目录(skills/tools.ts)、长期记忆(memory/tools.ts)、
+ * 开着的 MCP 服务器的使用说明(mcp/tools.ts),各自在导入时替换。
+ */
 export const PROMPT_EXTRAS: {
   skills: (ctx: ToolContext) => SkillCatalog;
   memory: (ctx: ToolContext) => string | undefined;
+  mcpNotes: (ctx: ToolContext) => { name: string; instructions: string }[];
 } = {
   skills: () => ({ available: [], loaded: () => [] }),
   memory: () => undefined,
+  mcpNotes: () => [],
 };
 
 export async function collectTools(ctx: ToolContext): Promise<AgentTool[]> {
@@ -67,6 +72,15 @@ export async function collectTools(ctx: ToolContext): Promise<AgentTool[]> {
 
 export function skillCatalog(ctx: ToolContext): SkillCatalog {
   return PROMPT_EXTRAS.skills(ctx);
+}
+
+export function mcpNotesFor(ctx: ToolContext): { name: string; instructions: string }[] {
+  try {
+    return PROMPT_EXTRAS.mcpNotes(ctx);
+  } catch (error) {
+    ctx.deps.log?.(`读取 MCP 使用说明失败:${(error as Error).message}`);
+    return [];
+  }
 }
 
 export function memoryFor(ctx: ToolContext): string | undefined {

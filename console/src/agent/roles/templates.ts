@@ -1,4 +1,4 @@
-// 角色模板:一键建出配好人设、工具、技能、音色的智能体。建出来就是普通智能体,之后随意改。
+// 角色模板:一键建出配好人设、工具、MCP、音色的智能体。建出来就是普通智能体,之后随意改。
 //
 // 模型沿用默认智能体的选择(对话、识别、合成);音色按模板里的系统音色名在所选合成模型下找,
 // 还没导入就顺手导入这一个。MCP 服务器按名字匹配(比如 AI 资讯官找名字里带 aihot 的),没配就跳过。
@@ -21,7 +21,6 @@ export interface RoleTemplate {
   max_steps: number;
   system_prompt: string;
   plugins: readonly string[];
-  skills: readonly string[];
   /** 千问系统音色名(qwen-audio-3.0-tts-flash) */
   voice: string;
   /** 与系统音色默认设置不同的说话设置;有就用(或新建)一个变体音色 */
@@ -50,7 +49,6 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
       '用户要办事(查东西、定提醒、放歌、画画)时干脆利落,办完用一两句话说结果。',
     ].join('\n'),
     plugins: [...COMMON_TOOLS, 'search', 'reminders', 'stories', 'music', 'image'],
-    skills: ['ai-news-brief'],
     voice: 'longanhuan_v3.6',
     mcp_hints: ['aihot'],
   },
@@ -72,7 +70,6 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
       '- 小朋友记住的名字、喜欢的东西要记下来,下次聊天自然地提起。',
     ].join('\n'),
     plugins: [...COMMON_TOOLS, 'reminders', 'stories', 'music', 'vocab', 'image'],
-    skills: ['bedtime-story', 'word-coach'],
     voice: 'longpaopao_v3.6',
     voice_profile: {
       rate: 0.95, tone_tags: ['gentle', 'story'],
@@ -95,7 +92,6 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
       '- 学生想用英语聊天时,用最简单的英语短句回应,必要时补一句中文。',
     ].join('\n'),
     plugins: ['vocab', 'set_volume', 'show_calendar', 'memory', 'roles'],
-    skills: ['word-coach'],
     voice: 'longanxiaoxin',
   },
   {
@@ -114,7 +110,6 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
       '- 分清事实与观点,不确定的消息说明"据报道"。',
     ].join('\n'),
     plugins: ['search', 'set_volume', 'memory', 'roles'],
-    skills: ['ai-news-brief'],
     voice: 'longanyuanfei',
     mcp_hints: ['aihot'],
     note: '资讯来自内置的 MCP 服务器「AI热点资讯」(AIHOT,匿名只读)。它被删掉了的话,在 MCP 页粘贴 JSON 导入即可恢复。',
@@ -165,9 +160,8 @@ export interface ApplyResult {
   id: string;
   voice: string | null;
   plugins: string[];
-  skills: string[];
   mcp_servers: string[];
-  /** 模板要的、但这里没有的东西(没导入的技能、没配的 MCP、找不到的音色) */
+  /** 模板要的、但这里没有的东西(没配的 MCP、找不到的音色) */
   missing: string[];
 }
 
@@ -195,16 +189,6 @@ export function applyTemplate(conn: Db, template: RoleTemplate, overrides: { nam
     const plugins = template.plugins.filter((code) => known.has(code));
     for (const code of plugins) run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, ?, ?)', id, code, '{}');
 
-    const skills: string[] = [];
-    for (const name of template.skills) {
-      if (one(conn, 'SELECT 1 FROM skills WHERE name = ?', name)) {
-        run(conn, 'INSERT INTO agent_skills (agent_id, skill_name) VALUES (?, ?)', id, name);
-        skills.push(name);
-      } else {
-        missing.push(`技能 ${name}`);
-      }
-    }
-
     const mcp: string[] = [];
     for (const hint of template.mcp_hints ?? []) {
       const servers = all<{ id: string; name: string }>(conn, 'SELECT id, name FROM mcp_servers WHERE name LIKE ? OR url LIKE ? OR id LIKE ?', `%${hint}%`, `%${hint}%`, `%${hint}%`);
@@ -214,6 +198,6 @@ export function applyTemplate(conn: Db, template: RoleTemplate, overrides: { nam
         mcp.push(server.name);
       }
     }
-    return { id, voice: voiceId, plugins, skills, mcp_servers: mcp, missing };
+    return { id, voice: voiceId, plugins, mcp_servers: mcp, missing };
   });
 }

@@ -1,4 +1,4 @@
-// 小单协议 3 级:工具提示带活动动画、故事/音乐卡片与正文进度、单词卡组、内置技能升级。
+// 小单协议 3 级:工具提示带活动动画、故事/音乐卡片与正文进度、单词卡组。
 
 import { strict as assert } from 'node:assert';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -19,8 +19,6 @@ import { mediaCard } from '../src/agent/media/tools.ts';
 import { mediaById } from '../src/agent/media/store.ts';
 import { storyChunks } from '../src/agent/media/synth.ts';
 import { deckMessage } from '../src/agent/vocab/tools.ts';
-import { LEGACY_BUILTIN_SKILLS, seedBuiltinSkills } from '../src/agent/skills/builtin.ts';
-import { parseSkillMarkdown } from '../src/agent/skills/parse.ts';
 import type { AgentDeps, AgentTool, DeviceContext, ToolContext, TurnSink } from '../src/agent/types.ts';
 
 const SEED_DIR = new URL('../../media', import.meta.url).pathname;
@@ -178,10 +176,11 @@ describe('单词卡组', () => {
     const tools = await collectTools(context);
     const deck = tools.find((t) => t.name === 'vocab_deck')!;
     assert.deepEqual((deck.parameters as { required: string[] }).required, ['count']);
-    assert.doesNotMatch(deck.description, /先问/u, '做法写在技能 word-coach 里,工具说明不重复');
+    assert.match(deck.description, /调用前先问小朋友这次想学几个单词/u, '学单词只是一个工具,做法写在它自己的说明与结果里');
     const result = await deck.run(context, { count: 3 });
     assert.match(result.content, /设备上的操作:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束卡片/u);
-    assert.doesNotMatch(result.content, /小测验|逐个讲解/u, '做法只在技能里');
+    assert.match(result.content, /不要逐个讲解/u);
+    assert.match(result.content, /每考完一个就调用 vocab_answer/u, '小测验的做法随结果给出');
     assert.equal(events.device.length, 3);
     const ids = new Set(events.device.map((m) => m['id']));
     assert.equal(ids.size, 1);
@@ -208,20 +207,3 @@ describe('单词卡组', () => {
   });
 });
 
-describe('内置技能升级', () => {
-  test('没改过的旧版 word-coach 升级成先问学几个;改过的不动', () => {
-    const LEGACY_BODY = parseSkillMarkdown(LEGACY_BUILTIN_SKILLS[0]!).body;
-    const current = one<{ body: string }>(conn, "SELECT body FROM skills WHERE name = 'word-coach'")!.body;
-    assert.match(current, /想学几个单词/u);
-
-    run(conn, "UPDATE skills SET body = ?, allowed_tools = 'vocab_next, vocab_answer, vocab_progress' WHERE name = 'word-coach'", LEGACY_BODY);
-    seedBuiltinSkills(conn);
-    const upgraded = one<{ body: string; allowed_tools: string }>(conn, "SELECT body, allowed_tools FROM skills WHERE name = 'word-coach'")!;
-    assert.match(upgraded.body, /vocab_deck/u);
-    assert.match(upgraded.allowed_tools, /vocab_deck/u);
-
-    run(conn, "UPDATE skills SET body = ? WHERE name = 'word-coach'", `${LEGACY_BODY}\n我自己加的一句。`);
-    seedBuiltinSkills(conn);
-    assert.match(one<{ body: string }>(conn, "SELECT body FROM skills WHERE name = 'word-coach'")!.body, /我自己加的一句/u);
-  });
-});

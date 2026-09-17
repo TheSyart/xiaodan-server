@@ -176,24 +176,29 @@ no capability settings; migration v10 merged the per-role settings into one glob
 | Kind | What it is | What its page does | Where settings live |
 |---|---|---|---|
 | Tool | a function implemented in the server code (the items below) | view the description and the functions the model sees, edit settings; tools cannot be created or deleted | `tool_settings`, shared by all roles |
-| Skill | a `SKILL.md` playbook | create, import, edit, delete; shows the tools it needs and the roles using it | `skills` |
-| MCP | an external tool server | add, import JSON, edit, delete, test; choose which of its tools it offers | `mcp_servers` |
+| Skill | a `SKILL.md` playbook you write yourself; none are built in | create, import, edit, delete; shows the tools it needs and the roles using it | `skills` |
+| MCP | an external tool server | add, import JSON, edit, delete, test; choose which of its tools it offers and write its usage notes | `mcp_servers` |
 
-When a role switches on a skill whose tools are off, the Agents page says so and can switch them on in one click. How to tell a
-story or run a vocabulary lesson is written only in the skills; tool descriptions only say what the tool does.
+Each capability belongs to exactly one kind. Storytelling and vocabulary are tools, and how to tell a story or run a lesson is
+written in their descriptions and results (it only enters the context when used). AI news is an MCP server, and how to use it is
+written in the server's usage notes (they enter the prompt when a role has the server on). Skills are only for your own playbooks
+that combine several things; when a role switches on a skill whose tools are off, the Agents page says so and can switch them on
+in one click. Migration v11 removed the three former built-in skills (unchanged ones are deleted, edited ones are kept as your own).
 
 - **Web search** (tool `web_search`, code `search`): providers are configured and switched under web search on the Tools page.
   The default is DeepSeek's official web search: neither DeepSeek's Chat nor Responses API offers search, but its Anthropic-compatible
   API supports the `web_search_20250305` server tool (the default search in deepseek-ai/deepseek-harness). One Messages request per query,
   retried once when the model does not trigger a search; the chat model's key can be reused. Bocha and Tavily are also available.
 - **MCP**: a minimal Streamable HTTP client written here (initialize → paginated tools/list → tools/call, JSON and SSE responses,
-  re-initialising expired sessions), remote https servers only; add and test servers on the MCP page and choose there which of each
-  server's tools it offers; the Agents page only switches servers on or off. Tools are named `mcp_<server>__<tool>` and results are
+  re-initialising expired sessions), remote https servers only; add and test servers on the MCP page, choose there which of each
+  server's tools it offers and write its usage notes (added to the prompt when a role has the server on); the Agents page only
+  switches servers on or off. Tools are named `mcp_<server>__<tool>` and results are
   handed to the model as external data.
   Server URLs may carry tokens, so lists only show the origin and path.
   - **Built in: AIHOT (AI热点资讯)**. `https://aihot.news/api/mcp` is anonymous and read-only (no token) and offers 5 tools: latest
-    news, search, hot topics, story timelines and the daily report. On first start the console adds it and enables it for every
-    existing agent. After that it never re-adds it or changes its links, so deleting or unticking it sticks. The 小单 and AI资讯官
+    news, search, hot topics, story timelines and the daily report. On first start the console adds it, with usage notes saying which
+    tool answers which question and how to present the news, and enables it for every existing agent. After that it never re-adds
+    it or changes its links or notes, so deleting, unticking or editing it sticks. The 小单 and AI资讯官
     templates link it automatically. Personal non-commercial use is free; external commercial products need AIHOT's written consent.
   - **Paste JSON import**: the MCP page accepts the `{"mcpServers": {...}}` config used by Claude, Cursor and Codex, several servers at
     once. The entry's name becomes the server id, each imported server is tested straight away, and it can be enabled for every
@@ -201,7 +206,7 @@ story or run a vocabulary lesson is written only in the skills; tool description
     exists is not added twice.
 - **Skills**: Agent Skills-compatible `SKILL.md` (paste, or upload .md or .zip; scripts are never executed). The prompt lists only names
   and descriptions; `load_skill` reads the body when needed (kept for the rest of the conversation) and `read_skill_file` reads attached files.
-  Built in: `bedtime-story`, `word-coach`, `ai-news-brief`.
+  None are built in.
 - **Timed reminders** (`create_reminder`/`list_reminders`/`cancel_reminder`, plugin code `reminders`): the console scans due reminders every
   5 seconds and announces them through the device bridge (chime + "提醒你:…" + a reminder card on new firmware). A busy device is retried after
   5 s; an offline one every 15 s and marked missed after 3 minutes; missed reminders from the last 12 hours are announced when the device next
@@ -220,7 +225,7 @@ story or run a vocabulary lesson is written only in the skills; tool description
   that many frames have played (`sentence_start` text starting with U+001E). The device types it out and scrolls after two lines.
 - **Vocabulary** (`vocab_answer`/`vocab_progress`, plus `vocab_deck` for level-3 firmware or `vocab_next`/`vocab_show` for older firmware, code `vocab`): ships an original 300-word starter book
   (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
-  after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
+  after 1/2/4/7/15 days), shows word cards on new firmware. Asking how many words to learn, not explaining each word, and how to run the quiz are written in the tool descriptions and results.
   Level-3 firmware gets a word deck, `vocab_deck`: the model first asks how many words to learn, then sends one
   `{"type":"xiaodan_deck","id","i","n","w","m","e","say"}` per word. The engine stores `say` (word, meaning, example) by MAC and deck id and
   strips it before forwarding. The child flips words with the up and down keys; clicking OK sends `{"type":"xiaodan","cmd":"deck_say","id","i"}`,
@@ -243,7 +248,7 @@ story or run a vocabulary lesson is written only in the skills; tool description
   - 小单: a general assistant.
   - 童童: a children's companion with child safety rules and a child voice.
   - 英语老师: an English tutor.
-  - AI资讯官: an AI news presenter that uses the `ai-news-brief` skill and links an MCP server whose name contains `aihot`.
+  - AI资讯官: an AI news presenter that links an MCP server whose name contains `aihot`.
 
   Each template fills in the persona, tools, skills, greeting and voice. Models are copied from the default agent. A template can
   carry voice settings (童童: rate 0.95, gentle, storytelling and a set of emotion tags); when they differ from the system voice's
@@ -525,6 +530,10 @@ Migration v10 (capabilities split into tool, skill and MCP pages) also deserves 
   taking the default agent's values where roles disagree;
 - moves the MCP "only these tools" choice from roles to servers, again taking the default agent's choice;
 - removes skills and MCP servers that were globally disabled from every role, then drops the disabled state (the effect is unchanged).
+
+Migration v11 removes the three built-in skills `bedtime-story`, `word-coach` and `ai-news-brief`, whose guidance now lives in the
+storytelling and vocabulary tools and in AIHOT's usage notes. Unedited ones are deleted together with their ticks on roles; edited
+ones are kept as your own skills. It also adds a usage-notes column to MCP servers.
 
 ## Measured in production (2026-09-13)
 

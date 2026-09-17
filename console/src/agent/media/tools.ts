@@ -2,6 +2,7 @@
 //
 // 有音频的条目:发 media 事件,引擎把文件排进合成队列,跟在已经说出口的引导语后面播;这一轮到此结束
 // (再说话会排到整段音频之后)。故事还没有音频时,把正文交给模型,让它自己用语音讲出来。
+// 怎么讲故事(先问想听哪一类、开场一句、库里没有就现编)也写在这里:讲故事只是一个工具,不另配技能。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { one, run } from '../../db.ts';
@@ -13,6 +14,11 @@ import { audioUrl, extensionOf, itemsOfKind, list, mediaPath, search, type Media
 
 export const STORY_PLUGIN = 'stories';
 export const MUSIC_PLUGIN = 'music';
+
+/** 故事库里没有合适的故事时,模型自己现编的要求(随工具结果给出,用到时才占提示词) */
+const MAKE_UP_STORY = '故事库里没有合适的,就自己现编一个来讲:三到五分钟,温柔舒缓,句子短,多用拟声词和重复的句式,让小朋友容易跟上;' +
+  '有一个温暖的小道理,但不说教;结尾慢慢安静下来,比如月亮升起、小动物们都睡着了,最后轻轻说一句晚安,不是睡前就轻轻问一句还想听吗。' +
+  '不讲恐怖、暴力、分离焦虑的情节。';
 
 function turnUrl(ctx: ToolContext): string {
   return one<{ value: string }>(ctx.deps.conn, "SELECT value FROM settings WHERE key = 'agent.turn_url'")?.value || 'http://console:8002/xiaodan/agent/turn';
@@ -79,17 +85,22 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
     name: 'list_stories',
     act: 'story',
     label: '故事库',
-    description: '查看故事库里有哪些故事,可以按关键词(主题、角色、标签)筛选。用户想听故事但没说哪个时先调用。',
+    description: '查看故事库里有哪些故事,可以按关键词(主题、角色、标签)筛选。用户想听故事时调用;' +
+      '用户没说想听什么时,先问一句想听哪一类(小动物、星星月亮、勇敢的小英雄……),只问一次。',
     parameters: { type: 'object', properties: { keyword: { type: 'string', description: '关键词,例如 小熊、睡前、勇气;不传列出全部' } }, required: [] },
     hint: '正在翻故事书',
     async run(ctx, args) {
       const all = itemsOfKind(ctx.deps.conn, 'story');
       const keyword = typeof args['keyword'] === 'string' ? args['keyword'] : '';
       const rows = keyword ? search(all, keyword) : all;
-      if (rows.length === 0) return { ok: true, content: keyword ? `故事库里没有和「${keyword}」相关的故事。` : '故事库是空的。' };
+      if (rows.length === 0) {
+        return { ok: true, longAnswer: true, content: `${keyword ? `故事库里没有和「${keyword}」相关的故事。` : '故事库是空的。'}${MAKE_UP_STORY}` };
+      }
       return {
         ok: true,
-        content: `故事库(${rows.length} 个):\n${rows.slice(0, 20).map((r) => `- ${r.id}《${r.title}》${r.summary ? `:${r.summary}` : ''}(${[minutes(r.duration_s), list(r.tags_json).join('、')].filter(Boolean).join(',')})`).join('\n')}`,
+        longAnswer: true,
+        content: `故事库(${rows.length} 个):\n${rows.slice(0, 20).map((r) => `- ${r.id}《${r.title}》${r.summary ? `:${r.summary}` : ''}(${[minutes(r.duration_s), list(r.tags_json).join('、')].filter(Boolean).join(',')})`).join('\n')}\n` +
+          `有合适的就用 play_story 播放。${MAKE_UP_STORY}`,
       };
     },
   };
@@ -97,7 +108,8 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
     name: 'play_story',
     act: 'story',
     label: '讲故事',
-    description: '播放故事库里的一个故事。开始播放后这一轮就结束了,故事播完设备会自己停下。',
+    description: '播放故事库里的一个故事。调用前先用一句简短的开场告诉用户要讲哪个故事,例如「好呀,给你讲《月亮上的小邮差》」;' +
+      '开始播放后这一轮就结束了,故事播完设备会自己停下。',
     parameters: {
       type: 'object',
       properties: { story: { type: 'string', description: '故事的 id 或名字,例如 moon-postman 或 月亮上的小邮差' } },
@@ -108,7 +120,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
     async run(ctx, args) {
       const query = String(args['story'] ?? '');
       const row = search(itemsOfKind(ctx.deps.conn, 'story'), query)[0];
-      if (!row) return { ok: false, content: `故事库里没有「${query}」。可以先调用 list_stories 看看有哪些。` };
+      if (!row) return { ok: false, longAnswer: true, content: `故事库里没有「${query}」,可以先调用 list_stories 看看有哪些。${MAKE_UP_STORY}` };
       if (row.audio_status === 'ready' && row.file) return play(ctx, row);
       return {
         ok: true,

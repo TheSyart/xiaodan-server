@@ -13,7 +13,6 @@ import { loadAgent } from '../src/agent/routes.ts';
 import { forget, listMemory, MAX_FACTS_PER_DEVICE, memoryPrompt, privacyReason, remember } from '../src/agent/memory/store.ts';
 import { applyTemplate, ROLE_TEMPLATES, templateById } from '../src/agent/roles/templates.ts';
 import { greetAfterSwitch, matchRole, needsReconnect, queueGreeting, switchableRoles, takeGreeting } from '../src/agent/roles/switch.ts';
-import { seedBuiltinSkills } from '../src/agent/skills/builtin.ts';
 import { syncSystemVoices } from '../src/voice/store.ts';
 import type { AgentDeps, DeviceContext, TurnSink } from '../src/agent/types.ts';
 
@@ -82,8 +81,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------- 模板
 
 describe('角色模板', () => {
-  test('建出的角色带人设、工具、技能、音色,模型沿用默认智能体', () => {
-    seedBuiltinSkills(conn);
+  test('建出的角色带人设、工具、音色,模型沿用默认智能体', () => {
     const result = applyTemplate(conn, templateById('tongtong')!);
     const agent = one<Record<string, unknown>>(conn, 'SELECT * FROM agents WHERE id = ?', result.id)!;
     assert.equal(agent['name'], '童童');
@@ -97,7 +95,6 @@ describe('角色模板', () => {
     }, '模板的说话设置和系统音色的默认设置不同:建一个变体');
     const plugins = all<{ plugin_code: string }>(conn, 'SELECT plugin_code FROM agent_plugins WHERE agent_id = ?', result.id).map((r) => r.plugin_code).sort();
     assert.deepEqual(plugins, ['get_weather', 'image', 'memory', 'music', 'reminders', 'roles', 'set_volume', 'show_calendar', 'stories', 'vocab']);
-    assert.deepEqual(result.skills.sort(), ['bedtime-story', 'word-coach']);
     assert.deepEqual(result.missing, []);
 
     // 再建一次:设置一样的变体复用,不重复建
@@ -110,14 +107,12 @@ describe('角色模板', () => {
     assert.equal(one<{ name: string }>(conn, 'SELECT name FROM agents WHERE id = ?', again.id)!.name, '童童二号');
   });
 
-  test('缺的东西如实列出:没有千问合成就没有音色,没配的 MCP、没导入的技能', () => {
+  test('缺的东西如实列出:没有千问合成就没有音色,没配的 MCP', () => {
     run(conn, "UPDATE models SET enabled = 0 WHERE id = 'TTS_QWEN'");
-    run(conn, 'DELETE FROM skills');
     const result = applyTemplate(conn, templateById('ai-news')!);
     assert.equal(result.voice, null);
     assert.ok(result.missing.some((m) => m.includes('音色')));
     assert.ok(result.missing.some((m) => m.includes('aihot')));
-    assert.ok(result.missing.some((m) => m.includes('ai-news-brief')));
 
     run(conn, "UPDATE models SET enabled = 1 WHERE id = 'TTS_QWEN'");
     run(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('aihot', 'AIHOT', 'https://aihot.example/api/mcp')");
@@ -125,18 +120,14 @@ describe('角色模板', () => {
     assert.deepEqual(linked.mcp_servers, ['AIHOT'], '名字匹配上就关联');
   });
 
-  test('模板里的插件与技能都真实存在', () => {
-    seedBuiltinSkills(conn);
-    const skills = new Set(all<{ name: string }>(conn, 'SELECT name FROM skills').map((r) => r.name));
+  test('模板里的工具都真实存在', () => {
     for (const template of ROLE_TEMPLATES) {
-      for (const name of template.skills) assert.ok(skills.has(name), `${template.id} 的技能 ${name}`);
       const result = applyTemplate(conn, template);
       assert.equal(result.plugins.length, template.plugins.length, `${template.id} 的插件都在目录里`);
     }
   });
 
   test('管理接口', async () => {
-    seedBuiltinSkills(conn);
     const app = createApp(conn, { agent: { fetch: async () => new Response('{}'), bridge: new FakeBridge(), log: () => {} } });
     const list = await (await app.request('http://localhost/api/role-templates')).json() as { items: { id: string; created: number }[] };
     assert.deepEqual(list.items.map((t) => t.id), ['xiaodan', 'tongtong', 'english-teacher', 'ai-news']);

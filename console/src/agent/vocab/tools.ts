@@ -1,4 +1,4 @@
-// 学单词的工具。配合内置技能 word-coach 使用:取词 → 教 → 考 → 记对错 → 看进度。
+// 学单词的工具:取词 → 教 → 考 → 记对错 → 看进度。怎么教、怎么考写在工具说明与工具结果里,不另配技能。
 // 屏幕上的单词卡只发给认得它的固件(features.xiaodan ≥ 2);卡片消息限 192 字节,超长的例句不带。
 // 3 级固件另有单词卡组(vocab_deck):一次把几个词发到设备,小朋友自己用按键翻看、点确定键听「单词。意思。例句」。
 
@@ -38,6 +38,12 @@ function showCard(ctx: ToolContext, word: WordRow): boolean {
   return true;
 }
 
+/** 小测验的做法:卡组结束后、老固件讲完一轮后都用(随工具结果给出,用到时才占提示词) */
+const QUIZ = '小测验一次只考一个词,可以说中文让他说英文,也可以说英文让他说意思。语音识别可能把英文听错(比如 apple 识别成「爱剖」),按发音近似宽容判断。' +
+  '每考完一个就调用 vocab_answer 记下对错;答对了具体地夸一句,答错了温柔地告诉正确答案并再读一遍,不要批评。' +
+  '全部考完调用 vocab_progress,用一两句话鼓励他,告诉他下次还有几个词要复习。保持轻松像做游戏,小朋友不想学了就停下。';
+const ASK_COUNT = '调用前先问小朋友这次想学几个单词(1 到 10 个),没想好就用 5 个。';
+
 const describe = (word: WordRow) => `${word.word}:${word.meaning}${word.example ? `;例句 ${word.example}${word.example_cn ? `(${word.example_cn})` : ''}` : ''}`;
 
 /**
@@ -59,7 +65,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
     name: 'vocab_next',
     act: 'learn',
     label: '取单词',
-    description: '取这一轮要学的英语单词:先复习到期的,再补新词。第一个单词的卡片会显示在屏幕上。',
+    description: `取这一轮要学的英语单词:先复习到期的,再补新词。第一个单词的卡片会显示在屏幕上。用户说学单词、背单词、复习英语时使用。${ASK_COUNT}`,
     parameters: {
       type: 'object',
       properties: {
@@ -81,7 +87,9 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
       return {
         ok: true,
         content: `这一轮的单词(${picks.length} 个)${shown ? ',第一个已经显示在屏幕上' : ''}:\n${picks.map((p, i) =>
-          `${i + 1}. ${describe(p.word)}${p.reason === 'review' ? '(复习)' : '(新词)'}`).join('\n')}\n讲到下一个单词时调用 vocab_show 把它显示出来。`,
+          `${i + 1}. ${describe(p.word)}${p.reason === 'review' ? '(复习)' : '(新词)'}`).join('\n')}\n` +
+          '一个一个来,每个单词:先慢慢读一遍英文,再说中文意思,再读一遍英文;请小朋友跟着读一遍;说一句简单的例句帮助记忆。' +
+          `讲到下一个单词时调用 vocab_show 把它显示出来。这一轮讲完后做小测验。${QUIZ}`,
       };
     },
   };
@@ -131,8 +139,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
     name: 'vocab_deck',
     act: 'learn',
     label: '单词卡',
-    description: '把这一轮要学的单词做成卡片显示在设备上,小朋友自己用按键翻看、听读音。',
-    // 「先问学几个、不逐个讲解、结束后问要不要测验」这类做法写在技能 word-coach 里,这里只说工具本身
+    description: `把这一轮要学的单词做成卡片显示在设备上,小朋友自己用按键翻看、听读音。用户说学单词、背单词、复习英语时使用。${ASK_COUNT}`,
     parameters: {
       type: 'object',
       properties: {
@@ -156,7 +163,8 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
       return {
         ok: true,
         content: `单词卡已经显示在设备上(${picks.length} 个):\n${picks.map((p, i) => `${i + 1}. ${describe(p.word)}`).join('\n')}\n` +
-          '设备上的操作:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束卡片。',
+          '设备上的操作:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束卡片。' +
+          `用一句话把操作方式告诉小朋友,然后等他自己看,不要逐个讲解这些词。他结束卡片再来说话时,问要不要做个小测验。${QUIZ}`,
         screen: '单词卡片',
       };
     },

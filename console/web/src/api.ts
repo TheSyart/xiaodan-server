@@ -239,13 +239,10 @@ export interface RoleTemplate {
   greeting: string;
   safety_level: 'standard' | 'child';
   plugins: string[];
-  skills: string[];
   /** 千问系统音色名 */
   voice: string;
   voice_name: string;
   note?: string;
-  /** 模板要用、但技能页里还没有的技能 */
-  missing_skills: string[];
   /** 已经用这个模板建过几个 */
   created: number;
 }
@@ -254,7 +251,6 @@ export interface RoleTemplateApplied {
   id: string;
   voice: string | null;
   plugins: string[];
-  skills: string[];
   mcp_servers: string[];
   missing: string[];
 }
@@ -412,6 +408,8 @@ export interface McpServerView {
   url?: string;
   headers: Record<string, string>;
   timeout_ms: number;
+  /** 使用说明:角色开着这个服务器时写进提示词 */
+  instructions: string;
   tools: { name: string; description: string }[];
   /** 对外提供哪些工具;null 表示全部 */
   tool_allowlist: string[] | null;

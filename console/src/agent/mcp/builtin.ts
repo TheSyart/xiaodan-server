@@ -14,10 +14,25 @@ export interface BuiltinMcpServer {
   name: string;
   url: string;
   timeout_ms: number;
+  /** 使用说明:角色开着这个服务器时写进提示词,在 MCP 页可以改 */
+  instructions: string;
 }
 
 export const BUILTIN_MCP_SERVERS: readonly BuiltinMcpServer[] = [
-  { id: 'aihot', name: 'AI热点资讯', url: 'https://aihot.news/api/mcp', timeout_ms: 20_000 },
+  {
+    id: 'aihot',
+    name: 'AI热点资讯',
+    url: 'https://aihot.news/api/mcp',
+    timeout_ms: 20_000,
+    instructions: [
+      '用它查最新的 AI 资讯(人工智能领域的新闻、热点、某个 AI 公司或模型的最新消息)。',
+      '- 问「今天 / 最近有什么 AI 新闻」:先用 aihot_get_daily 取最新一期日报;没有日报时用 aihot_get_latest(window 取 24h,mode 取 selected)。',
+      '- 问「现在最火的是什么」:用 aihot_get_hot_topics。',
+      '- 问某个公司、模型、产品或人物:用 aihot_search,q 填那个名字。',
+      '播报时挑最重要的三条,每条一两句口语,先说是谁做了什么,再说为什么值得关注;不念网址和英文长串,型号、版本号用口语说(比如「GPT 五」);'
+        + '用户想听某一条的细节时再展开;结尾可以说一句「以上来自 AIHOT」。',
+    ].join('\n'),
+  },
 ];
 
 const hasTable = (conn: Db, name: string) => !!one(conn, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name);
@@ -37,6 +52,16 @@ export function seedBuiltinMcp(conn: Db): string[] {
   if (!hasTable(conn, 'mcp_servers') || !hasTable(conn, 'agent_mcp_servers')) return [];
   const added: string[] = [];
   for (const server of BUILTIN_MCP_SERVERS) {
+    // 使用说明(迁移 v11 之后才有这一列):已有的内置服务器说明还是空的就补上一次,之后用户改了、清空了都不再动
+    const noteFlag = `mcp.builtin.${server.id}.instructions`;
+    if (!one(conn, 'SELECT 1 FROM settings WHERE key = ?', noteFlag)) {
+      tx(conn, () => {
+        const target = all<{ id: string; url: string; instructions: string }>(conn, 'SELECT id, url, instructions FROM mcp_servers')
+          .find((row) => row.id === server.id || sameEndpoint(row.url, server.url));
+        if (target && !target.instructions) run(conn, 'UPDATE mcp_servers SET instructions = ? WHERE id = ?', server.instructions, target.id);
+        run(conn, "INSERT INTO settings (key, value, label, internal) VALUES (?, 'seeded', '内置 MCP 服务器的使用说明已写入', 1)", noteFlag);
+      });
+    }
     const flag = `mcp.builtin.${server.id}`;
     if (one(conn, 'SELECT 1 FROM settings WHERE key = ?', flag)) continue;
     tx(conn, () => {
@@ -44,7 +69,8 @@ export function seedBuiltinMcp(conn: Db): string[] {
       const existing = all<{ id: string; url: string }>(conn, 'SELECT id, url FROM mcp_servers')
         .find((row) => row.id === server.id || sameEndpoint(row.url, server.url));
       if (!existing) {
-        run(conn, 'INSERT INTO mcp_servers (id, name, url, timeout_ms) VALUES (?, ?, ?, ?)', server.id, server.name, server.url, server.timeout_ms);
+        run(conn, 'INSERT INTO mcp_servers (id, name, url, timeout_ms, instructions) VALUES (?, ?, ?, ?, ?)',
+          server.id, server.name, server.url, server.timeout_ms, server.instructions);
         for (const agent of all<{ id: string }>(conn, 'SELECT id FROM agents')) {
           run(conn, 'INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id, tool_allowlist_json) VALUES (?, ?, NULL)', agent.id, server.id);
         }

@@ -330,8 +330,8 @@ test('v10:工具设置收拢成全局、MCP 对外工具挪到服务器级、去
   exec(conn, `INSERT INTO agent_mcp_servers (agent_id, server_id, tool_allowlist_json) VALUES (?, 'm1', '["a"]')`, DEFAULT_AGENT_ID);
   exec(conn, "INSERT INTO agent_mcp_servers (agent_id, server_id) VALUES ('a_new', 'm_off')");
   // 技能:停用的从智能体上摘掉
-  exec(conn, "INSERT INTO skills (name, description, body, enabled) VALUES ('off-skill', 'd', 'b', 0)");
-  exec(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES ('a_new', 'off-skill'), ('a_new', 'word-coach')");
+  exec(conn, "INSERT INTO skills (name, description, body, enabled) VALUES ('off-skill', 'd', 'b', 0), ('my-skill', 'd', 'b', 1)");
+  exec(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES ('a_new', 'off-skill'), ('a_new', 'my-skill')");
 
   runMigrations(conn);
 
@@ -350,8 +350,31 @@ test('v10:工具设置收拢成全局、MCP 对外工具挪到服务器级、去
   assert.equal(one(conn, "SELECT 1 FROM agent_mcp_servers WHERE server_id = 'm_off'"), undefined);
   assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM mcp_servers WHERE enabled = 0')?.n, 0);
 
-  assert.deepEqual(all<{ skill_name: string }>(conn, "SELECT skill_name FROM agent_skills WHERE agent_id = 'a_new'").map((r) => r.skill_name), ['word-coach']);
+  assert.deepEqual(all<{ skill_name: string }>(conn, "SELECT skill_name FROM agent_skills WHERE agent_id = 'a_new'").map((r) => r.skill_name), ['my-skill']);
   assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM skills WHERE enabled = 0')?.n, 0);
+});
+
+test('v11:没改过的内置技能删掉(连同角色勾选),改过的留作自己的技能;MCP 服务器有使用说明', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(10));
+  seed(conn);
+  const BEDTIME_DESCRIPTION = '给小朋友讲睡前故事、哄睡。用户想听故事、说睡不着、让你讲个故事时使用。';
+  // 发布过的 bedtime-story 正文(没改过):从迁移文件里取,避免测试里再抄一份
+  const retired = readFileSync(new URL('../src/migrations/v11-retire-builtin-skills.ts', import.meta.url), 'utf8');
+  assert.ok(retired.includes(BEDTIME_DESCRIPTION));
+  const bedtimeBody = JSON.parse(retired.slice(retired.indexOf('= [') + 2, retired.indexOf('];') + 1)).find((s: { name: string }) => s.name === 'bedtime-story').body;
+  exec(conn, "INSERT INTO skills (name, description, body, source) VALUES ('bedtime-story', ?, ?, 'builtin')", BEDTIME_DESCRIPTION, bedtimeBody);
+  exec(conn, "INSERT INTO skills (name, description, body, source) VALUES ('word-coach', '改过的描述', '我改过的正文', 'builtin')");
+  exec(conn, "INSERT INTO skills (name, description, body, source) VALUES ('mine', 'd', 'b', 'custom')");
+  exec(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES (?, 'bedtime-story'), (?, 'word-coach')", DEFAULT_AGENT_ID, DEFAULT_AGENT_ID);
+
+  runMigrations(conn);
+
+  assert.deepEqual(all<{ name: string; source: string }>(conn, 'SELECT name, source FROM skills ORDER BY name').map((r) => ({ ...r })),
+    [{ name: 'mine', source: 'custom' }, { name: 'word-coach', source: 'custom' }]);
+  assert.deepEqual(all<{ skill_name: string }>(conn, 'SELECT skill_name FROM agent_skills').map((r) => r.skill_name), ['word-coach'], '改过的保留勾选');
+  assert.ok(columns(conn, 'mcp_servers').includes('instructions'));
 });
 
 describe('关外键执行的迁移', () => {

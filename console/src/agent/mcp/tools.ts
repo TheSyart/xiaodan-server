@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../../db.ts';
 import { all, run } from '../../db.ts';
-import { EXTRA_TOOL_SOURCES } from '../registry.ts';
+import { EXTRA_TOOL_SOURCES, PROMPT_EXTRAS } from '../registry.ts';
 import type { AgentDeps, AgentTool } from '../types.ts';
 import { callTool, listTools, McpError, type McpServer, type McpTool } from './client.ts';
 
@@ -26,6 +26,8 @@ export interface McpServerRow {
   last_error: string;
   /** 对外提供哪些工具;null 表示全部(MCP 页设置) */
   tool_allowlist_json: string | null;
+  /** 使用说明:角色开着这个服务器时写进提示词(MCP 页填写) */
+  instructions: string;
 }
 
 export function toServer(row: McpServerRow): McpServer {
@@ -90,6 +92,10 @@ export function allowlistOf(row: Pick<McpServerRow, 'tool_allowlist_json'>): str
     return null;
   }
 }
+
+PROMPT_EXTRAS.mcpNotes = (ctx) => agentServerRows(ctx.deps.conn, ctx.agent.id)
+  .filter((row) => row.instructions?.trim())
+  .map((row) => ({ name: row.name, instructions: row.instructions }));
 
 EXTRA_TOOL_SOURCES.push(async (ctx) => {
   const rows = agentServerRows(ctx.deps.conn, ctx.agent.id);

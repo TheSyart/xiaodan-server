@@ -7,7 +7,6 @@ import { randomBytes } from 'node:crypto';
 import type { Db } from './db.ts';
 import { all, one, run, tx } from './db.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
-import { seedBuiltinSkills } from './agent/skills/builtin.ts';
 import { syncSystemVoices } from './voice/store.ts';
 
 export const DEFAULT_AGENT_ID = 'agent_xiaodan';
@@ -100,9 +99,6 @@ export function seed(conn: Db): void {
           DEFAULT_AGENT_ID, code, '{}');
       }
     }
-
-    // 内置技能(睡前故事、单词陪练、AI 资讯速递),缺了才补,用户改过的不覆盖
-    seedBuiltinSkills(conn);
 
     // 千问合成模型的系统音色自动列出,不用再手动导入
     syncSystemVoices(conn);

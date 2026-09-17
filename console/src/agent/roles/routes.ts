@@ -15,7 +15,6 @@ export function roleTemplateRoutes(deps: AgentDeps): Hono {
   const app = new Hono({ strict: false });
 
   app.get('/', (c) => {
-    const skills = new Set(all<{ name: string }>(deps.conn, 'SELECT name FROM skills').map((row) => row.name));
     const created = all<{ role_template: string; n: number }>(
       deps.conn, "SELECT role_template, COUNT(*) AS n FROM agents WHERE role_template != '' GROUP BY role_template",
     );
@@ -23,7 +22,6 @@ export function roleTemplateRoutes(deps: AgentDeps): Hono {
       items: ROLE_TEMPLATES.map((template) => ({
         ...template,
         voice_name: systemVoiceOf(template.voice)?.name ?? template.voice,
-        missing_skills: template.skills.filter((name) => !skills.has(name)),
         created: created.find((row) => row.role_template === template.id)?.n ?? 0,
       })),
     });

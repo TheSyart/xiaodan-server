@@ -284,9 +284,10 @@ describe('MCP', () => {
   test('内置 AIHOT:第一次启动写入并给所有智能体启用,之后删了、手动加过都不再动', () => {
     run(conn, "INSERT INTO agents (id, name, system_prompt) VALUES ('agent_tong', '童童', '')");
     assert.deepEqual(seedBuiltinMcp(conn), ['aihot']);
-    const row = one<{ url: string; name: string }>(conn, "SELECT url, name FROM mcp_servers WHERE id = 'aihot'")!;
+    const row = one<{ url: string; name: string; instructions: string }>(conn, "SELECT url, name, instructions FROM mcp_servers WHERE id = 'aihot'")!;
     assert.equal(row.url, 'https://aihot.news/api/mcp', '公开的匿名只读地址,不带任何令牌');
     assert.equal(row.name, BUILTIN_MCP_SERVERS[0]!.name);
+    assert.match(row.instructions, /aihot_get_daily/u, 'AI 资讯的做法是这个服务器自己的使用说明');
     assert.deepEqual(all<{ agent_id: string }>(conn, "SELECT agent_id FROM agent_mcp_servers WHERE server_id = 'aihot' ORDER BY agent_id").map((r) => r.agent_id),
       ['agent_tong', DEFAULT_AGENT_ID].sort());
     assert.deepEqual(seedBuiltinMcp(conn), [], '只写一次');
@@ -297,6 +298,34 @@ describe('MCP', () => {
     run(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('mcp_mine', '我的 AIHOT', 'https://aihot.news/api/mcp/?aihot_actor=abc')");
     assert.deepEqual(seedBuiltinMcp(conn), [], '已经手动加过同一个接口');
     assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM mcp_servers')!.n, 1);
+  });
+
+  test('使用说明:已有的内置服务器说明是空的补上一次;角色开着服务器时写进提示词,关掉就没有', async () => {
+    run(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('mine', '我的 AIHOT', 'https://aihot.news/api/mcp')");
+    seedBuiltinMcp(conn);
+    const filled = one<{ instructions: string }>(conn, "SELECT instructions FROM mcp_servers WHERE id = 'mine'")!.instructions;
+    assert.match(filled, /aihot_search/u, '手动加过同一个接口:补上说明');
+    run(conn, "UPDATE mcp_servers SET instructions = '' WHERE id = 'mine'");
+    seedBuiltinMcp(conn);
+    assert.equal(one<{ instructions: string }>(conn, "SELECT instructions FROM mcp_servers WHERE id = 'mine'")!.instructions, '', '用户清空了不再补');
+
+    run(conn, "UPDATE mcp_servers SET instructions = '问新闻先用日报工具。' WHERE id = 'mine'");
+    const { fetchImpl, calls } = router([[/chat\/completions$/u, () => llmSse({ text: '🙂好' })], [/aihot\.news/u, () => new Response('down', { status: 500 })]]);
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_X', 'LLM', 'x', 'openai', ?)", JSON.stringify({ type: 'openai', base_url: 'https://llm.example/v1', model_name: 'x', api_key: 'k' }));
+    run(conn, "UPDATE agents SET llm_model_id = 'LLM_X' WHERE id = ?", DEFAULT_AGENT_ID);
+    const deps = baseDeps(fetchImpl);
+    const turn = async () => {
+      calls.length = 0;
+      await runTurn(deps, {
+        agent: loadAgent(deps, DEFAULT_AGENT_ID)!, device: device(), query: '今天有什么 AI 新闻', engineMessages: [],
+        conversationKey: 'mcp-notes', record: null, signal: new AbortController().signal, sink: { text() {}, device() {}, media() {}, closeAfterTurn() {} },
+      });
+      return String(calls.find((c) => /chat\/completions$/u.test(c.url))!.body.messages[0].content);
+    };
+    run(conn, "INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id) VALUES (?, 'mine')", DEFAULT_AGENT_ID);
+    assert.match(await turn(), /<外部服务的用法>[\s\S]*「我的 AIHOT」:\n问新闻先用日报工具。/u);
+    run(conn, 'DELETE FROM agent_mcp_servers WHERE agent_id = ?', DEFAULT_AGENT_ID);
+    assert.doesNotMatch(await turn(), /外部服务的用法/u);
   });
 
   test('粘贴 JSON 导入:通用 mcpServers 配置,跳过本地命令与旧 SSE,重复的不再加', async () => {
@@ -410,9 +439,8 @@ describe('技能', () => {
     assert.deepEqual(pkg.skipped, ['scripts/run.py']);
   });
 
-  test('内置技能已写入;导入、勾选、渐进加载', async () => {
-    assert.deepEqual(all<{ name: string }>(conn, "SELECT name FROM skills WHERE source = 'builtin' ORDER BY name").map((r) => r.name),
-      ['ai-news-brief', 'bedtime-story', 'word-coach']);
+  test('没有内置技能;导入、勾选、渐进加载', async () => {
+    assert.equal(all(conn, 'SELECT name FROM skills').length, 0, '讲故事、学单词、AI 资讯的做法在工具与 MCP 里,不另配技能');
     const { fetchImpl } = router([]);
     const app = createApp(conn, { agent: { fetch: fetchImpl, bridge: new FakeBridge(), log: () => {} } });
     const zipped = zip({ 'SKILL.md': SKILL, 'references/questions.md': '1+1=2' });

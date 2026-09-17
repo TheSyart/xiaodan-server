@@ -45,6 +45,8 @@ export interface PromptInput {
   hasScreen: boolean;
   /** 长期记忆摘要(P6) */
   memory?: string;
+  /** 开着的 MCP 服务器的使用说明(MCP 页填写) */
+  mcpNotes?: readonly { name: string; instructions: string }[];
   /** 对话模型能看图 */
   vision?: boolean;
   /** 音色带来的说话要求 */
@@ -108,6 +110,16 @@ export function buildSystemPrompt(input: PromptInput): string {
       '- 工具失败时如实、简短地告诉用户,不要编一个结果。',
       '- 用工具结果回答时抓重点,用一两句口语说清楚,不要逐条念数据。',
       '</工具>',
+    ].join('\n'));
+  }
+
+  const notes = (input.mcpNotes ?? []).filter((note) => note.instructions.trim());
+  if (notes.length) {
+    sections.push([
+      '<外部服务的用法>',
+      '下面是开着的外部服务(MCP)各自的用法,用到它们的工具时照着做。',
+      ...notes.map((note) => `「${note.name}」:\n${note.instructions.trim()}`),
+      '</外部服务的用法>',
     ].join('\n'));
   }
 

@@ -11,7 +11,7 @@ import { LlmError, streamChat, supportsVision, type ChatMessage, type ContentPar
 import { buildSystemPrompt, type VoiceHints } from './prompt.ts';
 import { CONTROL_TAGS, readProfile, RICH_TAGS, stripInlineTags } from '../voice/profile.ts';
 import { resolveVoice } from '../voice/store.ts';
-import { collectTools, memoryFor, skillCatalog } from './registry.ts';
+import { collectTools, mcpNotesFor, memoryFor, skillCatalog } from './registry.ts';
 import { ToolTextFilter } from './tool-text.ts';
 import {
   xiaodanVersion, type AgentDeps, type AgentRow, type AgentTool, type DeviceContext, type ToolContext, type TraceEvent,
@@ -192,6 +192,7 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
     skills: catalog.available,
     loadedSkills: catalog.loaded(conversation),
     memory: memoryFor(toolContext),
+    mcpNotes: mcpNotesFor(toolContext),
     vision,
     voice: voiceHints(deps, agent),
   });

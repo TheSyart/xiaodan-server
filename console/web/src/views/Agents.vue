@@ -348,12 +348,8 @@ const PLUGIN_ICON: Record<string, IconName> = {
           <p class="template-desc">{{ template.description }}</p>
           <div class="chips">
             <span v-for="code in template.plugins" :key="code" class="tag">{{ pluginLabel(code) ?? code }}</span>
-            <span v-for="name in template.skills" :key="name" class="tag sky">技能 {{ name }}</span>
           </div>
           <div v-if="template.note" class="callout info" style="margin: 0"><AppIcon name="info" :size="16" /><div class="callout-body">{{ template.note }}</div></div>
-          <div v-if="template.missing_skills.length" class="callout warn" style="margin: 0">
-            <AppIcon name="alert" :size="16" /><div class="callout-body">技能页里还没有:{{ template.missing_skills.join('、') }}</div>
-          </div>
           <div class="row" style="gap: 8px; margin-top: auto">
             <input v-model="templateNames[template.id]" class="input" type="text" maxlength="64" :aria-label="`${template.name} 的名字`" style="flex: 1; min-width: 0" />
             <button class="btn btn-primary btn-sm" type="button" :aria-busy="applying === template.id" @click="applyTemplate(template)">

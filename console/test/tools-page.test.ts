@@ -55,6 +55,7 @@ interface ToolView {
 describe('工具页', () => {
   test('列出全部工具:函数、在哪执行、状态、哪些智能体开着、哪些技能依赖', async () => {
     run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'vocab', '{}') ON CONFLICT DO NOTHING", DEFAULT_AGENT_ID);
+    run(conn, "INSERT INTO skills (name, description, body, allowed_tools) VALUES ('quiz-night', '周末单词小测', '正文', 'vocab_answer, list_stories')");
     const { items } = await (await api('GET', '/tools')).json() as { items: ToolView[] };
     assert.deepEqual(items.map((t) => t.code), PLUGINS.map((p) => p.code), '工具是代码里的,一个不多一个不少');
     const byCode = Object.fromEntries(items.map((t) => [t.code, t]));
@@ -65,8 +66,9 @@ describe('工具页', () => {
     assert.match(byCode['vocab']!.functions[0]!.description, /^\(新固件才有\)/u);
     assert.match(byCode['vocab']!.functions[3]!.description, /^\(老固件才有\)/u);
     assert.deepEqual(byCode['vocab']!.agents.map((a) => a.id), [DEFAULT_AGENT_ID]);
-    assert.ok(byCode['vocab']!.skills.includes('word-coach'), '技能 word-coach 依赖学单词');
-    assert.ok(byCode['stories']!.skills.includes('bedtime-story'));
+    assert.deepEqual(byCode['vocab']!.skills, ['quiz-night'], '自己写的技能用到学单词');
+    assert.deepEqual(byCode['stories']!.skills, ['quiz-night']);
+    assert.deepEqual(byCode['music']!.skills, [], '没有内置技能,讲故事、学单词不再挂着技能');
     assert.deepEqual(byCode['search']!.status, { ready: false, message: '还没有配置搜索服务' });
     assert.equal(byCode['image']!.status.ready, false);
     assert.equal(byCode['show_calendar']!.status.ready, true);
@@ -114,14 +116,16 @@ describe('工具页', () => {
 
 describe('技能与 MCP 没有全局开关,只看哪些智能体在用', () => {
   test('技能列表带智能体;编辑时提交的启用开关不再生效', async () => {
-    run(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES (?, 'word-coach')", DEFAULT_AGENT_ID);
+    assert.deepEqual((await (await api('GET', '/skills')).json() as { items: unknown[] }).items, [], '没有内置技能,默认是空的');
+    run(conn, "INSERT INTO skills (name, description, body) VALUES ('my-coach', 'd', 'b')");
+    run(conn, "INSERT INTO agent_skills (agent_id, skill_name) VALUES (?, 'my-coach')", DEFAULT_AGENT_ID);
     const { items } = await (await api('GET', '/skills')).json() as { items: { name: string; agents: { id: string }[]; enabled?: unknown }[] };
-    const coach = items.find((s) => s.name === 'word-coach')!;
+    const coach = items.find((s) => s.name === 'my-coach')!;
     assert.deepEqual(coach.agents.map((a) => a.id), [DEFAULT_AGENT_ID]);
     assert.equal(coach.enabled, undefined);
-    const markdown = '---\nname: word-coach\ndescription: 改过\nallowed-tools: vocab_deck\n---\n正文';
-    assert.equal((await api('PUT', '/skills/word-coach', { markdown, enabled: false })).status, 200);
-    assert.equal(one<{ enabled: number }>(conn, "SELECT enabled FROM skills WHERE name = 'word-coach'")?.enabled, 1);
+    const markdown = '---\nname: my-coach\ndescription: 改过\nallowed-tools: vocab_deck\n---\n正文';
+    assert.equal((await api('PUT', '/skills/my-coach', { markdown, enabled: false })).status, 200);
+    assert.equal(one<{ enabled: number }>(conn, "SELECT enabled FROM skills WHERE name = 'my-coach'")?.enabled, 1);
   });
 
   test('技能依赖的工具名支持通配', () => {

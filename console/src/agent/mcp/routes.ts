@@ -43,6 +43,7 @@ const serverSchema = z.object({
   name: z.string().min(1).max(64),
   url: z.string().min(1).max(2000).refine(validUrl, '地址必须是 https(本机调试可用 http://localhost)'),
   headers: z.record(z.string().max(64), z.string().max(2000)).optional(),
+  instructions: z.string().max(2000).default(''),
   timeout_ms: z.number().int().min(1000).max(120000).default(20000),
 });
 
@@ -59,7 +60,7 @@ export function mcpRoutes(deps: AgentDeps): Hono {
     }
     return {
       id: row.id, name: row.name, url_masked: maskUrl(row.url), headers: maskHeaders(row.headers_json),
-      timeout_ms: row.timeout_ms, tools, tool_allowlist: allowlistOf(row), tools_updated_at: row.tools_updated_at, last_error: row.last_error,
+      timeout_ms: row.timeout_ms, instructions: row.instructions, tools, tool_allowlist: allowlistOf(row), tools_updated_at: row.tools_updated_at, last_error: row.last_error,
       agents: all<{ id: string; name: string }>(conn,
         'SELECT g.id, g.name FROM agent_mcp_servers a JOIN agents g ON g.id = a.agent_id WHERE a.server_id = ? ORDER BY g.is_default DESC, g.created_at', row.id),
     };
@@ -79,8 +80,8 @@ export function mcpRoutes(deps: AgentDeps): Hono {
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
     const d = parsed.data;
     const id = `mcp_${randomBytes(4).toString('hex')}`;
-    run(conn, 'INSERT INTO mcp_servers (id, name, url, headers_json, timeout_ms) VALUES (?, ?, ?, ?, ?)',
-      id, d.name, d.url, JSON.stringify(d.headers ?? {}), d.timeout_ms);
+    run(conn, 'INSERT INTO mcp_servers (id, name, url, headers_json, timeout_ms, instructions) VALUES (?, ?, ?, ?, ?, ?)',
+      id, d.name, d.url, JSON.stringify(d.headers ?? {}), d.timeout_ms, d.instructions.trim());
     return c.json({ ok: true, id });
   });
 
@@ -149,8 +150,8 @@ export function mcpRoutes(deps: AgentDeps): Hono {
       }
     }
     resetMcpSession(toServer(row));
-    run(conn, "UPDATE mcp_servers SET name = ?, url = ?, headers_json = ?, timeout_ms = ?, tools_updated_at = NULL WHERE id = ?",
-      d.name, d.url, JSON.stringify(headers), d.timeout_ms, row.id);
+    run(conn, "UPDATE mcp_servers SET name = ?, url = ?, headers_json = ?, timeout_ms = ?, instructions = ?, tools_updated_at = NULL WHERE id = ?",
+      d.name, d.url, JSON.stringify(headers), d.timeout_ms, d.instructions.trim(), row.id);
     return c.json({ ok: true });
   });
 

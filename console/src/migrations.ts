@@ -9,6 +9,7 @@
 import type { Db } from './db.ts';
 import { migrateQwenOnly } from './migrations/v8-qwen-only.ts';
 import { migrateCapabilityPages } from './migrations/v10-capability-pages.ts';
+import { migrateRetireBuiltinSkills } from './migrations/v11-retire-builtin-skills.ts';
 
 export interface Migration {
   version: number;
@@ -349,5 +350,11 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'capability-pages',
     // 工具设置收拢成全局一份、MCP 对外工具挪到服务器级、去掉技能与 MCP 的全局启用开关。见迁移文件开头
     up: migrateCapabilityPages,
+  },
+  {
+    version: 11,
+    name: 'retire-builtin-skills',
+    // 讲故事、学单词、AI 资讯各只归一类能力:删掉没改过的内置技能,MCP 服务器加使用说明。见迁移文件开头
+    up: migrateRetireBuiltinSkills,
   },
 ];

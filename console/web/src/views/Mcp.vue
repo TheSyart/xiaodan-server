@@ -49,20 +49,21 @@ interface Draft {
   name: string;
   url: string;
   headers: string;
+  instructions: string;
   timeout_s: number;
 }
 const draft = ref<Draft | null>(null);
 const saving = ref(false);
 
 function openCreate() {
-  draft.value = { id: null, name: '', url: '', headers: '', timeout_s: 20 };
+  draft.value = { id: null, name: '', url: '', headers: '', instructions: '', timeout_s: 20 };
 }
 
 async function openEdit(server: McpServerView) {
   try {
     const full = await api.get<McpServerView>(`/mcp-servers/${server.id}`);
     draft.value = {
-      id: server.id, name: full.name, url: full.url ?? '', timeout_s: Math.round(full.timeout_ms / 1000),
+      id: server.id, name: full.name, url: full.url ?? '', instructions: full.instructions ?? '', timeout_s: Math.round(full.timeout_ms / 1000),
       // 请求头的值不回显,留着打码后的样子;原样提交表示不修改
       headers: Object.entries(full.headers).map(([k, v]) => `${k}: ${v}`).join('\n'),
     };
@@ -91,7 +92,7 @@ async function save() {
   }
   saving.value = true;
   try {
-    const payload = { name: d.name.trim(), url: d.url.trim(), headers, timeout_ms: Math.round(d.timeout_s * 1000) };
+    const payload = { name: d.name.trim(), url: d.url.trim(), headers, instructions: d.instructions, timeout_ms: Math.round(d.timeout_s * 1000) };
     let id = d.id;
     if (id) await api.put(`/mcp-servers/${id}`, payload);
     else id = (await api.post<{ id: string }>('/mcp-servers', payload)).id;
@@ -190,7 +191,7 @@ async function remove(server: McpServerView) {
 </script>
 
 <template>
-  <PageHeader title="MCP" description="给智能体接外部工具(Model Context Protocol)。这里添加、编辑、删除服务器并选它对外提供哪些工具;哪个智能体用哪些服务器,在「智能体」页。">
+  <PageHeader title="MCP" description="给智能体接外部工具(Model Context Protocol)。这里添加、编辑、删除服务器,选它对外提供哪些工具、写使用说明;哪个智能体用哪些服务器,在「智能体」页。">
     <template #actions>
       <button class="btn" type="button" @click="openImport"><AppIcon name="copy" :size="16" /><span>粘贴 JSON 导入</span></button>
       <button class="btn btn-primary" type="button" @click="openCreate"><AppIcon name="plus" :size="16" /><span>添加服务器</span></button>
@@ -249,6 +250,11 @@ async function remove(server: McpServerView) {
         </div>
       </div>
       <div v-if="server.last_error" class="callout danger" style="margin: 0 0 12px"><AppIcon name="alert" :size="18" /><div class="callout-body">{{ server.last_error }}</div></div>
+      <div class="mcp-notes">
+        <span class="field-label">使用说明</span>
+        <pre v-if="server.instructions" class="code-block" style="white-space: pre-wrap; margin: 6px 0 12px">{{ server.instructions }}</pre>
+        <p v-else class="cell-sub" style="margin: 4px 0 12px">还没有写。写上它的工具各自什么时候用、结果怎么讲,角色开着这个服务器时模型照着做。</p>
+      </div>
       <div v-if="server.tools.length" class="table-wrap">
         <table class="table">
           <thead><tr><th>提供</th><th>工具</th><th>说明</th></tr></thead>
@@ -290,6 +296,11 @@ async function remove(server: McpServerView) {
         <span class="field-label">请求头</span>
         <textarea v-model="draft.headers" class="textarea mono" rows="3" placeholder="Authorization: Bearer xxx"></textarea>
         <span class="field-hint">每行一个「名称: 值」。编辑时已有的值以打码形式显示,原样保留表示不修改。</span>
+      </label>
+      <label class="field">
+        <span class="field-label">使用说明</span>
+        <textarea v-model="draft.instructions" class="textarea" rows="6" maxlength="2000" placeholder="例如:问今天有什么新闻时先用 xxx_daily;播报时挑最重要的三条,每条一两句。"></textarea>
+        <span class="field-hint">角色开着这个服务器时写进提示词:它的工具各自什么时候用、结果怎么讲给用户听。</span>
       </label>
     </form>
     <template #footer>

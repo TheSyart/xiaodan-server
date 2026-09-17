@@ -10,7 +10,8 @@ import SkeletonRows from '../components/SkeletonRows.vue';
 import SwitchToggle from '../components/SwitchToggle.vue';
 import { confirmDialog, toast, toastError } from '../ui';
 
-// 技能:一份写给智能体的「做法说明」,兼容 Agent Skills 的 SKILL.md。
+// 技能:一份你自己写给智能体的「做法说明」,兼容 Agent Skills 的 SKILL.md。
+// 讲故事、学单词、AI 资讯这类能力的做法已经写在对应的工具或 MCP 使用说明里,这里只放你自己的,默认是空的。
 // 智能体平时只看到技能的名字与描述,需要时才读正文,所以装很多技能也不会拖慢每轮对话。
 // 这里增删改查;哪个智能体用哪些技能只在智能体页决定,技能本身没有启用开关。
 
@@ -115,10 +116,7 @@ async function importFile(event: Event) {
 async function remove(skill: Skill) {
   const ok = await confirmDialog({
     title: `删除技能「${skill.name}」?`,
-    message: [
-      skill.agents.length ? `${skill.agents.map((a) => a.name).join('、')}在用它,删除后它们不再有这个技能。` : '',
-      skill.source === 'builtin' ? '这是内置技能,删除后控制塔下次启动会重新创建默认版本。' : '删除后无法恢复。',
-    ].filter(Boolean).join(''),
+    message: `${skill.agents.length ? `${skill.agents.map((a) => a.name).join('、')}在用它,删除后它们不再有这个技能。` : ''}删除后无法恢复。`,
     confirmText: '删除',
     danger: true,
   });
@@ -144,8 +142,8 @@ async function remove(skill: Skill) {
   <div class="callout info">
     <AppIcon name="info" :size="18" />
     <div class="callout-body">
-      智能体平时只看得到技能的名字与描述,用户的请求相关时才读出正文照着做。描述要写清「做什么、什么时候用」。
-      技能包里的脚本不会执行,只读取文本文件。
+      技能是你自己写的做法说明,适合把几个工具串起来办一件事、或者教它某种固定的流程。讲故事、学单词、AI 资讯的做法已经写在对应的工具与 MCP 里,不用再写技能。
+      智能体平时只看得到技能的名字与描述,用户的请求相关时才读出正文照着做;描述要写清「做什么、什么时候用」。技能包里的脚本不会执行,只读取文本文件。
     </div>
   </div>
 
@@ -155,12 +153,11 @@ async function remove(skill: Skill) {
   <div v-if="loading" class="card"><SkeletonRows :rows="3" /></div>
 
   <section v-else class="card">
-    <EmptyState v-if="skills.length === 0" title="还没有技能" />
+    <EmptyState v-if="skills.length === 0" title="还没有技能" description="点右上角「导入或新建」写一个。" />
     <div v-for="skill in skills" :key="skill.name" class="model-row" style="flex-wrap: wrap">
       <div class="model-info">
         <div class="model-name">
           <span class="mono">{{ skill.name }}</span>
-          <span v-if="skill.source === 'builtin'" class="tag sky">内置</span>
           <span v-if="skill.files.length" class="tag">{{ skill.files.length }} 个附带文件</span>
         </div>
         <div class="cell-sub">{{ skill.description }}</div>
