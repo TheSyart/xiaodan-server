@@ -371,3 +371,142 @@ class Keepalive:
     def tick(self):
         self.count += 1
         return self.count % self.every == 0
+
+
+# ---------------------------------------------------------------- 设备字幕与故事进度
+
+# 设备屏幕一行约 11 个汉字宽。显示单位:ASCII 算 0.5,其余(汉字、全角标点)算 1。
+# 一条字幕不超过 40 个单位(设备两页),UTF-8 不超过 150 字节(设备字幕缓冲 192 字节,留出余量)。
+SUBTITLE_UNITS = 40
+SUBTITLE_BYTES = 150
+# 故事进度片段:sentence_start 的文字以这个控制字符开头,新固件把它当作卡片上的正文进度,不当字幕;
+# 紧跟 CUE_PARAGRAPH 表示新起一段。上游 send_tts_message 会去掉 \n 和表情,但保留这两个字符。
+CUE_MARK = "\x1e"
+CUE_PARAGRAPH = "\x1f"
+
+_SENTENCE_BREAK = "。！？!?；;…"
+_SOFT_BREAK = "，,、：: "
+# 这些字符不该出现在一条字幕的开头,跟前一条走
+_NO_LEADING = "，。！？、；：”’）》」』…,.!?;:)"
+
+
+def display_units(text):
+    return sum(0.5 if ord(ch) < 0x80 else 1.0 for ch in text or "")
+
+
+def _best_cut(part):
+    """part 已经放不下下一个字:在它里面找最合适的切点(切点之后的字留给下一条)。返回切点下标。"""
+    # 句末标点前面有几个字就切;逗号一类要求前半截至少占三分之一,免得切出很碎的一条
+    for charset, minimum in ((_SENTENCE_BREAK, 3), (_SOFT_BREAK, len(part) // 3)):
+        cut = max(part.rfind(ch) for ch in charset)
+        if cut >= minimum:
+            cut += 1
+            while cut < len(part) and part[cut] in _NO_LEADING:
+                cut += 1
+            return cut
+    # 没有标点:不从英文单词中间切
+    i = len(part)
+    while i > 0 and part[i - 1].isascii() and part[i - 1].isalnum():
+        i -= 1
+    return i if i > 0 else len(part)
+
+
+def subtitle_parts(text, units=SUBTITLE_UNITS, max_bytes=SUBTITLE_BYTES):
+    """把一句要显示的字幕切成几条,每条不超过 units 个显示单位、max_bytes 个 UTF-8 字节。
+    优先在句末标点切,其次逗号顿号冒号空格,不切开英文单词;行首标点并到前一条。"""
+    text = (text or "").strip()
+    parts = []
+    current = ""
+    for ch in text:
+        candidate = current + ch
+        if current and (display_units(candidate) > units or len(candidate.encode("utf-8")) > max_bytes):
+            if ch in _NO_LEADING and len(candidate.encode("utf-8")) <= max_bytes + 8:
+                # 句末标点不单独起一条
+                current = candidate
+                continue
+            cut = _best_cut(current)
+            head, tail = current[:cut], current[cut:]
+            if head.strip():
+                parts.append(head.strip())
+            current = tail + ch
+        else:
+            current = candidate
+    if current.strip():
+        parts.append(current.strip())
+    return parts
+
+
+class SpeechRate:
+    """估计合成语速(显示单位/秒),用来决定一句长字幕的后几条什么时候发。按实际合成时长做指数平均。"""
+
+    def __init__(self, rate=1.0, alpha=0.3):
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            rate = 1.0
+        rate = min(2.0, max(0.5, rate if rate == rate else 1.0))
+        self.units_per_s = 4.4 * rate
+        self.alpha = alpha
+
+    def ms_for(self, units):
+        return units / self.units_per_s * 1000.0
+
+    def update(self, units, ms):
+        if units < 4 or ms < 500:
+            return
+        observed = min(12.0, max(2.0, units / (ms / 1000.0)))
+        self.units_per_s = (1 - self.alpha) * self.units_per_s + self.alpha * observed
+
+
+def part_offsets_ms(parts, rate):
+    """每条字幕相对这句开头的出现时间:按它前面各条的显示单位折算。"""
+    offsets = []
+    before = 0.0
+    for part in parts:
+        offsets.append(rate.ms_for(before))
+        before += display_units(part)
+    return offsets
+
+
+class CueSchedule:
+    """故事音频播放时按已播帧数吐出到点的正文片段(给新固件的卡片);没有片段可发时照常保活。
+
+    cues:[{"ms": 起始毫秒, "x": 文字, "p": 是否新起一段}],已按 ms 升序;
+    marker 为 None 时退回老行为:只按 keepalive_frames 发标题 title。
+    """
+
+    def __init__(self, cues=None, frame_ms=60, keepalive_frames=333, marker=CUE_MARK, title="正在播放"):
+        self.cues = list(cues or [])
+        self.frame_ms = frame_ms
+        self.keepalive_frames = max(1, int(keepalive_frames))
+        self.marker = marker
+        self.title = title
+        self.frames = 0
+        self.index = 0
+        self.last_sent = 0
+
+    def _format(self, cue):
+        return f"{self.marker}{CUE_PARAGRAPH if cue.get('p') else ''}{cue['x']}"
+
+    def _due(self, now_ms):
+        out = []
+        while self.marker is not None and self.index < len(self.cues) and self.cues[self.index]["ms"] <= now_ms:
+            out.append(self._format(self.cues[self.index]))
+            self.index += 1
+        return out
+
+    def initial(self):
+        out = self._due(0)
+        if out:
+            self.last_sent = 0
+        return out
+
+    def on_frame(self):
+        self.frames += 1
+        out = self._due(self.frames * self.frame_ms)
+        if out:
+            self.last_sent = self.frames
+        elif self.frames - self.last_sent >= self.keepalive_frames:
+            out = [self.marker if self.marker is not None else self.title]
+            self.last_sent = self.frames
+        return out

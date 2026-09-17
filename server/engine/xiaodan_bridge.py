@@ -1,9 +1,10 @@
 """设备桥:控制塔经引擎内网 HTTP 端口操作设备连接。镜像里复制为 core/xiaodan_bridge.py。
 
-Dockerfile 在上游三处打补丁接入本模块(找不到原文就让构建失败):
+Dockerfile 在上游四处打补丁接入本模块(找不到原文就让构建失败):
   - core/connection.py handle_connection:拿到 device-id 之后 register(self);
   - core/connection.py close():开头 unregister(self);
-  - core/http_server.py:建 AppRunner 之前 add_bridge_routes(app, config)。
+  - core/http_server.py:建 AppRunner 之前 add_bridge_routes(app, config);
+  - core/handle/textHandle.py:消息注册表建好后 install_text_handler(message_registry),接收设备上行的 xiaodan 消息。
 
 所有接口都要 Authorization: Bearer <manager-api.secret>(与控制塔共用那串密钥);端口只在 compose 内网里可达。
 接口处理函数跑在引擎唯一的事件循环上,和所有设备的音频收发共用,所以这里不能有阻塞调用。
@@ -137,6 +138,12 @@ async def fetch_media_async(url, ext, secret, timeout=30.0):
 
 
 async def send_device_message(conn, message):
+    if isinstance(message, dict) and message.get("type") == "xiaodan_deck":
+        # 单词卡组:读音文字留在引擎,设备点「读」时只报第几个词;发给设备的消息去掉这个字段
+        message = dict(message)
+        say = message.pop("say", None)
+        if not DECKS.put(getattr(conn, "device_id", None), message.get("id"), message.get("i"), message.get("n"), say):
+            logger.bind(tag=TAG).warning(f"单词卡组消息不合法: id={message.get('id')} i={message.get('i')} n={message.get('n')}")
     text = core.clamp_device_message(message, conn.session_id)
     if text is None:
         raise ValueError("设备消息不是带 type 的对象,或超过 4096 字节")
@@ -161,6 +168,123 @@ def _announce_sequence(conn, sentence_id, text, chime_path, title):
         tts.tts_one_sentence(conn, ContentType.TEXT, content_detail=text, sentence_id=sentence_id)
     tts.tts_text_queue.put(TTSMessageDTO(sentence_id=sentence_id, sentence_type=SentenceType.LAST, content_type=ContentType.ACTION))
     return sentence_id
+
+
+async def _speak_now(conn, text, chime_path=None, title=None):
+    """不经模型直接说一段话。调用方已经判断过设备空闲,从判断到这里不能再有别的 await。
+
+    先占住会话(新的 sentence_id + 讲话中),其他播报与判断立刻看到忙;
+    再发 start:上游 sendAudioMessage 只在句末发 stop 不发 start,设备空闲时要先收到 start 才会进入播放;
+    最后入队,保证 start 一定先于音频帧到达设备。
+    """
+    from core.handle.sendAudioHandle import send_tts_message
+
+    sentence_id = uuid.uuid4().hex
+    conn.client_abort = False
+    conn.sentence_id = sentence_id
+    conn.client_is_speaking = True
+    conn.last_activity_time = time.time() * 1000
+    await send_tts_message(conn, "start")
+    _announce_sequence(conn, sentence_id, text, chime_path, title)
+    return sentence_id
+
+
+# ---------------------------------------------------------------- 设备发上来的 xiaodan 消息(小单协议 3 级)
+
+# 单词卡组的读音文字:控制塔经 xiaodan_agent 发卡组时存进来,设备点「读」时按 (MAC, 卡组 id, 第几个词) 取
+DECKS = core.DeckStore()
+DEVICE_RATE = core.RateLimit(0.6)
+DECK_TURN_WAIT_S = 3.0
+
+
+async def _deck_busy(conn, deck_id, why):
+    try:
+        await send_device_message(conn, {"type": "xiaodan", "cmd": "deck_busy", "id": deck_id, "why": why})
+    except Exception as e:
+        logger.bind(tag=TAG).warning(f"回复设备 deck_busy 失败: {e}")
+
+
+async def handle_device_message(conn, msg):
+    """设备上行的 {"type":"xiaodan","cmd":...}:读卡组里的词、卡组保活与退出、像素画显示结果。"""
+    if not _verified(conn) or core.xiaodan_level(getattr(conn, "features", None)) < 3:
+        logger.bind(tag=TAG).info("忽略设备上行的 xiaodan 消息:设备还没核验或固件不支持")
+        return
+    command = core.parse_device_command(msg)
+    if command is None:
+        logger.bind(tag=TAG).warning(f"设备上行的 xiaodan 消息不合法: {str(msg)[:120]}")
+        return
+    mac = core.normalize_mac(getattr(conn, "device_id", None))
+    cmd = command["cmd"]
+    if cmd == "deck_at":
+        # 孩子正在翻卡片:算作有动静,引擎不要因为「长时间没说话」断开
+        conn.last_activity_time = time.time() * 1000
+        return
+    if cmd == "deck_exit":
+        DECKS.drop(mac, command["id"] or None)
+        logger.bind(tag=TAG).info(f"{mac} 退出单词卡组 {command['id']} {command['why']}")
+        return
+    if cmd == "img":
+        log = logger.bind(tag=TAG).info if command["ok"] else logger.bind(tag=TAG).warning
+        log(f"{mac} 像素画 {command['id']} {'已显示 ' + str(command['w']) + '×' + str(command['w']) if command['ok'] else '没能显示(设备内存不足)'}")
+        return
+
+    # deck_say
+    deck_id = command["id"]
+    if not DEVICE_RATE.allow((mac, "deck_say")):
+        await _deck_busy(conn, deck_id, "fast")
+        return
+    say = DECKS.get(mac, deck_id, command["i"])
+    if not say:
+        await _deck_busy(conn, deck_id, "gone")
+        return
+    # 设备点「读」前已经发过 abort;控制塔这一轮要一小会儿才收尾,收尾时的 stop 不能打断新读的词
+    waited = 0.0
+    while getattr(conn, "_xd_turn_active", False) and waited < DECK_TURN_WAIT_S:
+        await asyncio.sleep(0.05)
+        waited += 0.05
+    if getattr(conn, "_xd_turn_active", False):
+        await _deck_busy(conn, deck_id, "turn")
+        return
+    reason = core.not_ready_reason(conn)
+    if reason:
+        await _deck_busy(conn, deck_id, reason)
+        return
+    busy = core.busy_reason(conn)
+    if busy in ("recognizing", "listening"):
+        await _deck_busy(conn, deck_id, busy)
+        return
+    if busy == "speaking":
+        # 上一个词还没读完:清掉再读新的
+        conn.client_abort = True
+        conn.clear_queues()
+        await asyncio.sleep(0.1)
+        busy = core.busy_reason(conn)
+        if busy in ("recognizing", "listening") or getattr(conn, "_xd_turn_active", False):
+            await _deck_busy(conn, deck_id, busy or "turn")
+            return
+    await _speak_now(conn, say)
+    logger.bind(tag=TAG).info(f"{mac} 读卡组 {deck_id} 第 {command['i'] + 1} 个词: {say[:40]}")
+
+
+class _XiaodanMessageType:
+    value = "xiaodan"
+
+
+class XiaodanTextMessageHandler:
+    """注册进上游 textHandle 的消息注册表(Dockerfile 补丁):注册表只用 message_type.value 作键。"""
+
+    message_type = _XiaodanMessageType()
+
+    async def handle(self, conn, msg_json):
+        try:
+            await handle_device_message(conn, msg_json)
+        except Exception as e:  # 设备上行消息出错不能影响连接
+            logger.bind(tag=TAG).error(f"处理设备上行 xiaodan 消息出错: {type(e).__name__}: {e}")
+
+
+def install_text_handler(registry):
+    registry.register_handler(XiaodanTextMessageHandler())
+    logger.bind(tag=TAG).info("已注册设备上行 xiaodan 消息处理")
 
 
 # ---------------------------------------------------------------- 路由
@@ -256,8 +380,6 @@ def add_bridge_routes(app, config):
         })
 
     async def announce(request):
-        from core.handle.sendAudioHandle import send_tts_message
-
         data = await body_json(request)
         conn = REGISTRY.by_mac(request.match_info["mac"])
         if conn is None:
@@ -281,16 +403,7 @@ def add_bridge_routes(app, config):
         reason = core.busy_reason(conn)
         if reason:
             return web.json_response({"error": "busy", "reason": reason}, status=409)
-        # 先占住会话(新的 sentence_id + 讲话中),其他播报与判断立刻看到忙;
-        # 再发 start:上游 sendAudioMessage 只在句末发 stop 不发 start,设备空闲时要先收到 start 才会进入播放;
-        # 最后入队,保证 start 一定先于音频帧到达设备。
-        sentence_id = uuid.uuid4().hex
-        conn.client_abort = False
-        conn.sentence_id = sentence_id
-        conn.client_is_speaking = True
-        conn.last_activity_time = time.time() * 1000
-        await send_tts_message(conn, "start")
-        _announce_sequence(conn, sentence_id, text, chime_path, title)
+        sentence_id = await _speak_now(conn, text, chime_path, title)
         for message in data.get("device_msgs") or []:
             try:
                 await send_device_message(conn, message)

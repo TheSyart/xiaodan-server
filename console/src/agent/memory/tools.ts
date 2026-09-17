@@ -19,6 +19,7 @@ const NO_DEVICE = '现在没有连着设备(网页试聊),记忆不会保存。�
 CONSOLE_TOOLS.set(MEMORY_PLUGIN, () => {
   const rememberTool: AgentTool = {
     name: 'remember',
+    act: 'memory',
     label: '记住',
     description:
       '把用户主动告诉你的、关于他自己的稳定信息记下来,以后聊天还记得:名字或昵称、年龄、生日、喜欢和不喜欢的东西、家人和宠物的称呼、正在学的东西。' +
@@ -51,6 +52,7 @@ CONSOLE_TOOLS.set(MEMORY_PLUGIN, () => {
 
   const forgetTool: AgentTool = {
     name: 'forget',
+    act: 'memory',
     label: '忘掉',
     description: '用户要你忘掉某件关于他的事,或者说之前记错了时调用。',
     parameters: {
@@ -69,6 +71,7 @@ CONSOLE_TOOLS.set(MEMORY_PLUGIN, () => {
 
   const listTool: AgentTool = {
     name: 'list_memories',
+    act: 'memory',
     label: '看看记得什么',
     description: '用户问「你记得我什么」「你都知道我哪些事」时调用,列出记着的事。',
     parameters: { type: 'object', properties: {} },

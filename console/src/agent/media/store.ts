@@ -24,6 +24,8 @@ export interface MediaRow {
   builtin: number;
   enabled: number;
   updated_at: string;
+  /** 故事音频每块的字数与毫秒数(JSON);空串表示还没测过,播放时按整段时长现算 */
+  timing_json: string;
 }
 
 export function list(json: string): string[] {

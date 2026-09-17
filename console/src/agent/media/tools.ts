@@ -3,10 +3,13 @@
 // 有音频的条目:发 media 事件,引擎把文件排进合成队列,跟在已经说出口的引导语后面播;这一轮到此结束
 // (再说话会排到整段音频之后)。故事还没有音频时,把正文交给模型,让它自己用语音讲出来。
 
-import { one } from '../../db.ts';
+import { existsSync, readFileSync } from 'node:fs';
+import { one, run } from '../../db.ts';
 import { CONSOLE_TOOLS } from '../registry.ts';
-import type { AgentTool, ToolContext, ToolResult } from '../types.ts';
-import { audioUrl, extensionOf, itemsOfKind, list, search, type MediaRow } from './store.ts';
+import { xiaodanVersion, type AgentTool, type MediaCue, type ToolContext, type ToolResult } from '../types.ts';
+import { buildCues, cps10, parseTiming, type ChunkTiming } from './cues.ts';
+import { mp3DurationMs } from './mp3.ts';
+import { audioUrl, extensionOf, itemsOfKind, list, mediaPath, search, type MediaRow } from './store.ts';
 
 export const STORY_PLUGIN = 'stories';
 export const MUSIC_PLUGIN = 'music';
@@ -15,8 +18,57 @@ function turnUrl(ctx: ToolContext): string {
   return one<{ value: string }>(ctx.deps.conn, "SELECT value FROM settings WHERE key = 'agent.turn_url'")?.value || 'http://console:8002/xiaodan/agent/turn';
 }
 
+/** 按 UTF-8 字节截断,不切坏字符 */
+export function clipBytes(text: string, bytes: number): string {
+  let out = '';
+  for (const ch of text.replace(/[\u0000-\u001f]+/gu, ' ').trim()) {
+    if (Buffer.byteLength(out + ch) > bytes) break;
+    out += ch;
+  }
+  return out;
+}
+
+/** 故事音频的时长记录;还没测过(老音频、手动上传)时读文件数帧现算整段时长并存起来 */
+function storyTiming(ctx: ToolContext, row: MediaRow): ChunkTiming[] {
+  const saved = parseTiming(row.timing_json);
+  if (saved.length) return saved;
+  const path = mediaPath(ctx.deps.dataDir(), row);
+  if (extensionOf(row.file) !== 'mp3' || !existsSync(path)) return [];
+  const ms = mp3DurationMs(readFileSync(path));
+  if (ms <= 0) return [];
+  const timing = [{ chars: row.body.replace(/\s/gu, '').length, ms }];
+  run(ctx.deps.conn, 'UPDATE media_items SET timing_json = ? WHERE id = ?', JSON.stringify(timing), row.id);
+  return timing;
+}
+
+/**
+ * 故事/音乐卡片(小单协议 3 级):{"cmd":"media","k":"story|music","t":标题,"s":简介,"a":许可·署名,"cps":打字速度,"hold_s":10}。
+ * 故事的正文不在这条消息里,由引擎按朗读进度逐条发(cues)。
+ */
+export function mediaCard(row: MediaRow, timing: readonly ChunkTiming[]): Record<string, unknown> {
+  const card: Record<string, unknown> = { type: 'xiaodan', cmd: 'media', k: row.kind, t: clipBytes(row.title, 48), hold_s: 10 };
+  const summary = clipBytes(row.summary, 60);
+  if (summary) card['s'] = summary;
+  if (row.kind === 'music') {
+    const credit = clipBytes([row.license, row.attribution].filter(Boolean).join(' · '), 60);
+    if (credit) card['a'] = credit;
+  } else {
+    card['cps'] = cps10(row.body, timing);
+  }
+  return card;
+}
+
 function play(ctx: ToolContext, row: MediaRow): ToolResult {
-  ctx.sink.media({ url: audioUrl(turnUrl(ctx), row), ext: extensionOf(row.file) || 'mp3', title: row.title.slice(0, 20) });
+  let cues: MediaCue[] = [];
+  if (xiaodanVersion(ctx.device) >= 3) {
+    const timing = row.kind === 'story' ? storyTiming(ctx, row) : [];
+    if (row.kind === 'story') cues = buildCues(row.body, timing);
+    ctx.sink.device(mediaCard(row, timing));
+  }
+  ctx.sink.media({
+    url: audioUrl(turnUrl(ctx), row), ext: extensionOf(row.file) || 'mp3', title: row.title.slice(0, 20),
+    ...(cues.length ? { cues } : {}),
+  });
   return { ok: true, endTurn: true, content: `开始播放《${row.title}》。` };
 }
 
@@ -25,6 +77,7 @@ const minutes = (seconds: number) => (seconds ? `约 ${Math.max(1, Math.round(se
 CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
   const listStories: AgentTool = {
     name: 'list_stories',
+    act: 'story',
     label: '故事库',
     description: '查看故事库里有哪些故事,可以按关键词(主题、角色、标签)筛选。用户想听故事但没说哪个时先调用。',
     parameters: { type: 'object', properties: { keyword: { type: 'string', description: '关键词,例如 小熊、睡前、勇气;不传列出全部' } }, required: [] },
@@ -42,6 +95,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
   };
   const playStory: AgentTool = {
     name: 'play_story',
+    act: 'story',
     label: '讲故事',
     description: '播放故事库里的一个故事。调用前先用一句话告诉用户要讲哪个故事;开始播放后这一轮不要再说话。',
     parameters: {
@@ -69,6 +123,7 @@ CONSOLE_TOOLS.set(STORY_PLUGIN, () => {
 CONSOLE_TOOLS.set(MUSIC_PLUGIN, () => {
   const listMusic: AgentTool = {
     name: 'list_music',
+    act: 'music',
     label: '曲库',
     description: '查看曲库里有哪些音乐,可以按关键词(曲名、作曲家、摇篮曲、钢琴、欢快等)筛选。',
     parameters: { type: 'object', properties: { keyword: { type: 'string', description: '关键词;不传列出全部' } }, required: [] },
@@ -86,6 +141,7 @@ CONSOLE_TOOLS.set(MUSIC_PLUGIN, () => {
   };
   const playMusic: AgentTool = {
     name: 'play_music',
+    act: 'music',
     label: '放音乐',
     description: '播放曲库里的音乐。用户说放首歌、来点音乐、放《小星星》、放点安静的音乐时调用;没指定就挑合适的或传 random。' +
       '曲库只有纯音乐(古典与童谣旋律),没有流行歌曲。调用前先用一句话告诉用户要放什么;开始播放后这一轮不要再说话。',

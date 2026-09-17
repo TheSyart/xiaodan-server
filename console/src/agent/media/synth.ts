@@ -9,6 +9,7 @@ import { synthesize } from '../../voice/dashscope.ts';
 import { composeInstruction, readProfile } from '../../voice/profile.ts';
 import { resolveVoice, type ResolvedVoice } from '../../voice/store.ts';
 import type { AgentDeps } from '../types.ts';
+import { mp3DurationMs } from './mp3.ts';
 import { mediaById, mediaDir } from './store.ts';
 
 const CHUNK_CHARS = 400;
@@ -65,21 +66,26 @@ export async function synthesizeStory(deps: AgentDeps, id: string): Promise<void
   run(deps.conn, "UPDATE media_items SET audio_status = 'pending', audio_error = '' WHERE id = ?", id);
   try {
     const parts: Buffer[] = [];
+    // 每块的字数与实测时长:讲故事时据此把原文按朗读进度显示在设备的故事卡片上(见 cues.ts)
+    const timing: { chars: number; ms: number }[] = [];
     for (const chunk of storyChunks(story.body)) {
       const { audio } = await synthesize(deps.fetch, model.config, {
         text: chunk, voice: voice.voice, format: 'mp3', sampleRate: 24000, volume: profile.volume,
         rate: profile.rate === 1 ? 0.95 : profile.rate, pitch: profile.pitch, instruction,
       });
       parts.push(audio);
+      timing.push({ chars: chunk.replace(/\n/gu, '').length, ms: mp3DurationMs(audio) });
     }
     const dir = join(mediaDir(deps.dataDir()), 'stories');
     mkdirSync(dir, { recursive: true });
     const file = `stories/${id}.mp3`;
     writeFileSync(join(mediaDir(deps.dataDir()), file), Buffer.concat(parts));
-    // 按每秒约 4 个字估一个时长(mp3 未必带时长信息,这里只作展示)
-    const seconds = Math.round(story.body.replace(/\s/gu, '').length / 4);
-    run(deps.conn, "UPDATE media_items SET file = ?, audio_status = 'ready', audio_error = '', duration_s = ?, updated_at = datetime('now') WHERE id = ?",
-      file, seconds, id);
+    // 时长按帧数实测;数不出来(不是标准 mp3)时按每秒约 4 个字估
+    const measured = timing.reduce((sum, t) => sum + t.ms, 0);
+    const seconds = measured > 0 ? Math.round(measured / 1000) : Math.round(story.body.replace(/\s/gu, '').length / 4);
+    run(deps.conn,
+      "UPDATE media_items SET file = ?, audio_status = 'ready', audio_error = '', duration_s = ?, timing_json = ?, updated_at = datetime('now') WHERE id = ?",
+      file, seconds, measured > 0 ? JSON.stringify(timing) : '', id);
     deps.log?.(`[media] 故事「${story.title}」音频已生成(${parts.length} 段)`);
   } catch (error) {
     run(deps.conn, "UPDATE media_items SET audio_status = 'failed', audio_error = ? WHERE id = ?", (error as Error).message.slice(0, 300), id);

@@ -10,6 +10,7 @@ export const SEARCH_PLUGIN = 'search';
 CONSOLE_TOOLS.set(SEARCH_PLUGIN, (ctx) => {
   const tool: AgentTool = {
     name: 'web_search',
+    act: 'search',
     label: '联网搜索',
     description: '联网搜索最新的信息,例如新闻、赛事比分、股价、上映的电影、刚发布的产品、你不确定的事实。问题需要实时或最新信息时调用。',
     parameters: {

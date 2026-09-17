@@ -189,7 +189,7 @@ export function agentAdminRoutes(deps: AgentDeps): Hono {
     const agent = loadAgent(deps, input.agent_id);
     if (!agent) return c.json({ error: '智能体不存在' }, 404);
 
-    let context: DeviceContext = { mac: null, sessionId: null, turnId: null, clientIp: null, features: { xiaodan: 2 } };
+    let context: DeviceContext = { mac: null, sessionId: null, turnId: null, clientIp: null, features: { xiaodan: 3 } };
     let borrowed = false;
     const mac = input.device_mac ? canonicalMac(input.device_mac) : null;
     if (mac) {
@@ -208,7 +208,7 @@ export function agentAdminRoutes(deps: AgentDeps): Hono {
       send({ t: 'meta', device: borrowed ? mac : null });
       const forward = (msg: Record<string, unknown>) => {
         // 借用设备时把画面类消息也推过去,方便在真机上看卡片;表情与工具提示不推,免得打断设备当前状态
-        if (borrowed && mac && msg['type'] === 'xiaodan') void deps.bridge.send(mac, [msg]).catch(() => {});
+        if (borrowed && mac && (msg['type'] === 'xiaodan' || msg['type'] === 'xiaodan_deck')) void deps.bridge.send(mac, [msg]).catch(() => {});
       };
       const sink: TurnSink = {
         text: (v) => send({ t: 'text', v }),

@@ -147,7 +147,7 @@ export function mediaAdminRoutes(deps: AgentDeps): Hono {
     if (existing?.file && existing.file !== file && existsSync(mediaPath(deps.dataDir(), existing))) unlinkSync(mediaPath(deps.dataDir(), existing));
     writeFileSync(join(mediaDir(deps.dataDir()), file), bytes);
     if (existing) {
-      run(conn, "UPDATE media_items SET file = ?, audio_status = 'ready', audio_error = '', license = CASE WHEN ? = '' THEN license ELSE ? END, attribution = CASE WHEN ? = '' THEN attribution ELSE ? END, updated_at = datetime('now') WHERE id = ?",
+      run(conn, "UPDATE media_items SET file = ?, audio_status = 'ready', audio_error = '', timing_json = '', license = CASE WHEN ? = '' THEN license ELSE ? END, attribution = CASE WHEN ? = '' THEN attribution ELSE ? END, updated_at = datetime('now') WHERE id = ?",
         file, q.license, q.license, q.attribution, q.attribution, q.id);
     } else {
       run(conn, "INSERT INTO media_items (id, kind, title, file, audio_status, license, attribution) VALUES (?, ?, ?, ?, 'ready', ?, ?)",

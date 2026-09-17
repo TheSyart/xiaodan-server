@@ -201,3 +201,153 @@ def clamp_device_message(message, session_id):
 
 FALLBACK_SPEECH = "😔抱歉,我这边出了点问题,稍后再试试吧。"
 THINKING_KEEPALIVE_S = 25
+
+
+# ---------------------------------------------------------------- 小单协议 3 级:故事进度、单词卡组、设备上行命令
+
+
+def xiaodan_level(features):
+    """设备 hello 里 features.xiaodan:true 记作 1,数字原样,其余 0。"""
+    value = (features or {}).get("xiaodan") if isinstance(features, dict) else None
+    if value is True:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+CUE_MAX_COUNT = 600
+CUE_MAX_BYTES = 150
+
+
+def validate_cues(value):
+    """控制塔随故事音频下发的正文进度片段。合法返回规整后的列表,否则 None(整组丢弃,不播进度)。"""
+    if not isinstance(value, list) or not value or len(value) > CUE_MAX_COUNT:
+        return None
+    out = []
+    last = 0
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        ms = item.get("ms")
+        text = item.get("x")
+        if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0 or ms < last:
+            return None
+        if not isinstance(text, str) or not text or len(text.encode("utf-8")) > CUE_MAX_BYTES:
+            return None
+        if any(ch in "\x1e\x1f\n\r" for ch in text):
+            return None
+        out.append({"ms": ms, "x": text, "p": bool(item.get("p"))})
+        last = ms
+    return out
+
+
+class DeckStore:
+    """单词卡组要读的文字,按 (MAC, 卡组 id) 存在引擎里:设备只回报第几个词,不必把整句读音文字存在设备上。"""
+
+    def __init__(self, ttl_s=30 * 60, max_decks=64, clock=time.monotonic):
+        self._lock = threading.Lock()
+        self._decks = {}
+        self.ttl_s = ttl_s
+        self.max_decks = max_decks
+        self._clock = clock
+
+    def _expire(self, now):
+        for key in [k for k, v in self._decks.items() if now - v["at"] > self.ttl_s]:
+            del self._decks[key]
+
+    def put(self, mac, deck_id, index, count, say):
+        mac = normalize_mac(mac)
+        if not mac or not isinstance(deck_id, int) or not isinstance(index, int) or not isinstance(count, int):
+            return False
+        if not (1 <= deck_id <= 65535 and 1 <= count <= 10 and 0 <= index < count):
+            return False
+        if not isinstance(say, str) or not say.strip():
+            return False
+        now = self._clock()
+        with self._lock:
+            self._expire(now)
+            key = (mac, deck_id)
+            deck = self._decks.get(key)
+            if deck is None or deck["count"] != count:
+                deck = {"count": count, "say": [None] * count, "at": now}
+                self._decks[key] = deck
+            deck["say"][index] = say.strip()[:300]
+            deck["at"] = now
+            while len(self._decks) > self.max_decks:
+                oldest = min(self._decks, key=lambda k: self._decks[k]["at"])
+                del self._decks[oldest]
+        return True
+
+    def get(self, mac, deck_id, index):
+        mac = normalize_mac(mac)
+        now = self._clock()
+        with self._lock:
+            self._expire(now)
+            deck = self._decks.get((mac, deck_id))
+            if deck is None or not isinstance(index, int) or not 0 <= index < deck["count"]:
+                return None
+            deck["at"] = now
+            return deck["say"][index]
+
+    def drop(self, mac, deck_id=None):
+        mac = normalize_mac(mac)
+        with self._lock:
+            for key in [k for k in self._decks if k[0] == mac and (deck_id is None or k[1] == deck_id)]:
+                del self._decks[key]
+
+    def __len__(self):
+        with self._lock:
+            return len(self._decks)
+
+
+def _int_in(value, low, high):
+    return not isinstance(value, bool) and isinstance(value, int) and low <= value <= high
+
+
+def parse_device_command(msg):
+    """设备发上来的 {"type":"xiaodan","cmd":...}。只认下面几种,字段不合法返回 None。
+      deck_say  {"id":1..65535,"i":0..9}   读卡组里第 i 个词
+      deck_at   {"id","i"}                  正在看第 i 个词(保活)
+      deck_exit {"id":0..65535}             退出卡组
+      img       {"id":0..65535,"ok":bool,"w":0..128}  像素画显示结果
+    """
+    if not isinstance(msg, dict) or msg.get("type") != "xiaodan":
+        return None
+    cmd = msg.get("cmd")
+    if cmd in ("deck_say", "deck_at"):
+        if _int_in(msg.get("id"), 1, 65535) and _int_in(msg.get("i"), 0, 9):
+            return {"cmd": cmd, "id": msg["id"], "i": msg["i"]}
+        return None
+    if cmd == "deck_exit":
+        if _int_in(msg.get("id"), 0, 65535):
+            why = msg.get("why")
+            return {"cmd": cmd, "id": msg["id"], "why": why[:16] if isinstance(why, str) else ""}
+        return None
+    if cmd == "img":
+        if _int_in(msg.get("id"), 0, 65535) and isinstance(msg.get("ok"), bool) and _int_in(msg.get("w", 0), 0, 128):
+            return {"cmd": cmd, "id": msg["id"], "ok": msg["ok"], "w": msg.get("w", 0)}
+        return None
+    return None
+
+
+class RateLimit:
+    """同一个键两次放行至少间隔 interval_s 秒(设备连点确定键时不让百炼合成排成长队)。"""
+
+    def __init__(self, interval_s=0.6, clock=time.monotonic):
+        self.interval_s = interval_s
+        self._clock = clock
+        self._last = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key):
+        now = self._clock()
+        with self._lock:
+            last = self._last.get(key)
+            if last is not None and now - last < self.interval_s:
+                return False
+            self._last[key] = now
+            if len(self._last) > 256:
+                for stale in [k for k, t in self._last.items() if now - t > 60]:
+                    del self._last[stale]
+            return True

@@ -209,6 +209,7 @@ jobs:
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.register(self)' core/connection.py
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.unregister(self)' core/connection.py
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.add_bridge_routes' core/http_server.py
+          docker exec xiaodan-engine-smoke grep -q '_xiaodan_bridge.install_text_handler(message_registry)' core/handle/textHandle.py
           # 运行中的引擎确实挂上了设备桥,而且控制塔按默认地址 http://engine:8003 够得着;不带密钥必须 401,带上 200
           docker exec xiaodan-console-smoke node -e "
             const s = process.argv[1];

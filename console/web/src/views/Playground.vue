@@ -161,7 +161,10 @@ async function send(text = input.value) {
           live.device.push(event['msg'] as Record<string, unknown>);
           break;
         case 'media':
-          live.media.push({ title: String(event['title'] ?? ''), url: String(event['url'] ?? '') });
+          live.media.push({
+            title: `${String(event['title'] ?? '')}${Array.isArray(event['cues']) ? `(正文进度 ${event['cues'].length} 段)` : ''}`,
+            url: String(event['url'] ?? ''),
+          });
           break;
         case 'summary':
           live.summary = event as unknown as Entry['summary'];
@@ -200,10 +203,23 @@ async function reset() {
   }
 }
 
+const ACT_LABELS: Record<string, string> = {
+  paint: '画画', story: '讲故事', music: '放音乐', learn: '学单词', weather: '查天气', calendar: '看日历',
+  search: '查资料', remind: '提醒', memory: '记事', role: '换角色', think: '想一想',
+};
 const deviceText = (msg: Record<string, unknown>) => {
   if (msg['type'] === 'stt') return `提示:${String(msg['text'] ?? '')}`;
   if (msg['type'] === 'llm') return `表情:${String(msg['text'] ?? '')} ${String(msg['emotion'] ?? '')}`;
-  if (msg['cmd'] === 'hint') return `提示:${String(msg['text'] ?? '')}`;
+  if (msg['cmd'] === 'hint') {
+    const act = typeof msg['act'] === 'string' ? ` · 动画:${ACT_LABELS[msg['act']] ?? msg['act']}` : '';
+    return msg['text'] ? `提示:${String(msg['text'])}${act}` : '收起提示';
+  }
+  if (msg['cmd'] === 'media') {
+    return `${msg['k'] === 'music' ? '音乐' : '故事'}卡片:《${String(msg['t'] ?? '')}》${msg['s'] ? ` ${String(msg['s'])}` : ''}${msg['a'] ? ` · ${String(msg['a'])}` : ''}`;
+  }
+  if (msg['type'] === 'xiaodan_deck') {
+    return `单词卡 ${Number(msg['i']) + 1}/${String(msg['n'])}:${String(msg['w'] ?? '')} ${String(msg['m'] ?? '')}${msg['say'] ? ` · 读「${String(msg['say'])}」` : ''}`;
+  }
   return JSON.stringify(msg);
 };
 const shortJson = (value: unknown) => {

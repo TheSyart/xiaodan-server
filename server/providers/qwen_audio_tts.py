@@ -11,7 +11,11 @@
   - _process_remaining_text_stream 把 processed_chars 累加了全文长度(应为赋值),
     一轮中间插一个音频文件后,后面的文字会被跳过;
   - 音频文件只有二进制帧,设备的播放看门狗 60 秒收不到 JSON 就收起播放,长音乐、长故事会被截断,
-    所以播文件时每约 20 秒插一条 sentence_start。
+    所以播文件时每约 20 秒插一条 sentence_start;3 级固件(features.xiaodan ≥ 3)改为插故事正文进度片段
+    (文字以 U+001E 开头,设备显示在故事卡片上)与只有标记的保活。
+
+设备字幕:一屏只放得下两行、一条 sentence_start 只收 192 字节。显示用的文字切成几条(qa.subtitle_parts),
+第一条随句首发,其余按已合成的音频时长插在音频帧之间;送去合成的仍是整句,语调不受影响。
 
 情感标签([excited]、[laughing]……,见 core/utils/qwen_audio.py):
   - 基类切句后修边会把方括号当标点去掉,所以 _get_segment_text 与 _process_remaining_text_stream 换成保住标签的修边;
@@ -72,6 +76,10 @@ class TTSProvider(TTSProviderBase):
         self._lock = threading.Lock()
         # 设备桥登记的音频文件标题,播放保活时显示在字幕上
         self.xd_media_titles = {}
+        # 故事音频的正文进度片段(小单协议 3 级):播放时按帧数插进音频流,新固件显示在故事卡片上
+        self.xd_media_cues = {}
+        # 估计语速,决定一句长字幕的后几条什么时候发
+        self._speech_rate = qa.SpeechRate(config.get("rate"))
         # 允许的情感标签;一段只剩标签时暂存,留给同一轮的下一段
         self.inline_tags = qa.parse_allowed_tags(config.get("inline_tags"))
         self._carry_tags = ""
@@ -185,20 +193,31 @@ class TTSProvider(TTSProviderBase):
         def on_pcm(chunk):
             self.opus_encoder.encode_pcm_to_opus_stream(chunk, False, callback=opus_handler)
 
+        sample_rate = self._sample_rate()
         for segment in qa.split_segments(text):
             if should_stop():
                 return None
             if not qa.speakable(segment):
                 continue
-            # 字幕用原文(替换词还原前的文本),去掉情感标签。过长的一句会被切段,每段各发一条 sentence_start
+            # 字幕用原文(替换词还原前的文本),去掉情感标签。过长的一句会被切段,每段各发一条 sentence_start。
+            # 设备一屏只放得下两行,一条 sentence_start 也只收 192 字节:显示用的文字再切成几条,
+            # 第一条随这段开头发,其余按已合成的音频时长插进音频帧之间(合成本身不切,语调不受影响)。
             shown = qa.strip_tags(original_text if segment == text else segment).strip()
-            self.tts_audio_queue.put((SentenceType.FIRST, None, shown, sentence_id))
+            parts = qa.subtitle_parts(shown) or [shown]
+            offsets = qa.part_offsets_ms(parts, self._speech_rate)
+            self.tts_audio_queue.put((SentenceType.FIRST, None, parts[0], sentence_id))
+            state = {"next": 1, "pcm": 0}
             for attempt in (1, 2):
                 produced = []
 
                 def counted(chunk, produced=produced):
                     produced.append(len(chunk))
                     on_pcm(chunk)
+                    state["pcm"] += len(chunk)
+                    elapsed_ms = state["pcm"] / 2 / sample_rate * 1000.0
+                    while state["next"] < len(parts) and offsets[state["next"]] <= elapsed_ms:
+                        self.tts_audio_queue.put((SentenceType.FIRST, None, parts[state["next"]], sentence_id))
+                        state["next"] += 1
 
                 try:
                     self._synthesize(segment, counted, should_stop)
@@ -212,6 +231,12 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).error(f"语音合成失败: {segment[:40]} {type(e).__name__}: {e}")
                         break
                     logger.bind(tag=TAG).warning(f"语音合成失败,重试一次: {type(e).__name__}: {e}")
+            # 语速估快了:还没发的字幕跟在这段音频后面补上
+            while state["next"] < len(parts):
+                self.tts_audio_queue.put((SentenceType.FIRST, None, parts[state["next"]], sentence_id))
+                state["next"] += 1
+            if state["pcm"]:
+                self._speech_rate.update(qa.display_units(shown), state["pcm"] / 2 / sample_rate * 1000.0)
             # 把编码器里不足一帧的尾巴补零送出,句与句之间不串音
             self.opus_encoder.encode_pcm_to_opus_stream(b"", True, callback=opus_handler)
         return None
@@ -279,18 +304,36 @@ class TTSProvider(TTSProviderBase):
         return False
 
     def _process_audio_file_stream(self, tts_file, callback):
+        from core.utils import xiaodan_bridge_core as xbc
+
         sentence_id = getattr(self, "current_sentence_id", None)
         title = self.xd_media_titles.pop(tts_file, None) or "正在播放"
-        keepalive = qa.Keepalive()
+        cues = self.xd_media_cues.pop(tts_file, None)
 
-        def with_keepalive(data):
-            callback(data)
-            if keepalive.tick():
-                self.tts_audio_queue.put((SentenceType.FIRST, None, title, sentence_id))
+        def put(text):
+            self.tts_audio_queue.put((SentenceType.FIRST, None, text, sentence_id))
+
+        if xbc.xiaodan_level(getattr(self.conn, "features", None)) >= 3:
+            # 新固件:故事按帧数插正文进度片段;音乐和没有片段时只发保活标记(不改动卡片上的字)
+            schedule = qa.CueSchedule(cues, marker=qa.CUE_MARK)
+            for text in schedule.initial():
+                put(text)
+
+            def wrapped(data):
+                callback(data)
+                for text in schedule.on_frame():
+                    put(text)
+        else:
+            keepalive = qa.Keepalive()
+
+            def wrapped(data):
+                callback(data)
+                if keepalive.tick():
+                    put(title)
 
         # 文件音频要用独立的编码器状态:上一句 TTS 编码器里可能还留着半帧
         self.opus_encoder.reset_state()
-        super()._process_audio_file_stream(tts_file, callback=with_keepalive)
+        super()._process_audio_file_stream(tts_file, callback=wrapped)
 
     async def close(self):
         await super().close()

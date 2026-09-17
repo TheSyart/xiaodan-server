@@ -40,13 +40,26 @@ export function xiaodanVersion(device: DeviceContext): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+/** 故事音频的正文进度片段:ms 是这段文字在音频里大约开始的毫秒,p 表示新起一段 */
+export interface MediaCue {
+  ms: number;
+  x: string;
+  p?: boolean;
+}
+
 /** 一轮里往引擎(设备)送的东西。网页试聊把它们画在页面上。 */
 export interface TurnSink {
   text(text: string): void;
   device(message: Record<string, unknown>): void;
-  media(item: { url: string; ext: string; title: string }): void;
+  media(item: { url: string; ext: string; title: string; cues?: MediaCue[] }): void;
   closeAfterTurn(): void;
 }
+
+/**
+ * 设备上工具进行时的活动动画(小单协议 3 级,随 hint 下发)。固件把它画在脸旁:
+ * 画画的画笔、讲故事的书、放音乐的音符……不认得的值按普通思考显示。
+ */
+export type DeviceAct = 'paint' | 'story' | 'music' | 'learn' | 'weather' | 'calendar' | 'search' | 'remind' | 'memory' | 'role' | 'think';
 
 export interface TraceEvent {
   kind: 'step' | 'tool_call' | 'tool_result' | 'log';
@@ -100,5 +113,7 @@ export interface AgentTool {
   progress?: string;
   /** 设备屏幕上的工具提示 */
   hint?: string;
+  /** 设备上的活动动画;不填就只显示提示文字 */
+  act?: DeviceAct;
   run(ctx: ToolContext, args: Record<string, unknown>): Promise<ToolResult>;
 }

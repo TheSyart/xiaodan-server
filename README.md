@@ -202,9 +202,18 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   is configured (paragraph chunks joined into one mp3); stories without audio are told by the model directly (with a larger output limit).
   Playback sends a `media` event; the engine downloads the file from the console's internal address (secret auth, same-origin check, cache),
   queues it after the spoken introduction and sends a keepalive about every 20 s while it plays.
+  Level-3 firmware (`features.xiaodan >= 3`) also gets a story/music card: the console first sends `{"cmd":"media","k","t","s","a","cps","hold_s"}`.
+  Story synthesis records each chunk's measured duration (`timing_json`, migration v9; older audio is measured by scanning the file's frames at
+  play time). The story text is cut into short cues with an estimated narration time, and the engine inserts each cue into the audio stream when
+  that many frames have played (`sentence_start` text starting with U+001E). The device types it out and scrolls after two lines.
 - **Vocabulary** (`vocab_next`/`vocab_show`/`vocab_answer`/`vocab_progress`, plugin code `vocab`): ships an original 300-word starter book
   (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
   after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
+  Level-3 firmware gets a word deck, `vocab_deck`: the model first asks how many words to learn, then sends one
+  `{"type":"xiaodan_deck","id","i","n","w","m","e","say"}` per word. The engine stores `say` (word, meaning, example) by MAC and deck id and
+  strips it before forwarding. The child flips words with the up and down keys; clicking OK sends `{"type":"xiaodan","cmd":"deck_say","id","i"}`,
+  which the engine speaks straight through TTS without the model (Dockerfile patch 7 registers the handler in `textHandle`), answering
+  `deck_busy` when busy or when the deck has expired.
 
 - **Drawing** (`generate_image`, plugin code `image`): text-to-image models are configured on the Models page, Qwen (Model Studio) only:
   - `qwen-image-3.0-pro` (recommended), `qwen-image-2.0` and `z-image-turbo` use the synchronous `multimodal-generation/generation` endpoint;

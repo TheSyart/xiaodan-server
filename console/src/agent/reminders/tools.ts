@@ -16,6 +16,7 @@ function now(ctx: ToolContext): Date {
 CONSOLE_TOOLS.set(REMINDER_PLUGIN, () => {
   const create: AgentTool = {
     name: 'create_reminder',
+    act: 'remind',
     label: '设置提醒',
     description: '设置一个定时提醒,到时间设备会响提示音并播报。用户说「X 点提醒我…」「半小时后叫我…」「每天早上七点提醒我…」时调用。' +
       '相对时间用 in_minutes;具体时间用 at(北京时间,按提示词里的当前时间换算)。',
@@ -59,6 +60,7 @@ CONSOLE_TOOLS.set(REMINDER_PLUGIN, () => {
 
   const list: AgentTool = {
     name: 'list_reminders',
+    act: 'remind',
     label: '查看提醒',
     description: '查看这台设备还没到时间的提醒。用户问「我有哪些提醒」「明天有什么提醒」时调用。',
     parameters: { type: 'object', properties: {}, required: [] },
@@ -78,6 +80,7 @@ CONSOLE_TOOLS.set(REMINDER_PLUGIN, () => {
 
   const cancel: AgentTool = {
     name: 'cancel_reminder',
+    act: 'remind',
     label: '取消提醒',
     description: '取消提醒。知道编号就传 id;不知道就传 keyword(提醒内容里的词),会取消所有匹配的提醒。不确定是哪个时先调用 list_reminders。',
     parameters: {

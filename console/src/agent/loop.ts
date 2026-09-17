@@ -121,11 +121,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal: AbortSignal): P
   });
 }
 
-function hintMessage(device: DeviceContext, tool: AgentTool): Record<string, unknown> {
-  // 新固件认 hint 命令、显示服务端给的文字;老固件只认引擎原来那条 "% 工具名" 的 stt 消息
-  return xiaodanVersion(device) >= 2
-    ? { type: 'xiaodan', cmd: 'hint', text: (tool.hint ?? `正在${tool.label}`).slice(0, 12) }
-    : { type: 'stt', text: `% ${tool.name}` };
+export function hintMessage(device: DeviceContext, tool: AgentTool): Record<string, unknown> {
+  // 新固件认 hint 命令、显示服务端给的文字;老固件只认引擎原来那条 "% 工具名" 的 stt 消息;
+  // 3 级固件再带上活动动画(工具做完发的空 hint 一并收起)
+  const version = xiaodanVersion(device);
+  if (version < 2) return { type: 'stt', text: `% ${tool.name}` };
+  const message: Record<string, unknown> = { type: 'xiaodan', cmd: 'hint', text: (tool.hint ?? `正在${tool.label}`).slice(0, 12) };
+  if (version >= 3 && tool.act) message['act'] = tool.act;
+  return message;
 }
 
 const FALLBACK_NO_MODEL = '😔我还没有配置对话模型,请在控制塔的智能体页面选一个对话模型。';

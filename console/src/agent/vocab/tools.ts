@@ -1,5 +1,6 @@
 // 学单词的工具。配合内置技能 word-coach 使用:取词 → 教 → 考 → 记对错 → 看进度。
 // 屏幕上的单词卡只发给认得它的固件(features.xiaodan ≥ 2);卡片消息限 192 字节,超长的例句不带。
+// 3 级固件另有单词卡组(vocab_deck):一次把几个词发到设备,小朋友自己用按键翻看、点确定键听「单词。意思。例句」。
 
 import { CONSOLE_TOOLS } from '../registry.ts';
 import { xiaodanVersion, type AgentTool, type ToolContext } from '../types.ts';
@@ -39,10 +40,24 @@ function showCard(ctx: ToolContext, word: WordRow): boolean {
 
 const describe = (word: WordRow) => `${word.word}:${word.meaning}${word.example ? `;例句 ${word.example}${word.example_cn ? `(${word.example_cn})` : ''}` : ''}`;
 
-CONSOLE_TOOLS.set(VOCAB_PLUGIN, (_ctx, params) => {
+/**
+ * 卡组里的一个词:{"type":"xiaodan_deck","id","i","n","w","m","e","say"}。
+ * say 是点「读」时要念的文字,引擎存下后从发给设备的消息里去掉;w/m/e 的字节上限与固件的卡组槽位一致。
+ */
+export function deckMessage(id: number, index: number, count: number, word: WordRow): Record<string, unknown> {
+  const message: Record<string, unknown> = {
+    type: 'xiaodan_deck', id, i: index, n: count, w: clip(word.word, 31), m: clip(word.meaning, 39),
+    say: [word.word, word.meaning, word.example].map((part) => part?.trim()).filter(Boolean).join('。'),
+  };
+  if (word.example && Buffer.byteLength(word.example) <= 55) message['e'] = word.example;
+  return message;
+}
+
+CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
   const preferredBook = typeof params['book'] === 'string' ? params['book'] : undefined;
   const next: AgentTool = {
     name: 'vocab_next',
+    act: 'learn',
     label: '取单词',
     description: '取这一轮要学的英语单词:先复习到期的,再补新词。第一个单词的卡片会显示在屏幕上。',
     parameters: {
@@ -72,6 +87,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (_ctx, params) => {
   };
   const show: AgentTool = {
     name: 'vocab_show',
+    act: 'learn',
     label: '显示单词',
     description: '把一个单词的卡片显示在设备屏幕上。教到或考到某个单词时调用。',
     parameters: { type: 'object', properties: { word: { type: 'string', description: '英文单词' } }, required: ['word'] },
@@ -83,6 +99,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (_ctx, params) => {
   };
   const answer: AgentTool = {
     name: 'vocab_answer',
+    act: 'learn',
     label: '记录答题',
     description: '记录小朋友对一个单词的回答是否正确,用来安排复习。每考完一个单词调用一次。',
     parameters: {
@@ -99,6 +116,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (_ctx, params) => {
   };
   const stats: AgentTool = {
     name: 'vocab_progress',
+    act: 'learn',
     label: '学习进度',
     description: '查看单词学习进度:学过多少、掌握多少、今天要复习几个。',
     parameters: { type: 'object', properties: {}, required: [] },
@@ -109,5 +127,40 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (_ctx, params) => {
       return { ok: true, content: `单词书共 ${p.total} 个词;学过 ${p.learned} 个,基本掌握 ${p.mastered} 个,现在该复习 ${p.due} 个;累计答对 ${p.right} 次、答错 ${p.wrong} 次。` };
     },
   };
-  return [next, show, answer, stats];
+  const deck: AgentTool = {
+    name: 'vocab_deck',
+    act: 'learn',
+    label: '单词卡',
+    description: '把这一轮要学的单词做成卡片显示在设备上,小朋友自己用按键翻看、听读音。' +
+      '调用前必须先问小朋友这次想学几个单词(1 到 10 个),听到回答后再调用;小朋友说随便或没想好就用 5。',
+    parameters: {
+      type: 'object',
+      properties: {
+        count: { type: 'integer', minimum: 1, maximum: 10, description: '小朋友说想学几个' },
+        mode: { type: 'string', enum: ['auto', 'new', 'review'], description: 'auto 复习加新词;new 只学新词;review 只复习' },
+      },
+      required: ['count'],
+    },
+    progress: '好呀,单词卡马上来。',
+    hint: '正在准备单词卡',
+    async run(toolCtx, args) {
+      const book = defaultBook(toolCtx.deps.conn, preferredBook);
+      if (!book) return { ok: false, content: '还没有单词书。' };
+      const count = Math.min(10, Math.max(1, Math.round(Number(args['count'])) || 5));
+      const mode = (['auto', 'new', 'review'] as const).find((m) => m === args['mode']) ?? 'auto';
+      const picks = pickWords(toolCtx.deps.conn, learner(toolCtx), book, count, mode, now(toolCtx));
+      if (picks.length === 0) return { ok: true, content: mode === 'review' ? '现在没有要复习的单词。' : '这本单词书已经全部学过了,可以复习。' };
+      markSeen(toolCtx.deps.conn, learner(toolCtx), picks.filter((p) => p.reason === 'new').map((p) => p.word), now(toolCtx));
+      const id = 1 + Math.floor(Math.random() * 65535);
+      picks.forEach((pick, index) => toolCtx.sink.device(deckMessage(id, index, picks.length, pick.word)));
+      return {
+        ok: true,
+        content: `单词卡已经显示在设备上(${picks.length} 个):\n${picks.map((p, i) => `${i + 1}. ${describe(p.word)}`).join('\n')}\n` +
+          '用一句话告诉小朋友:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束。不要逐个讲解这些词。' +
+          '小朋友结束卡片再来说话时,问问要不要做个小测验,考完每个词用 vocab_answer 记录。',
+      };
+    },
+  };
+  // 单词卡组只给认得它的固件
+  return xiaodanVersion(ctx.device) >= 3 ? [deck, next, show, answer, stats] : [next, show, answer, stats];
 });

@@ -11,6 +11,7 @@ const describe = (role: { name: string; description: string }) => (role.descript
 CONSOLE_TOOLS.set(ROLES_PLUGIN, () => {
   const list: AgentTool = {
     name: 'list_roles',
+    act: 'role',
     label: '看看有哪些角色',
     description: '用户问「还有谁能陪我」「你能换成谁」时调用,列出这台设备能切换到的其他角色。',
     parameters: { type: 'object', properties: {} },
@@ -24,6 +25,7 @@ CONSOLE_TOOLS.set(ROLES_PLUGIN, () => {
 
   const switchRole: AgentTool = {
     name: 'switch_role',
+    act: 'role',
     label: '切换角色',
     description: '用户明确要换成另一个角色陪他时调用,比如「换童童来」「切换到英语老师」。只在用户明确要求时调用,不要自作主张。',
     parameters: {

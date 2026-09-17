@@ -160,5 +160,95 @@ class MiscTest(unittest.TestCase):
         self.assertIsNone(core.clamp_device_message({"type": "x", "d": "字" * 2000}, "s"))
 
 
+
+class LevelTest(unittest.TestCase):
+    def test_xiaodan_level(self):
+        self.assertEqual(core.xiaodan_level({"xiaodan": 3}), 3)
+        self.assertEqual(core.xiaodan_level({"xiaodan": True}), 1)
+        self.assertEqual(core.xiaodan_level({"xiaodan": False}), 0)
+        self.assertEqual(core.xiaodan_level({"xiaodan": "3"}), 0)
+        self.assertEqual(core.xiaodan_level(None), 0)
+
+
+class CuesTest(unittest.TestCase):
+    def test_valid_cues_are_normalized(self):
+        self.assertEqual(core.validate_cues([{"ms": 0, "x": "从前", "p": 1}, {"ms": 0, "x": "有座山"}]),
+                         [{"ms": 0, "x": "从前", "p": True}, {"ms": 0, "x": "有座山", "p": False}])
+
+    def test_invalid_cues_are_rejected_as_a_whole(self):
+        for bad in (
+            [], "x", [{"ms": 5, "x": "a"}, {"ms": 1, "x": "b"}], [{"ms": -1, "x": "a"}], [{"ms": 1.5, "x": "a"}],
+            [{"ms": True, "x": "a"}], [{"ms": 0, "x": ""}], [{"ms": 0, "x": "字" * 51}], [{"ms": 0, "x": "a\x1eb"}],
+            [{"ms": 0, "x": "a\nb"}], [{"ms": i, "x": "a"} for i in range(core.CUE_MAX_COUNT + 1)],
+        ):
+            self.assertIsNone(core.validate_cues(bad), bad if len(str(bad)) < 80 else "too many")
+
+
+class DeckStoreTest(unittest.TestCase):
+    MAC = "4C:11:AE:31:7A:30"
+
+    def test_put_get_drop(self):
+        store = core.DeckStore()
+        self.assertTrue(store.put(self.MAC, 7, 1, 3, " apple。苹果。 "))
+        self.assertEqual(store.get("4c:11:ae:31:7a:30", 7, 1), "apple。苹果。")
+        self.assertIsNone(store.get(self.MAC, 7, 0))
+        self.assertIsNone(store.get(self.MAC, 7, 3))
+        self.assertIsNone(store.get(self.MAC, 8, 1))
+        store.drop(self.MAC, 7)
+        self.assertIsNone(store.get(self.MAC, 7, 1))
+
+    def test_rejects_bad_input(self):
+        store = core.DeckStore()
+        for args in ((self.MAC, 0, 0, 3, "a"), (self.MAC, 7, 3, 3, "a"), (self.MAC, 7, 0, 11, "a"),
+                     ("nope", 7, 0, 3, "a"), (self.MAC, 7, 0, 3, "  "), (self.MAC, 7, 0, 3, None), (self.MAC, "7", 0, 3, "a")):
+            self.assertFalse(store.put(*args), args)
+        self.assertEqual(len(store), 0)
+
+    def test_new_count_replaces_deck_and_ttl_expires(self):
+        now = [0.0]
+        store = core.DeckStore(ttl_s=10, clock=lambda: now[0])
+        store.put(self.MAC, 7, 0, 3, "a")
+        store.put(self.MAC, 7, 0, 2, "b")
+        self.assertEqual(store.get(self.MAC, 7, 0), "b")
+        now[0] = 11
+        self.assertIsNone(store.get(self.MAC, 7, 0))
+
+    def test_drop_all_and_capacity(self):
+        store = core.DeckStore(max_decks=2)
+        for deck_id in (1, 2, 3):
+            store.put(self.MAC, deck_id, 0, 1, "w")
+        self.assertEqual(len(store), 2)
+        store.drop(self.MAC)
+        self.assertEqual(len(store), 0)
+
+
+class DeviceCommandTest(unittest.TestCase):
+    def test_accepted_commands(self):
+        self.assertEqual(core.parse_device_command({"type": "xiaodan", "cmd": "deck_say", "id": 7, "i": 2}), {"cmd": "deck_say", "id": 7, "i": 2})
+        self.assertEqual(core.parse_device_command({"type": "xiaodan", "cmd": "deck_at", "id": 7, "i": 0})["cmd"], "deck_at")
+        self.assertEqual(core.parse_device_command({"type": "xiaodan", "cmd": "deck_exit", "id": 0, "why": "nomem"}),
+                         {"cmd": "deck_exit", "id": 0, "why": "nomem"})
+        self.assertEqual(core.parse_device_command({"type": "xiaodan", "cmd": "img", "id": 3, "ok": True, "w": 96}),
+                         {"cmd": "img", "id": 3, "ok": True, "w": 96})
+
+    def test_rejected_commands(self):
+        for bad in (
+            None, {"type": "tts"}, {"type": "xiaodan", "cmd": "say", "text": "hi"},
+            {"type": "xiaodan", "cmd": "deck_say", "id": 0, "i": 0}, {"type": "xiaodan", "cmd": "deck_say", "id": 7, "i": 10},
+            {"type": "xiaodan", "cmd": "deck_say", "id": True, "i": 0}, {"type": "xiaodan", "cmd": "img", "id": 1, "ok": 1},
+            {"type": "xiaodan", "cmd": "img", "id": 1, "ok": True, "w": 200},
+        ):
+            self.assertIsNone(core.parse_device_command(bad), bad)
+
+    def test_rate_limit(self):
+        now = [0.0]
+        limit = core.RateLimit(0.6, clock=lambda: now[0])
+        self.assertTrue(limit.allow("a"))
+        self.assertFalse(limit.allow("a"))
+        self.assertTrue(limit.allow("b"))
+        now[0] = 0.61
+        self.assertTrue(limit.allow("a"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -332,4 +332,15 @@ export const MIGRATIONS: readonly Migration[] = [
     // 语音全走千问、音色自带说话设置、大脑只剩控制塔、文生图成为模型类型。步骤多,单独放一个文件。
     up: migrateQwenOnly,
   },
+  {
+    version: 9,
+    name: 'story-timing',
+    up(conn) {
+      conn.exec(`
+        -- 故事音频每一块的字数与实测毫秒数:[{"chars":…,"ms":…}]。讲故事时据此把原文按朗读进度显示在设备卡片上;
+        -- 空串表示还没测过(老音频、手动上传的音频),播放时读文件数帧现算整段时长
+        ALTER TABLE media_items ADD COLUMN timing_json TEXT NOT NULL DEFAULT '';
+      `);
+    },
+  },
 ];

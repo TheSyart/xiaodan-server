@@ -182,5 +182,84 @@ class TtsTest(unittest.TestCase):
         self.assertEqual([keepalive.tick() for _ in range(7)], [False, False, True, False, False, True, False])
 
 
+
+class SubtitlePartsTest(unittest.TestCase):
+    def test_short_text_is_one_part(self):
+        self.assertEqual(qa.subtitle_parts("你好呀,今天过得怎么样?"), ["你好呀,今天过得怎么样?"])
+        self.assertEqual(qa.subtitle_parts("   "), [])
+
+    def test_units_and_bytes_limits(self):
+        text = "小朋友们大家好,今天我要给你们讲一个关于月亮上的小邮差的故事,他每天晚上都骑着一只会发光的萤火虫,把星星写的信送到每一个睡着的孩子的枕头边。你知道信里写了什么吗?"
+        parts = qa.subtitle_parts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual("".join(parts), text.replace(" ", ""))
+        for part in parts:
+            self.assertLessEqual(qa.display_units(part), qa.SUBTITLE_UNITS + 1)  # 句末标点可以跟在满额的一条后面
+            self.assertLessEqual(len(part.encode("utf-8")), qa.SUBTITLE_BYTES + 8)
+
+    def test_prefers_sentence_break_then_comma(self):
+        text = "今天天气很好。" + "我们一起去公园玩滑梯荡秋千还要喂小鸭子" * 2
+        self.assertEqual(qa.subtitle_parts(text)[0], "今天天气很好。")
+        parts = qa.subtitle_parts("第一件事情是先把小书包收拾好,第二件事情是把明天要穿的衣服放在床头边上,第三件事情是刷牙洗脸")
+        self.assertTrue(parts[0].endswith(","), parts)
+
+    def test_punctuation_never_starts_a_part(self):
+        text = "啊" * 40 + "。" + "好"
+        parts = qa.subtitle_parts(text)
+        self.assertTrue(all(p[0] not in "，。！？、" for p in parts), parts)
+        self.assertEqual(parts[0], "啊" * 40 + "。")
+
+    def test_english_words_are_not_split(self):
+        text = "The quick brown fox jumps over the lazy dog and keeps running across the wide green field until sunset comes"
+        parts = qa.subtitle_parts(text)
+        self.assertEqual(" ".join(parts), text)
+        for part in parts:
+            for word in part.split(" "):
+                self.assertIn(word, text.split(" "))
+
+    def test_display_units(self):
+        self.assertEqual(qa.display_units("ab你好"), 3.0)
+        self.assertEqual(qa.display_units(""), 0)
+
+
+class SpeechRateTest(unittest.TestCase):
+    def test_offsets_follow_units(self):
+        rate = qa.SpeechRate(1.0)
+        offsets = qa.part_offsets_ms(["一二三四", "五六七八九十"], rate)
+        self.assertEqual(offsets[0], 0.0)
+        self.assertAlmostEqual(offsets[1], 4 / 4.4 * 1000)
+
+    def test_rate_config_and_update(self):
+        self.assertAlmostEqual(qa.SpeechRate(2).units_per_s, 8.8)
+        self.assertAlmostEqual(qa.SpeechRate("bad").units_per_s, 4.4)
+        rate = qa.SpeechRate(1.0)
+        rate.update(40, 5000)          # 实测 8 单位/秒
+        self.assertAlmostEqual(rate.units_per_s, 0.7 * 4.4 + 0.3 * 8)
+        rate.update(2, 5000)           # 太短不采信
+        rate.update(40, 100)
+        self.assertAlmostEqual(rate.units_per_s, 0.7 * 4.4 + 0.3 * 8)
+        rate.update(40, 1000)          # 40 单位/秒被夹到 12
+        self.assertLessEqual(rate.units_per_s, 12)
+
+
+class CueScheduleTest(unittest.TestCase):
+    def test_cues_follow_frames_and_paragraphs(self):
+        schedule = qa.CueSchedule([{"ms": 0, "x": "从前", "p": True}, {"ms": 120, "x": "有座山"}, {"ms": 125, "x": "山里"}], keepalive_frames=100)
+        self.assertEqual(schedule.initial(), ["\x1e\x1f从前"])
+        self.assertEqual(schedule.on_frame(), [])                         # 60 ms
+        self.assertEqual(schedule.on_frame(), ["\x1e有座山"])            # 120 ms
+        self.assertEqual(schedule.on_frame(), ["\x1e山里"])              # 180 ms
+
+    def test_keepalive_marker_when_quiet(self):
+        schedule = qa.CueSchedule(None, keepalive_frames=3)
+        self.assertEqual(schedule.initial(), [])
+        self.assertEqual([schedule.on_frame() for _ in range(7)], [[], [], ["\x1e"], [], [], ["\x1e"], []])
+
+    def test_cue_resets_keepalive(self):
+        schedule = qa.CueSchedule([{"ms": 120, "x": "甲"}], keepalive_frames=3)
+        out = [schedule.on_frame() for _ in range(6)]
+        self.assertEqual(out, [[], ["\x1e甲"], [], [], ["\x1e"], []])
+
+
 if __name__ == "__main__":
     unittest.main()

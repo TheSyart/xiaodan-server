@@ -49,6 +49,7 @@ EXTRA_TOOL_SOURCES.push((ctx) => {
   const names = rows.map((row) => row.name);
   const loadSkill: AgentTool = {
     name: 'load_skill',
+    act: 'think',
     label: '读取技能',
     description: `读取一个技能的完整做法说明。可用的技能:${names.join('、')}。`,
     parameters: {
@@ -72,6 +73,7 @@ EXTRA_TOOL_SOURCES.push((ctx) => {
   if (rows.some((row) => Object.keys(files(row)).length)) {
     tools.push({
       name: 'read_skill_file',
+      act: 'think',
       label: '读取技能文件',
       description: '读取某个技能附带的文件内容。',
       parameters: {

@@ -44,6 +44,7 @@ test('新库迁移到最新版本,新列与新表都在', () => {
   assert.ok(tableExists(conn, 'identity_events'));
   assert.ok(columns(conn, 'agents').includes('image_model_id'));
   assert.ok(columns(conn, 'voices').includes('emotion_tags'));
+  assert.ok(columns(conn, 'media_items').includes('timing_json'));
   assert.equal(foreignKeysOn(conn), 1, '关外键跑的迁移结束后要恢复');
 });
 

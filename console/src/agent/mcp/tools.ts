@@ -103,6 +103,7 @@ EXTRA_TOOL_SOURCES.push(async (ctx) => {
         timeoutMs: Math.max(5000, row.timeout_ms + 5000),
         progress: '我查一下哦。',
         hint: `正在查${row.name}`.slice(0, 12),
+        act: 'search',
         async run(toolCtx, args) {
           try {
             const result = await callTool(toolCtx.deps.fetch, server, tool.name, args, toolCtx.signal);

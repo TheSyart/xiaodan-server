@@ -8,7 +8,9 @@
   - close_after_turn 生效;控制塔没发 done、返回的不是事件流、连不上时都说一句兜底话并正常收尾;
   - 用户打断时两秒内停下并断开对控制塔的请求(控制塔据此取消模型调用);
   - 设备桥接口:不带密钥 401,工具列表只含允许的插件,调插件能推出设备消息,离线设备 404,
-    空闲设备能主动播报(先发 tts start,再按 FIRST/文件/文字/LAST 入队),忙时 409。
+    空闲设备能主动播报(先发 tts start,再按 FIRST/文件/文字/LAST 入队),忙时 409;
+  - 小单协议 3 级:单词卡组的读音文字留在引擎、发给设备前去掉;故事进度片段随音频登记;
+    打过补丁的 textHandle 能收设备上行的 deck_say(直接合成)、忙与过期时回 deck_busy、deck_exit 清缓存。
 """
 
 import asyncio
@@ -108,6 +110,14 @@ class Console(http.server.BaseHTTPRequestHandler):
                 event({"t": "text", "v": "听完告诉我好不好听。"})
                 event({"t": "close_after_turn"})
                 event({"t": "done"})
+            elif name == "level3":
+                event({"t": "text", "v": "🙂我们来学单词。"})
+                for i, (w, say) in enumerate((("apple", "apple。苹果。I eat an apple."), ("cat", "cat。猫。I have a cat."))):
+                    event({"t": "device", "msg": {"type": "xiaodan_deck", "id": 9, "i": i, "n": 2, "w": w, "m": "…", "say": say}})
+                host = self.headers["Host"]
+                event({"t": "media", "url": f"http://{host}/xiaodan/media/song/audio", "ext": "wav", "title": "小熊",
+                       "cues": [{"ms": 0, "x": "从前", "p": True}, {"ms": 900, "x": "有只小熊"}]})
+                event({"t": "done"})
             elif name == "truncated":
                 pass
             elif name == "slow":
@@ -144,6 +154,7 @@ class TtsStub:
         self.tts_audio_queue = queue.Queue()
         self.texts = {}
         self.xd_media_titles = {}
+        self.xd_media_cues = {}
 
     def store_tts_text(self, sentence_id, text):
         self.texts[sentence_id] = text
@@ -319,4 +330,59 @@ async def bridge_checks():
 
 asyncio.run_coroutine_threadsafe(bridge_checks(), loop).result(60)
 print("bridge ok")
+
+# ---------------------------------------------------------------- 5. 小单协议 3 级:单词卡组与故事进度
+
+SCENARIO["name"] = "level3"
+xiaodan_bridge.REGISTRY.remove(conn)
+deck_conn = new_conn("sess-deck")
+deck_conn.features = {"xiaodan": 3}
+deck_conn.chat("学单词")
+decks = [m for m in deck_conn.websocket.sent if m.get("type") == "xiaodan_deck"]
+assert len(decks) == 2 and all("say" not in m for m in decks), decks
+assert xiaodan_bridge.DECKS.get(MAC, 9, 1) == "cat。猫。I have a cat."
+media_items = [i for i in drain(deck_conn.tts.tts_text_queue) if i.content_type == ContentType.FILE]
+assert len(media_items) == 1
+assert deck_conn.tts.xd_media_cues.get(media_items[0].content_file) == [
+    {"ms": 0, "x": "从前", "p": True}, {"ms": 900, "x": "有只小熊", "p": False}], deck_conn.tts.xd_media_cues
+
+
+async def device_command_checks():
+    from core.handle.textHandle import handleTextMessage
+
+    async def say(i, deck=9):
+        deck_conn.websocket.sent.clear()
+        await handleTextMessage(deck_conn, json.dumps({"type": "xiaodan", "cmd": "deck_say", "id": deck, "i": i}))
+        return deck_conn.websocket.sent
+
+    deck_conn.client_is_speaking = False
+    deck_conn.last_activity_time = time.time() * 1000
+    sent = await say(1)
+    assert sent and sent[0]["type"] == "tts" and sent[0]["state"] == "start", sent
+    items = drain(deck_conn.tts.tts_text_queue)
+    assert [(i.sentence_type, i.content_type) for i in items][0] == (SentenceType.FIRST, ContentType.ACTION)
+    assert "".join(i.content_detail or "" for i in items if i.content_type == ContentType.TEXT) == "cat。猫。I have a cat."
+    assert (await say(0))[0] == {"type": "xiaodan", "cmd": "deck_busy", "id": 9, "why": "fast", "session_id": "sess-deck"}
+    await asyncio.sleep(0.7)
+    assert (await say(0, deck=77))[0]["why"] == "gone"
+    await asyncio.sleep(0.7)
+    deck_conn._xd_turn_active = True
+    started = time.monotonic()
+    assert (await say(0))[0]["why"] == "turn"
+    assert time.monotonic() - started >= 2.5, "对话还在收尾时应先等一会儿"
+    deck_conn._xd_turn_active = False
+    await asyncio.sleep(0.7)
+    deck_conn.tts.tts_audio_queue.put((SentenceType.MIDDLE, b"x", None, "old"))
+    sent = await say(0)
+    assert sent[0]["state"] == "start" and deck_conn.tts.tts_audio_queue.qsize() == 0, "还在读上一个词时先清掉再读"
+    await handleTextMessage(deck_conn, json.dumps({"type": "xiaodan", "cmd": "deck_exit", "id": 9}))
+    assert xiaodan_bridge.DECKS.get(MAC, 9, 0) is None
+    old = new_conn("sess-old")
+    old.websocket.sent.clear()
+    await handleTextMessage(old, json.dumps({"type": "xiaodan", "cmd": "deck_say", "id": 9, "i": 0}))
+    assert old.websocket.sent == [], "2 级固件的上行 xiaodan 消息不处理"
+
+
+asyncio.run_coroutine_threadsafe(device_command_checks(), loop).result(60)
+print("device commands ok")
 httpd.shutdown()

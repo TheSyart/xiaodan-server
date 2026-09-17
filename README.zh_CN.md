@@ -156,8 +156,14 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
   来源、许可与署名见 `media/music/LICENSES.md`,CC BY 的署名在内容库页展示),控制塔启动时缺了才补进数据目录。
   故事音频在配好千问合成模型后由后台自动合成(按段落切块逐块合成、拼成一个 mp3);还没有音频的故事交给模型直接讲(放宽输出长度)。
   播放时控制塔发 `media` 事件,引擎从控制塔内网地址下载(secret 鉴权、同源校验、缓存)后排进合成队列,跟在引导语后面播,播文件期间每约 20 秒保活一次。
+  3 级固件(`features.xiaodan ≥ 3`)另有故事/音乐卡片:控制塔先发 `{"cmd":"media","k","t","s","a","cps","hold_s"}`;
+  故事音频合成时记下每块的实测时长(迁移 v9 的 `timing_json`,老音频播放时读文件数帧现算),据此把原文切成小片段、算出朗读进度,
+  引擎按已播帧数把到点的片段插进音频流(`sentence_start` 文字以 U+001E 开头),设备打字式显示、写满两行上滚。
 - **学单词**(`vocab_next`/`vocab_show`/`vocab_answer`/`vocab_progress`,插件代号 `vocab`):自带 300 词原创启蒙词书(`media/vocab/`),
   可导入 CSV/JSON;记忆曲线按 Leitner 盒子(答错 5 分钟后再考,答对依次 1/2/4/7/15 天);新固件显示单词卡;配合技能 `word-coach` 使用。
+  3 级固件有单词卡组 `vocab_deck`:模型先问一次学几个,再逐词发 `{"type":"xiaodan_deck","id","i","n","w","m","e","say"}`;
+  引擎把 `say`(「单词。意思。例句」)按 MAC 与卡组 id 存下、从发给设备的消息里去掉。设备上下键翻看,单击确定键上行
+  `{"type":"xiaodan","cmd":"deck_say","id","i"}`,引擎不经模型直接合成(Dockerfile 补丁 7 在 `textHandle` 注册处理器),忙或卡组过期回 `deck_busy`。
 
 - **画画**(`generate_image`,插件代号 `image`):文生图模型在「模型」页配置,只支持千问(百炼):
   - `qwen-image-3.0-pro`(推荐)、`qwen-image-2.0`、`z-image-turbo` 走同步接口 `multimodal-generation/generation`;

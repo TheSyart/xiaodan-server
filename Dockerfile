@@ -125,6 +125,8 @@ COPY server/engine/xiaodan_tool_text.py core/utils/xiaodan_tool_text.py
 #    不带工具的 response 同样包一层,只删掉这些块。
 # 4-6. 设备桥:连接建立拿到 device-id 后登记、close() 开头注销(登记表按会话与 MAC 查连接);
 #    http 服务建 AppRunner 之前挂上 /xiaodan/bridge/* 路由(内网端口,manager-api secret 鉴权)。
+# 7. 设备上行的 {"type":"xiaodan",...}(单词卡组读词、像素画显示结果):在 textHandle 的消息注册表里登记处理器,
+#    否则上游只记一条「收到未知类型消息」就丢掉。
 RUN python - <<'PY'
 import pathlib
 import py_compile
@@ -241,6 +243,20 @@ LLMProvider.response = _xd_patched_response
 '''
 provider_path.write_text(provider, encoding="utf-8")
 py_compile.compile(str(provider_path), doraise=True)
+
+text_path = pathlib.Path("core/handle/textHandle.py")
+text_source = replace_once(
+    text_path.read_text(encoding="utf-8"),
+    "message_processor = TextMessageProcessor(message_registry)\n",
+    "message_processor = TextMessageProcessor(message_registry)\n"
+    + "\n# 小单:设备上行的 xiaodan 消息(单词卡组读词等)\n"
+    + "from core import xiaodan_bridge as _xiaodan_bridge\n"
+    + "_xiaodan_bridge.install_text_handler(message_registry)\n",
+    " message_processor 的创建",
+    where="core/handle/textHandle.py",
+)
+text_path.write_text(text_source, encoding="utf-8")
+py_compile.compile(str(text_path), doraise=True)
 PY
 
 RUN set -eux; \

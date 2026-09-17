@@ -11,6 +11,7 @@ export const IMAGE_PLUGIN = 'image';
 CONSOLE_TOOLS.set(IMAGE_PLUGIN, () => {
   const tool: AgentTool = {
     name: 'generate_image',
+    act: 'paint',
     label: '画画',
     description: '按描述画一幅画(文生图),画好后显示在设备屏幕上,原图保存在控制塔画廊。用户说「画一只…」「帮我画…」时调用。' +
       'prompt 要把用户想要的主体、动作、场景、颜色写具体。',

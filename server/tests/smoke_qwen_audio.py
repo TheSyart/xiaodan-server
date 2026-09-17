@@ -8,7 +8,8 @@
     每句先发一条带原文的 sentence_start;
   - 打断时一秒内停下并丢掉连接;服务端失败时不抛异常、不重复念;
   - 修掉了上游 processed_chars 累加的问题(中途插入音频文件后,后面的文字不丢);
-  - 长音频文件播放期间每约 20 秒插一条 sentence_start 保活;
+  - 长音频文件播放期间每约 20 秒插一条 sentence_start 保活;3 级固件改发故事进度片段与保活标记;
+  - 长句的字幕切成几条,按合成出的音频时长插在音频帧之间;
   - 识别把 PCM 包成 WAV 放进 data URI,带上热词,能解析返回的文字。
 """
 
@@ -227,7 +228,38 @@ assert len(audio) >= 740, len(audio)
 assert [k[2] for k in keepalives] == ["小星星", "小星星"], keepalives
 assert all(k[3] == "s1" for k in keepalives)
 assert os.path.exists(path), "临时目录之外的文件不该被删"
+
+# 6b. 小单协议 3 级:故事按帧插正文进度片段(U+001E 开头,U+001F 表示新起一段),没有片段时只发保活标记
+from core.utils import textUtils
+
+tts, conn = new_tts()
+conn.features = {"xiaodan": 3}
+tts.xd_media_titles[path] = "小星星"
+tts.xd_media_cues[path] = [{"ms": 0, "x": "从前", "p": True}, {"ms": 1200, "x": "有座山"}]
+tts._process_audio_file_stream(path, callback=tts.handle_opus)
+items = drain(tts)
+firsts = [(index, item[2]) for index, item in enumerate(items) if item[0] == SentenceType.FIRST]
+assert firsts[0] == (0, "\x1e\x1f从前"), firsts[:3]
+assert firsts[1][1] == "\x1e有座山" and sum(1 for item in items[:firsts[1][0]] if item[0] == SentenceType.MIDDLE) == 20, firsts[:3]
+assert [text for _, text in firsts[2:]] == ["\x1e", "\x1e"], firsts
+assert textUtils.check_emoji("\x1e\x1f从前") == "\x1e\x1f从前", "上游字幕清洗不能去掉进度标记"
+tts, conn = new_tts()
+conn.features = {"xiaodan": 3}
+tts._process_audio_file_stream(path, callback=tts.handle_opus)
+assert [item[2] for item in drain(tts) if item[0] == SentenceType.FIRST] == ["\x1e", "\x1e"], "音乐只发保活标记"
 os.remove(path)
+
+# 7. 长句字幕:显示用的文字切成几条,第一条随句首,其余插在音频帧之间;合成的仍是整句
+tts, conn = new_tts(rate="2")
+long_text = "很慢的一句话,小朋友们大家好,今天我要给你们讲一个关于月亮上的小邮差的故事,他每天晚上都骑着一只会发光的萤火虫。"
+tts.to_tts_stream(long_text, opus_handler=tts.handle_opus)
+assert seen_texts[-1] == long_text, seen_texts[-1]
+items = drain(tts)
+firsts = [(index, item[2]) for index, item in enumerate(items) if item[0] == SentenceType.FIRST]
+assert len(firsts) >= 2 and firsts[0][0] == 0, firsts
+assert "".join(text for _, text in firsts) == long_text, firsts
+assert all(len(text.encode("utf-8")) <= 160 for _, text in firsts), firsts
+assert 0 < firsts[1][0] < len(items) - 1, f"后几条字幕应插在音频帧之间: {firsts}"
 
 asyncio.run(tts.close())
 server.shutdown()

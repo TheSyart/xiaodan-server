@@ -12,7 +12,8 @@
 控制塔回的是 text/event-stream,每个事件一行 JSON(字段 t):
   text   {"t":"text","v":"…"}            交给引擎的 chat(),照常切句合成;情绪取自第一段文字
   device {"t":"device","msg":{…}}         立刻发给设备(卡片、工具提示、音量、图片分块)
-  media  {"t":"media","url":…,"ext":…}     下载到缓存后作为音频文件排进合成队列,排在已经说出的文字之后
+  media  {"t":"media","url":…,"ext":…}     下载到缓存后作为音频文件排进合成队列,排在已经说出的文字之后;
+                                           故事可带 cues(正文进度片段),3 级固件播放时按帧数插进音频流
   close_after_turn                         这一轮说完后断开,设备重连时拿到新配置(换角色、换音色)
   error  {"t":"error","speak":"…"}        还什么都没说时把这句话说出来
   done                                     必须有;没有就当作被截断
@@ -102,6 +103,12 @@ class LLMProvider(LLMProviderBase):
         title = str(event.get("title") or "")[:40]
         if title and hasattr(conn.tts, "xd_media_titles"):
             conn.tts.xd_media_titles[path] = title
+        # 故事的正文进度片段只给认得故事卡片的固件(小单协议 3 级);片段不合法就整组不用
+        cues = core.validate_cues(event.get("cues")) if event.get("cues") is not None else None
+        if event.get("cues") is not None and cues is None:
+            logger.bind(tag=TAG).warning("故事进度片段不合法,本次不显示进度")
+        if cues and core.xiaodan_level(getattr(conn, "features", None)) >= 3 and hasattr(conn.tts, "xd_media_cues"):
+            conn.tts.xd_media_cues[path] = cues
         conn.tts.tts_text_queue.put(TTSMessageDTO(
             sentence_id=turn_id, sentence_type=SentenceType.MIDDLE, content_type=ContentType.FILE,
             content_detail=title or None, content_file=path,

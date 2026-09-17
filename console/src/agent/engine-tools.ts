@@ -5,11 +5,12 @@
 
 import { BridgeError } from './bridge.ts';
 import type { ToolSpec } from './llm.ts';
-import type { AgentTool, ToolContext, ToolResult } from './types.ts';
+import type { AgentTool, DeviceAct, ToolContext, ToolResult } from './types.ts';
 
 interface EngineToolMeta {
   label: string;
   hint: string;
+  act?: DeviceAct;
   progress?: string;
   fallback: ToolSpec;
 }
@@ -20,6 +21,7 @@ export const ENGINE_TOOL_META: Readonly<Record<string, EngineToolMeta>> = {
   show_calendar: {
     label: '日期与日历',
     hint: '正在翻日历',
+    act: 'calendar',
     fallback: {
       type: 'function',
       function: {
@@ -35,6 +37,7 @@ export const ENGINE_TOOL_META: Readonly<Record<string, EngineToolMeta>> = {
   get_weather: {
     label: '天气',
     hint: '正在查天气',
+    act: 'weather',
     progress: '我看看天气哦。',
     fallback: {
       type: 'function',
@@ -108,6 +111,7 @@ export async function engineTools(
       description: spec.function.description,
       parameters: spec.function.parameters,
       hint: meta.hint,
+      ...(meta.act ? { act: meta.act } : {}),
       ...(meta.progress ? { progress: meta.progress } : {}),
       timeoutMs: 35_000,
       run: (toolCtx, args) => runEngineTool(toolCtx, name, args, pluginConfig),
