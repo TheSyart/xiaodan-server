@@ -45,6 +45,20 @@ export interface PromptInput {
   hasScreen: boolean;
   /** 长期记忆摘要(P6) */
   memory?: string;
+  /** 对话模型能看图 */
+  vision?: boolean;
+  /** 音色带来的说话要求 */
+  voice?: VoiceHints;
+}
+
+export interface VoiceHints {
+  /** 回复用的语种(中文、英语……) */
+  language: string;
+  /** 方言口音,空为普通话 */
+  dialect: string;
+  /** 允许插的情感标签:控制类放句首,声音类放在出声的位置 */
+  controlTags: readonly { tag: string; label: string }[];
+  richTags: readonly { tag: string; label: string }[];
 }
 
 export function buildSystemPrompt(input: PromptInput): string {
@@ -66,6 +80,8 @@ export function buildSystemPrompt(input: PromptInput): string {
     const index = cannot.indexOf('联网查新闻、股价、赛事等实时信息');
     if (index >= 0) cannot[index] = '通用的联网搜索(上面外部服务能查到的除外)';
   }
+  if (input.vision) can.push('看懂用户发来的图片');
+  else cannot.push('看图片、识别照片');
   cannot.push('发消息、打电话、控制灯和电器等智能家居');
 
   const { date, weekday, time } = beijingNow(now);
@@ -129,15 +145,44 @@ export function buildSystemPrompt(input: PromptInput): string {
     '</说话的味道>',
   ].join('\n'));
 
+  const voice = input.voice;
+  const tags = voice ? [...voice.controlTags, ...voice.richTags] : [];
   sections.push([
     '<输出格式>',
     '- 每条回复的最开头放且只放一个表情符号,表达你此刻的情绪。只能从这 21 个里选:😶🙂😆😂😔😠😭😍😳😲😱🤔😉😎😌🤤😘😏😴😜🙄',
     '  它会变成屏幕上的表情,不会被念出来。除了开头这一个,回复里不要再有任何表情符号或颜文字。',
-    '- 只输出要说出口的话。不要 Markdown、列表、星号井号,也不要括号里的动作描写。',
+    tags.length
+      ? '- 只输出要说出口的话。不要 Markdown、列表、星号井号,也不要括号里的动作描写(下面「声音表现」里的方括号标签除外)。'
+      : '- 只输出要说出口的话。不要 Markdown、列表、星号井号,也不要括号或方括号里的动作描写。',
     '- 标点只用逗号、句号、问号、叹号和省略号,不要用波浪号。',
     '- 数字、时间、单位都写成口语形式,比如"三点半"而不是"15:30"。',
     '</输出格式>',
   ].join('\n'));
+
+  if (tags.length && voice) {
+    const lines = ['<声音表现>', '你的声音支持用英文方括号标签控制情绪和加入声音效果。标签不会被念出来,也不会显示在屏幕上。'];
+    if (voice.controlTags.length) {
+      lines.push(`- 情绪标签,放在一句话的开头,只管这一句:${voice.controlTags.map((item) => `[${item.tag}](${item.label})`).join('、')}`);
+    }
+    if (voice.richTags.length) {
+      lines.push(`- 声音标签,放在要发出这个声音的位置:${voice.richTags.map((item) => `[${item.tag}](${item.label})`).join('、')}`);
+    }
+    lines.push(
+      '- 只用上面列出的标签,原样照抄英文,用半角方括号;不要自己造标签,也不要翻译成中文。',
+      '- 大多数句子不需要标签。情绪明显转折、讲故事的关键处、真的好笑时才用,一条回复里最多两三个。',
+      '- 表情符号仍然放在整条回复的最开头,标签写在表情后面,例如:😆[excited]哇,你做到啦![laughing]',
+      '</声音表现>',
+    );
+    sections.push(lines.join('\n'));
+  }
+
+  if (voice && (voice.language !== '中文' || voice.dialect)) {
+    const lines = ['<说话语言>'];
+    if (voice.language !== '中文') lines.push(`你的声音说${voice.language}。除非用户明确要求换语言,所有回复都用${voice.language}。`);
+    if (voice.dialect) lines.push(`你说话带${voice.dialect}的味道,可以自然用一些${voice.dialect}里常见、别人也听得懂的说法;屏幕会显示你的原话,不要用生僻字。`);
+    lines.push('</说话语言>');
+    sections.push(lines.join('\n'));
+  }
 
   if (agent.safety_level === 'child') {
     sections.push([

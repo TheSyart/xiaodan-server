@@ -7,10 +7,16 @@
 // 迁移只进不退。回滚程序时必须连同数据备份一起恢复:旧程序遇到更新的库版本会拒绝启动。
 
 import type { Db } from './db.ts';
+import { migrateQwenOnly } from './migrations/v8-qwen-only.ts';
 
 export interface Migration {
   version: number;
   name: string;
+  /**
+   * 在关闭外键的情况下执行(重建被引用的表时需要)。此时 ON DELETE 动作都不会触发,
+   * 迁移要自己清理引用;执行完会做一次外键检查,新造出悬空引用就整体回滚。
+   */
+  disableForeignKeys?: boolean;
   up: (conn: Db) => void;
 }
 
@@ -318,5 +324,12 @@ export const MIGRATIONS: readonly Migration[] = [
         CREATE INDEX idx_device_memory_mac ON device_memory (mac, updated_at);
       `);
     },
+  },
+  {
+    version: 8,
+    name: 'qwen-only-voices',
+    disableForeignKeys: true,
+    // 语音全走千问、音色自带说话设置、大脑只剩控制塔、文生图成为模型类型。步骤多,单独放一个文件。
+    up: migrateQwenOnly,
   },
 ];

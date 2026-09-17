@@ -14,8 +14,10 @@ import type { Db } from './db.ts';
 import { all, one, run, tx } from './db.ts';
 import { nestSettings, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
-import { PLUGINS } from './catalog.ts';
 import { agentToken } from './agent/token.ts';
+import { ttsOverrides } from './voice/profile.ts';
+import { defaultVoiceOf, modelFamily, resolveVoice } from './voice/store.ts';
+import { defaultSystemVoice } from './voice/system-voices.ts';
 import { onDeviceConfigFetched } from './agent/hooks.ts';
 import {
   canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
@@ -38,16 +40,8 @@ interface AgentRow {
   summary_memory: string | null;
   vad_model_id: string | null;
   asr_model_id: string | null;
-  llm_model_id: string | null;
-  vllm_model_id: string | null;
-  tts_model_id: string | null;
-  memory_model_id: string | null;
-  intent_model_id: string | null;
   tts_voice_id: string | null;
-  tts_language: string | null;
   chat_history_conf: number;
-  tts_params_json: string;
-  runtime: 'engine' | 'agent';
 }
 
 const ok = (data: unknown) => ({ code: 0, msg: 'success', data });
@@ -67,113 +61,41 @@ function loadModel(conn: Db, id: string | null | undefined): ModelRow | undefine
   return one<ModelRow>(conn, 'SELECT id, model_type, config_json FROM models WHERE id = ? AND enabled = 1', id);
 }
 
-/**
- * 组装一份"模块配置"。产物形如:
- *   { LLM: { LLM_Gateway: {...} }, TTS: { TTS_Omni: {...} }, selected_module: { LLM: 'LLM_Gateway', … } }
- *
- * `skip` 里的类型会被整个略过 —— 用于服务端已经实例化过同一个模型的情况,
- * 省掉一次重复加载(VAD 要载模型文件,重载一次代价不小)。
- */
-/**
- * 智能体单独调的合成参数。只认千问合成:它的 rate/pitch 是 0.5-2 的倍数、volume 是 0-100,
- * 别家同名参数的量纲不同(EdgeTTS 的 rate 是 -100~100),硬合进去只会调坏。
- */
-export function qwenTtsParams(json: string | null | undefined): Record<string, number | string> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json ?? '{}');
-  } catch {
-    return {};
-  }
-  if (typeof parsed !== 'object' || parsed === null) return {};
-  const source = parsed as Record<string, unknown>;
-  const result: Record<string, number | string> = {};
-  const number = (key: string, low: number, high: number) => {
-    const value = source[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= low && value <= high) result[key] = value;
-  };
-  number('rate', 0.5, 2);
-  number('pitch', 0.5, 2);
-  number('volume', 0, 100);
-  if (typeof source['instruction'] === 'string' && source['instruction'].trim()) {
-    result['instruction'] = source['instruction'].trim().slice(0, 100);
-  }
-  return result;
+/** 智能体选的模型;没选或已停用时用这一类的默认模型 */
+function modelOrDefault(conn: Db, type: 'VAD' | 'ASR', id: string | null | undefined): ModelRow | undefined {
+  return loadModel(conn, id)
+    ?? one<ModelRow>(conn, 'SELECT id, model_type, config_json FROM models WHERE model_type = ? AND enabled = 1 ORDER BY is_default DESC, id LIMIT 1', type);
 }
 
-function buildModules(
-  conn: Db,
-  agent: AgentRow,
-  skip: ReadonlySet<string>,
-  voice: string | undefined,
-  language: string | undefined,
-): Record<string, unknown> {
-  // LLM 不在这张表里,它在循环之后单独处理 —— 因为 Intent/Memory 可能各自
-  // 挂一个辅助 LLM 放进同一个桶,若在这里用赋值写入就会把它们覆盖掉。
-  const pairs: [string, string | null][] = [
-    ['VAD', agent.vad_model_id],
-    ['ASR', agent.asr_model_id],
-    ['TTS', agent.tts_model_id],
-    ['Memory', agent.memory_model_id],
-    ['Intent', agent.intent_model_id],
-    ['VLLM', agent.vllm_model_id],
-  ];
-
+/**
+ * 组装引擎要的「模块配置」。产物形如:
+ *   { VAD: { VAD_SileroVAD: {...} }, ASR: {...}, TTS: { TTS_Qwen: {...} }, selected_module: { VAD: 'VAD_SileroVAD', … } }
+ *
+ * 引擎只负责听与说:对话模型、意图、记忆在 applyAgentRuntime 里固定成转发到控制塔与空实现。
+ * 引擎报上来的 `already`(它已经实例化的模块)里有同一个 VAD/ASR 时不重发 —— VAD 要载模型文件,重载代价不小。
+ */
+function buildModules(conn: Db, agent: AgentRow, already: Record<string, string>, withTts: boolean): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const selected: Record<string, string> = {};
 
-  for (const [type, modelId] of pairs) {
-    if (!modelId || skip.has(type)) continue;
-    const row = loadModel(conn, modelId);
-    if (!row) continue;
-    const config = parseConfig(row);
-
-    if (type === 'TTS') {
-      // 智能体选的音色覆盖模型上配的默认音色。服务端的 TTS provider 一律
-      // 优先读 private_voice,读不到才回落到 voice。
-      if (voice) config['private_voice'] = voice;
-      if (language) config['language'] = language;
-      if (config['type'] === 'qwen_audio_tts') Object.assign(config, qwenTtsParams(agent.tts_params_json));
-    }
-
-    if (type === 'Intent') {
-      // functions 在库里存成分号分隔的串,服务端要的是数组。
-      const functions = config['functions'];
-      if (typeof functions === 'string') {
-        config['functions'] = functions
-          .split(';')
-          .map((item) => item.trim())
-          .filter((item) => item.length > 0);
-      }
-    }
-
-    result[type] = { [row.id]: config };
+  for (const [type, id] of [['VAD', agent.vad_model_id], ['ASR', agent.asr_model_id]] as const) {
+    const row = modelOrDefault(conn, type, id);
+    if (!row || already[type] === row.id) continue;
+    result[type] = { [row.id]: parseConfig(row) };
     selected[type] = row.id;
-
-    // 意图与记忆模块可以再挂一个 LLM 做子任务(判意图 / 压缩历史)。
-    // 服务端按 id 去 config["LLM"] 里找,所以那个 id 必须一并下发,
-    // 否则它会因为找不到而回落到主 LLM —— 静默但行为不对。
-    if ((type === 'Intent' || type === 'Memory') && typeof config['llm'] === 'string') {
-      const helperId = config['llm'];
-      if (helperId && helperId !== agent.llm_model_id) {
-        const helper = loadModel(conn, helperId);
-        if (helper) {
-          const bucket = (result['LLM'] as Record<string, unknown> | undefined) ?? {};
-          bucket[helper.id] = parseConfig(helper);
-          result['LLM'] = bucket;
-        }
-      }
-    }
   }
 
-  // 主 LLM 要合进可能已被 Intent/Memory 预置的那个桶里,不能直接覆盖。
-  if (agent.llm_model_id && !skip.has('LLM')) {
-    const row = loadModel(conn, agent.llm_model_id);
-    if (row) {
-      const bucket = (result['LLM'] as Record<string, unknown> | undefined) ?? {};
-      bucket[row.id] = parseConfig(row);
-      result['LLM'] = bucket;
-      selected['LLM'] = row.id;
+  if (withTts) {
+    // 合成模型由音色决定;音色自带音量、语速、方言与语气(合成语气指令)和允许的情感标签。
+    // 选的音色用不了(审核中、模型停用、与模型不符)时退到默认千问合成模型的默认音色。
+    const resolved = resolveVoice(conn, agent.tts_voice_id);
+    if (resolved) {
+      const config: Record<string, unknown> = { ...resolved.model.config, type: resolved.model.provider };
+      delete config['voice'];
+      if (resolved.voice) Object.assign(config, ttsOverrides(resolved.voice));
+      else config['private_voice'] = (defaultVoiceOf(conn, resolved.model)?.voice) ?? defaultSystemVoice(modelFamily(resolved.model)).voice;
+      result['TTS'] = { [resolved.model.id]: config };
+      selected['TTS'] = resolved.model.id;
     }
   }
 
@@ -181,21 +103,8 @@ function buildModules(
   return result;
 }
 
-function agentVoice(conn: Db, agent: AgentRow): { voice?: string; language?: string } {
-  if (!agent.tts_voice_id) return {};
-  // 声音设计与复刻的音色要等百炼审核通过(status = ok)才能合成;没通过就不下发,设备用模型的默认音色。
-  const row = one<{ voice: string; languages: string }>(
-    conn,
-    "SELECT voice, languages FROM voices WHERE id = ? AND status = 'ok'",
-    agent.tts_voice_id,
-  );
-  if (!row) return {};
-  const language = agent.tts_language ?? row.languages.split('、')[0]?.trim();
-  return language ? { voice: row.voice, language } : { voice: row.voice };
-}
-
 /**
- * 大脑在控制塔的智能体:引擎只保留听、说与设备桥。
+ * 大脑在控制塔:引擎只保留听、说与设备桥。
  *   - LLM 换成 xiaodan_agent provider,一轮对话交给控制塔的 /xiaodan/agent/turn;令牌按设备签发;
  *   - Intent 固定 nointent、Memory 固定 nomem:工具、记忆都在控制塔,引擎再调一遍只会重复;
  *   - 不下发插件,对话记录由控制塔自己写(引擎再上报会重复)。
@@ -262,15 +171,7 @@ export function managerApi(conn: Db): Hono {
       ?? one<AgentRow>(conn, 'SELECT * FROM agents ORDER BY created_at LIMIT 1');
 
     if (agent) {
-      const modules = buildModules(
-        conn,
-        { ...agent, llm_model_id: null, vllm_model_id: null, tts_model_id: null,
-          memory_model_id: null, intent_model_id: null },
-        new Set(),
-        undefined,
-        undefined,
-      );
-      Object.assign(config, modules);
+      Object.assign(config, buildModules(conn, agent, {}, false));
     } else {
       config['selected_module'] = {};
     }
@@ -331,15 +232,7 @@ export function managerApi(conn: Db): Hono {
     const agent = one<AgentRow>(conn, 'SELECT * FROM agents WHERE id = ?', decision.agentId);
     if (!agent) return c.json(fail(CODE_DEVICE_NOT_FOUND, '设备绑定的智能体已不存在'));
 
-    // 服务端已经实例化过同一个模型的类型不必重发。只有 VAD/ASR 值得这样省 ——
-    // 它们要加载模型文件,重载代价高;其余模块都是轻量的 HTTP 客户端。
-    const already = body.selectedModule ?? {};
-    const skip = new Set<string>();
-    if (already['VAD'] && already['VAD'] === agent.vad_model_id) skip.add('VAD');
-    if (already['ASR'] && already['ASR'] === agent.asr_model_id) skip.add('ASR');
-
-    const { voice, language } = agentVoice(conn, agent);
-    const result: Record<string, unknown> = buildModules(conn, agent, skip, voice, language);
+    const result: Record<string, unknown> = buildModules(conn, agent, body.selectedModule ?? {}, true);
 
     const maxOutput = one<{ value: string }>(
       conn,
@@ -347,33 +240,8 @@ export function managerApi(conn: Db): Hono {
     )?.value;
     // 上游这里给的是字符串,服务端用 int() 包了一层,两种都能吃。保持一致。
     result['device_max_output_size'] = maxOutput ?? '0';
-    result['chat_history_conf'] = agent.chat_history_conf;
-
-    // 插件只在启用了工具调用时才下发。服务端会用 plugins 的键去展开可调函数列表,
-    // 在 nointent 模式下发过去反而会让它注册出一堆调不动的工具。
-    const intentModel = loadModel(conn, agent.intent_model_id);
-    const intentType = intentModel ? String(parseConfig(intentModel)['type'] ?? '') : 'nointent';
-    if (intentType && intentType !== 'nointent') {
-      // 只下发目录里还有的插件。库里可能残留已移除的条目(比如早先不对应任何函数的 get_time),
-      // 送过去引擎会按模块名展开出意料之外的函数,或者注册出调不动的工具。
-      const known = new Set(PLUGINS.map((plugin) => plugin.code));
-      const rows = all<{ plugin_code: string; params_json: string }>(
-        conn,
-        'SELECT plugin_code, params_json FROM agent_plugins WHERE agent_id = ?',
-        agent.id,
-      ).filter((row) => known.has(row.plugin_code));
-      if (rows.length > 0) {
-        const plugins: Record<string, string> = {};
-        // 值是【JSON 字符串】而不是对象:服务端拿到后会自己 json.loads 一次。
-        for (const row of rows) plugins[row.plugin_code] = row.params_json;
-        result['plugins'] = plugins;
-      }
-    }
-
-    result['prompt'] = agent.system_prompt.replaceAll('{{assistant_name}}', agent.name || '小单');
     result['summaryMemory'] = agent.summary_memory;
-
-    if (agent.runtime === 'agent') applyAgentRuntime(conn, result, mac);
+    applyAgentRuntime(conn, result, mac);
     // 设备每次连接都会来取配置:借这个时机补报错过的提醒等(见 agent/hooks.ts),不阻塞响应
     onDeviceConfigFetched(mac, agent.id);
 

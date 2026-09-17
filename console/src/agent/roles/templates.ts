@@ -8,8 +8,9 @@ import type { Db } from '../../db.ts';
 import { all, one, run, tx } from '../../db.ts';
 import { PLUGINS } from '../../catalog.ts';
 import { DEFAULT_AGENT_ID } from '../../seed.ts';
-import { QWEN_AUDIO_TTS_FLASH_VOICES } from '../../voice/system-voices.ts';
-import { voiceKey } from '../../voice/routes.ts';
+import { familyOf, systemVoiceOf } from '../../voice/system-voices.ts';
+import { DEFAULT_PROFILE, profileColumns, readProfile, type VoiceProfile } from '../../voice/profile.ts';
+import { qwenTtsModels, syncSystemVoices, type VoiceRow } from '../../voice/store.ts';
 
 export interface RoleTemplate {
   id: string;
@@ -23,7 +24,8 @@ export interface RoleTemplate {
   skills: readonly string[];
   /** 千问系统音色名(qwen-audio-3.0-tts-flash) */
   voice: string;
-  tts_params?: { rate?: number; pitch?: number; instruction?: string };
+  /** 与系统音色默认设置不同的说话设置;有就用(或新建)一个变体音色 */
+  voice_profile?: Partial<VoiceProfile>;
   /** MCP 服务器名字或地址里包含这些词就关联上 */
   mcp_hints?: readonly string[];
   /** 模板页上给用户的补充说明 */
@@ -72,7 +74,10 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
     plugins: [...COMMON_TOOLS, 'reminders', 'stories', 'music', 'vocab', 'image'],
     skills: ['bedtime-story', 'word-coach'],
     voice: 'longpaopao_v3.6',
-    tts_params: { rate: 0.95 },
+    voice_profile: {
+      rate: 0.95, tone_tags: ['gentle', 'story'],
+      emotion_tags: ['excited', 'curious', 'amazed', 'mischievously', 'empathetic', 'whispers', 'giggles', 'laughing'],
+    },
   },
   {
     id: 'english-teacher',
@@ -124,28 +129,37 @@ interface DefaultModels {
   vad_model_id: string | null;
   asr_model_id: string | null;
   llm_model_id: string | null;
-  tts_model_id: string | null;
-  intent_model_id: string | null;
-  memory_model_id: string | null;
+  image_model_id: string | null;
 }
 
-/** 在指定的合成模型下找模板音色;是千问合成模型但还没导入这个系统音色时导入它。找不到返回 null。 */
-export function ensureTemplateVoice(conn: Db, ttsModelId: string | null, voice: string): string | null {
-  if (!ttsModelId) return null;
-  const existing = one<{ id: string }>(conn, "SELECT id FROM voices WHERE tts_model_id = ? AND voice = ? AND status = 'ok'", ttsModelId, voice);
+/**
+ * 模板要的音色:在默认的千问合成模型(那一套里有这个音色)下找系统音色;模板带了说话设置时,
+ * 复用设置一样的变体,没有就建一个「龙泡泡·童童」。找不到返回 null。
+ */
+export function ensureTemplateVoice(conn: Db, template: Pick<RoleTemplate, 'voice' | 'voice_profile' | 'name'>): string | null {
+  const system = systemVoiceOf(template.voice);
+  const model = qwenTtsModels(conn).find((item) => !system || familyOf(item.config['model_name']) === system.family);
+  if (!model) return null;
+  syncSystemVoices(conn, model.id);
+  const base = one<VoiceRow>(conn, 'SELECT * FROM voices WHERE tts_model_id = ? AND voice = ? AND parent_id IS NULL ORDER BY id LIMIT 1', model.id, template.voice);
+  if (!base) return null;
+  if (!template.voice_profile) return base.id;
+  const wanted = profileColumns(readProfile({ ...DEFAULT_PROFILE, language: base.language, ...template.voice_profile }));
+  const same = (row: VoiceRow) => Object.entries(wanted).every(([key, value]) => (row as unknown as Record<string, unknown>)[key] === value);
+  const candidates = all<VoiceRow>(conn, 'SELECT * FROM voices WHERE tts_model_id = ? AND voice = ? ORDER BY parent_id IS NOT NULL, id', model.id, template.voice);
+  const existing = candidates.find(same);
   if (existing) return existing.id;
-  const model = one<{ provider: string }>(conn, 'SELECT provider FROM models WHERE id = ?', ttsModelId);
-  const system = QWEN_AUDIO_TTS_FLASH_VOICES.find((item) => item.voice === voice);
-  if (model?.provider !== 'qwen_audio_tts' || !system) return null;
-  const id = voiceKey(ttsModelId, voice);
-  run(
-    conn,
-    `INSERT OR IGNORE INTO voices (id, tts_model_id, name, voice, languages, description, tags, kind, status, sort, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'system', 'ok', ?, datetime('now'))`,
-    id, ttsModelId, system.name, system.voice, system.languages, system.description, system.tags,
-    100 + QWEN_AUDIO_TTS_FLASH_VOICES.indexOf(system),
-  );
-  return one<{ id: string }>(conn, 'SELECT id FROM voices WHERE tts_model_id = ? AND voice = ?', ttsModelId, voice)?.id ?? null;
+  let n = 2;
+  while (one(conn, 'SELECT 1 FROM voices WHERE id = ?', `${base.id}__${n}`)) n += 1;
+  const id = `${base.id}__${n}`;
+  run(conn,
+    `INSERT INTO voices (id, tts_model_id, name, voice, languages, sort, kind, status, description, tags, created_at,
+                         language, dialect, volume, rate, pitch, tone_tags, tone_text, emotion_tags, parent_id, gender, age, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'system', 'ok', ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    id, model.id, `${base.name}·${template.name}`.slice(0, 64), base.voice, base.languages, base.sort, base.description, base.tags,
+    wanted['language'], wanted['dialect'], wanted['volume'], wanted['rate'], wanted['pitch'], wanted['tone_tags'], wanted['tone_text'],
+    wanted['emotion_tags'], base.id, base.gender, base.age);
+  return id;
 }
 
 export interface ApplyResult {
@@ -158,28 +172,24 @@ export interface ApplyResult {
   missing: string[];
 }
 
-export function applyTemplate(conn: Db, template: RoleTemplate, overrides: { name?: string; tts_model_id?: string | null; llm_model_id?: string | null } = {}): ApplyResult {
+export function applyTemplate(conn: Db, template: RoleTemplate, overrides: { name?: string; llm_model_id?: string | null } = {}): ApplyResult {
   const base = one<DefaultModels>(conn, 'SELECT * FROM agents WHERE id = ?', DEFAULT_AGENT_ID)
     ?? one<DefaultModels>(conn, 'SELECT * FROM agents ORDER BY is_default DESC, created_at LIMIT 1');
-  const ttsModelId = overrides.tts_model_id === undefined ? base?.tts_model_id ?? null : overrides.tts_model_id;
   const llmModelId = overrides.llm_model_id === undefined ? base?.llm_model_id ?? null : overrides.llm_model_id;
   const missing: string[] = [];
 
   return tx(conn, () => {
     const id = `agent_${randomBytes(8).toString('hex')}`;
-    const voiceId = ensureTemplateVoice(conn, ttsModelId, template.voice);
+    const voiceId = ensureTemplateVoice(conn, template);
     if (!voiceId) missing.push(`音色 ${template.voice}(需要千问语音合成模型)`);
     run(
       conn,
-      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, tts_model_id,
-                           memory_model_id, intent_model_id, tts_voice_id, chat_history_conf, tts_params_json,
-                           runtime, max_steps, safety_level, description, greeting, role_template, llm_params_json, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'agent', ?, ?, ?, ?, ?, '{}', 0)`,
+      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, image_model_id, tts_voice_id,
+                           chat_history_conf, max_steps, safety_level, description, greeting, role_template, llm_params_json, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, '{}', 0)`,
       id, overrides.name?.trim() || template.name, template.system_prompt,
-      base?.vad_model_id ?? null, base?.asr_model_id ?? null, llmModelId, ttsModelId,
-      base?.memory_model_id ?? null, base?.intent_model_id ?? null, voiceId,
-      JSON.stringify(template.tts_params ?? {}), template.max_steps, template.safety_level,
-      template.description, template.greeting, template.id,
+      base?.vad_model_id ?? null, base?.asr_model_id ?? null, llmModelId, base?.image_model_id ?? null, voiceId,
+      template.max_steps, template.safety_level, template.description, template.greeting, template.id,
     );
 
     const known = new Set(PLUGINS.map((plugin) => plugin.code));

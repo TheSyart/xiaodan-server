@@ -46,7 +46,7 @@ device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Consol
 ```
 
 Every field of that contract was checked against the upstream Java implementation and
-against the Python code that consumes it, and 121 tests hold it in place
+against the Python code that consumes it, and 240 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
@@ -80,9 +80,9 @@ OTA always answers HTTP 200 with a top-level `status`: `bound`, `unbound`,
 
 ## Tools: date, weather and volume
 
-When an agent's *tool calling* is set to *function call*, the engine offers the ticked plugins to the model as tools on
-every turn. This repository ships three plugins of its own (`server/plugins/`, copied over the engine's
-`plugins_func/functions/` when the image is built). Besides answering, they push a screen to the Xiaodan device:
+This repository ships three plugins of its own (`server/plugins/`, copied over the engine's `plugins_func/functions/` when
+the image is built). They run inside the engine; when an agent has the matching capability ticked, the console brain calls
+them through the device bridge (see "Agent brain"). Besides answering, they push a screen to the Xiaodan device:
 
 | Plugin | What it does | Data source | How it answers |
 |---|---|---|---|
@@ -114,8 +114,8 @@ device and strips it from subtitles and speech. The image also carries three exa
 build fails if any anchor is missing:
 
 - `core/connection.py`: the device secret in the header log line becomes `<redacted>`.
-- `core/connection.py`: replies that come through the `direct_answer` virtual tool now send an emotion message. With
-  function calling on, most replies take that path, and upstream sends no emotion there at all.
+- `core/connection.py`: replies that come through the `direct_answer` virtual tool now send an emotion message. When the
+  engine runs function calling itself, most replies take that path, and upstream sends no emotion there at all.
 - `core/providers/llm/openai/openai.py`: models sometimes write tool calls as text inside the reply instead of structured
   `tool_calls`. Forms seen so far include DeepSeek DSML (`<｜DSML｜function_calls>` ...), `<tool_call>get_weather</tool_call>` and
   `<tool_calls><tool_name>show_calendar</tool_name></tool_calls>`; upstream spoke the markup or stayed silent and ran no tool. The
@@ -124,20 +124,19 @@ build fails if any anchor is missing:
   text streams as it arrives, while such blocks in replies without tools are removed. Each conversion or removal logs a
   warning.
 
-The custom Omni TTS provider returns 50 ms of silence for a fragment with no letter, digit or Chinese character. Otherwise
-the request would contain only the read-aloud instruction, and the model would speak the instruction itself.
+The last two patches serve the removed engine path (the engine running function calls itself). They stay in the image, along with
+the model gateway provider files, until the production database is confirmed clean after migration.
 
-New installations default to function calling with these three plugins ticked. Existing installations are left alone:
-switch the agent's tool calling to *function call* on the Agents page and tick the plugins. The model must support
-function calling: OpenAI `tools` with streamed `tool_calls`, or one of the text forms described above.
+New agents have these three capabilities ticked. Capabilities are ticked per role on the Agents page; the Models page no longer has
+a *tool calling* setting. The chat model must support function calling: OpenAI `tools` with streamed `tool_calls`. When a model writes
+a call as one of the text forms above, the console recognises and runs it as well.
 
 ## Agent brain (console runtime)
 
-Each agent (role) has one of two "brains", switchable on the Agents page; switching back is the rollback:
-
-- **Engine path (legacy)**: the upstream engine runs tools via function calling, at most five levels deep, with one global prompt template.
-- **Console agent**: each turn is handed to the console, which runs a multi-step loop (model → tools → model → … → answer).
-  Tools, MCP, skills, reminders and the content library all live in the console.
+Every agent (role) has its brain in the console: each turn is handed to the console, which runs a multi-step loop
+(model → tools → model → … → answer). Tools, MCP, skills, reminders and the content library all live in the console. The engine
+only listens (VAD, ASR), speaks (TTS) and runs the few plugins that must run inside it. The old engine path (the engine running
+function calls itself) was removed in migration v8, together with the Intent, Memory and vision model types.
 
 ```
 device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent" ──POST──▶ console /xiaodan/agent/turn
@@ -146,8 +145,12 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
           engine device bridge :8003 /xiaodan/bridge/* ◀── console: call engine plugins (calendar/weather/volume), announcements, screen pushes
 ```
 
-- For these agents agent-models sends the `xiaodan_agent` provider with a per-device token (`mac.HMAC(secret)`), fixes
-  Intent=nointent and Memory=nomem, sends no plugins and sets `chat_history_conf=0` (the console writes chat history itself, tagged with the agent ID).
+- For every agent, agent-models sends the `xiaodan_agent` provider with a per-device token (`mac.HMAC(secret)`), fixes
+  Intent=nointent and Memory=nomem, sends no plugins and sets `chat_history_conf=0` (the console writes chat history itself, tagged
+  with the agent ID; nothing is written when the agent's chat history setting is off).
+- **Images**: once a chat model has *supports images* switched on in the Models page, the Playground accepts image attachments
+  (at most 3, shrunk to 1024 px in the browser) and images returned by MCP tools are passed to the model. Without it there is no
+  image understanding: the prompt says so, and a turn with images carries a note that the model cannot see them.
 - Text streams to the engine as it is generated, so the device starts speaking immediately; tools run in parallel with
   individual timeouts; when the step budget is used up, a final call without tools forces an answer. A heartbeat every
   2 seconds lets the provider notice interruptions; interrupting closes the request and the console cancels the model call and tools.
@@ -167,7 +170,8 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 
 ### Console agent capabilities
 
-- **Web search** (tool `web_search`, plugin code `search`): providers are configured and switched on the Tools & services page.
+- **Web search** (tool `web_search`, plugin code `search`): providers are configured and switched on the Tools & services page
+  (which now only covers search).
   The default is DeepSeek's official web search: neither DeepSeek's Chat nor Responses API offers search, but its Anthropic-compatible
   API supports the `web_search_20250305` server tool (the default search in deepseek-ai/deepseek-harness). One Messages request per query,
   retried once when the model does not trigger a search; the chat model's key can be reused. Bocha and Tavily are also available.
@@ -202,10 +206,13 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   (`media/vocab/`), accepts CSV/JSON imports, schedules reviews with Leitner boxes (a wrong answer comes back after 5 minutes, correct answers
   after 1/2/4/7/15 days), shows word cards on new firmware, and pairs with the `word-coach` skill.
 
-- **Drawing** (`generate_image`, plugin code `image`): image providers are configured and switched on the Tools & services page — Qwen
-  qwen-image (Model Studio compatible-mode), Model Studio's native API (z-image-turbo, wan2.7-image) or any OpenAI-compatible
-  `/images/generations` (OpenAI, Volcengine Seedream, SiliconFlow); the Qwen speech model's key can be reused. The prompt gets a
-  small-screen style suffix (centred subject, flat colours; child mode adds child-safety wording) and the original goes to the Gallery.
+- **Drawing** (`generate_image`, plugin code `image`): text-to-image models are configured on the Models page, Qwen (Model Studio) only:
+  - `qwen-image-3.0-pro` (recommended), `qwen-image-2.0` and `z-image-turbo` use the synchronous `multimodal-generation/generation` endpoint;
+  - `wan2.7-image` and `wan2.7-image-pro` run as async tasks, polled every 2 seconds for at most 110 seconds, and can be interrupted.
+  - A new image model is prefilled with the key and workspace of an existing Qwen model; "Draw a test image" on the Models page shows a pixel-art preview.
+  - An agent with drawing ticked can pick its own image model; otherwise the default one is used.
+
+  The prompt gets a small-screen style suffix (centred subject, flat colours; child mode adds child-safety wording) and the original goes to the Gallery.
   A worker thread crops to a square, area-averages to 128×128, picks 16 colours by median cut, applies Floyd–Steinberg dithering and packs
   4 bits per pixel (8192 bytes), sent as 16 chunks of `{"type":"xiaodan_img","id","seq","n","w","h","pal","d"}` to devices with
   `features.xiaodan ≥ 2`. Each chunk carries 512 bytes, so a whole message stays under the firmware's 1024-byte receive buffer. The
@@ -217,15 +224,16 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
   - 英语老师: an English tutor.
   - AI资讯官: an AI news presenter that uses the `ai-news-brief` skill and links an MCP server whose name contains `aihot`.
 
-  Each template fills in the persona, tools, skills, greeting and a Qwen system voice (imported on the spot if missing). Models are
-  copied from the default agent. The result is an ordinary agent; anything missing, such as the aihot MCP server, is listed after
+  Each template fills in the persona, tools, skills, greeting and voice. Models are copied from the default agent. A template can
+  carry voice settings (童童: rate 0.95, gentle, storytelling and a set of emotion tags); when they differ from the system voice's
+  settings, a variant is created (「龙泡泡·童童」) and reused the next time the same settings are needed. The result is an ordinary agent; anything missing, such as the aihot MCP server, is listed after
   creation.
 - **Switching roles by voice** (`list_roles`/`switch_role`, plugin code `roles`): saying "换童童来陪我" rebinds the device.
   - Persona, tools and memory rules come from the console, so they apply from the next turn.
   - Voice, recognition and other engine-side settings are fixed when the connection opens. When those differ, the console closes
     the connection after the turn; the device reconnects, fetches the new configuration and the new role greets in its own voice.
   - The device page's "Roles & memory" dialog can restrict which roles a device may switch to. Without a restriction, every
-    console-driven role is allowed.
+    role is allowed.
 - **Long-term memory** (`remember`/`forget`/`list_memories`, plugin code `memory`): roles with this tool record stable facts the user
   mentions, such as name, age, likes and birthday, one short sentence each. Facts are stored per device and shared across roles.
   - They are injected into the system prompt of roles that have the tool.
@@ -237,11 +245,13 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 
 ## Qwen speech and voices
 
-Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Audio 3.0) directly, without the model gateway:
+Speech recognition, speech synthesis and text-to-image all use Alibaba Cloud Model Studio (Qwen) directly, without the model gateway;
+the Models page only offers Qwen for these three types.
 
 - Recognition `qwen_audio_asr`: after the button is released the whole clip is wrapped as WAV and sent to the synchronous
   `qwen-audio-3.0-asr-flash` endpoint, with optional hot words.
-- Synthesis `qwen_audio_tts`: `qwen-audio-3.0-tts-flash` over the CosyVoice WebSocket protocol, **one task per sentence**,
+- Synthesis `qwen_audio_tts`: `qwen-audio-3.0-tts-flash` or `qwen-audio-3.0-tts-plus` (their system voices differ and cannot be mixed,
+  so switching is refused while agents use the model's voices), over the CosyVoice WebSocket protocol, **one task per sentence**,
   encoding PCM as it arrives. Upstream `alibl_stream` is not reused: it opens one task per turn, so pauses while the console runs
   multi-step tools let the service close the idle task, and it holds audio files until the end of the turn.
   The sample rate follows the engine connection's `sample_rate` (24000 in the handshake template), matching the engine's Opus encoder.
@@ -251,12 +261,39 @@ Speech recognition and synthesis can talk to Alibaba Cloud Model Studio (Qwen-Au
 - The pure logic of both providers lives in `server/engine/qwen_audio.py` (unit tests); `server/tests/smoke_qwen_audio.py` runs the
   networking parts inside the image against fake Model Studio servers.
 
-The Voices page manages voices under a Qwen synthesis model: import the 12 named system voices (three of them child voices),
-preview, **voice design** (from a text description) and **voice cloning** (10–20 seconds of speech, consent checkbox required).
-Designed and cloned voices are only sent to devices after Model Studio approves them; until then devices use the model's default voice.
-Cloning samples go through Model Studio's temporary upload (`oss://`) first; if that fails the console serves a one-time link valid for
-10 minutes at `/xiaozhi/ota/voice-sample/<token>` (nginx does not apply unified auth to that prefix, so Model Studio can fetch it),
-revoked as soon as the create request returns. Each agent can tune rate, pitch, volume and a tone instruction.
+### Voices
+
+Each agent picks exactly one voice, and the voice decides the synthesis model. A voice belongs to a Qwen synthesis model and carries
+its own speaking settings, configured on the Voices page:
+
+| Setting | How it takes effect |
+|---|---|
+| Language | Model Studio has no synthesis language parameter: the language decides which language the model replies in (via the prompt) and the preview text |
+| Dialect | 20 dialects, only when the language is Chinese; written into the tone instruction as 「请用四川话表达」, and the model's wording picks up a little of the dialect |
+| Volume, rate, pitch | synthesis parameters `volume` (0–100), `rate` (0.5–2), `pitch` (0.5–2) |
+| Fixed tone | tick gentle, lively, a bit slower… plus one free-text note; combined with the dialect into `instruction`, capped at 100 units (a Chinese character counts 2), and settings over the cap cannot be saved |
+| Emotion tags | the Model Studio tags the model may insert: emotion tags (`[excited]`, `[whispers]`…, at the start of a sentence) and sound tags (`[laughing]`, `[sighing]`…, where the sound happens) |
+
+- **System voices**: opening the Voices page fills in the set for each synthesis model (12 for flash, 2 for plus); nothing to import.
+  The 500-odd base voices can be added by ID.
+- **Voice design** (from a text description) and **voice cloning** (10–20 seconds of speech, consent checkbox required): the voice is only
+  sent to devices after Model Studio approves it; until then devices use the default voice. Cloning samples go through Model Studio's
+  temporary upload (`oss://`) first; if that fails the console serves a one-time link valid for 10 minutes at
+  `/xiaozhi/ota/voice-sample/<token>` (nginx does not apply unified auth to that prefix, so Model Studio can fetch it), revoked as soon as
+  the create request returns.
+- **Duplicate as new voice**: the same Model Studio voice with another set of settings (a variant). Deleting a variant only deletes it
+  locally; refreshing the review status updates all variants.
+- **Preview**: unsaved settings in the settings dialog can be previewed directly, through Model Studio's non-streaming synthesis endpoint.
+
+How emotion tags flow:
+
+1. When the voice allows tags, the prompt gains a "voice expression" section listing them; otherwise that section is absent and
+   bracketed stage directions are forbidden.
+2. A reply such as `😆[excited]哇,你做到啦![laughing]` goes to the engine unchanged; the console strips the tags before writing chat
+   history, and the Playground shows them on a separate line under the bubble.
+3. The engine's Qwen synthesis provider removes tags that are not allowed and keeps allowed ones in the text to speak. Subtitles sent to
+   the device have every tag removed, and a fragment that is only tags is carried into the next one. Upstream's post-split trimming strips
+   square brackets, so the provider overrides that step (`qwen_audio.trim_segment`), and segments are never split inside a tag.
 
 ## Layout
 
@@ -269,8 +306,8 @@ console/            the console (Node + Vue)
     identity.ts       ← device identity: secret hashes, binding codes, identity events
     catalog.ts        ← provider and plugin catalogue (code constants, not database rows)
     schema.sql        ← v0 baseline schema
-    migrations.ts     ← later schema changes, applied in order via PRAGMA user_version
-    voice/            ← voices: Model Studio preview, voice design and cloning, system voice list, one-time sample links
+    migrations.ts     ← later schema changes, applied in order via PRAGMA user_version; long ones live in migrations/
+    voice/            ← voices: speaking settings (pure functions), system voice list and sync, Model Studio preview, voice design and cloning, one-time sample links
     agent/            ← agent runtime: turn endpoint, multi-step loop, prompts, context, tool registry, device-bridge client;
                         one subdirectory per capability (search, mcp, skills, reminders, media, vocab, image, roles, memory)
     cli.ts            ← CLI: set a password, import keys from an old config
@@ -317,9 +354,10 @@ If the server previously ran in "single module" mode with its configuration in
 node console/dist/cli.js import-single-config /path/to/.config.yaml
 ```
 
-This imports the models named in `selected_module` along with their keys, attaches them to
-the default agent, and carries over the persona and WebSocket address. **Keys never leave
-the server** during this.
+This imports the ASR, LLM, TTS and VAD models named in `selected_module` along with their keys,
+attaches them to the default agent, and carries over the persona and WebSocket address. After a
+Qwen synthesis model is imported, its system voices are filled in and the default agent gets the
+default voice. **Keys never leave the server** during this.
 
 Then switch the server to API mode:
 
@@ -446,6 +484,15 @@ archiving the data directory at shutdown cannot lose the last few writes.
 
 **It contains model API keys.** Do not commit the data directory; `.gitignore` excludes it.
 
+**Migrations only go forward.** A new version upgrades the database on its first start, and an older build refuses to start on a
+newer database. Rolling back the image therefore also means restoring the data backup taken before the upgrade, and changes made
+after the upgrade are lost. Migration v8 (Qwen-only speech, voices carrying their own settings, removal of the engine path) is the
+largest so far, so take a data backup in the panel before deploying it. It:
+- deletes vision, Intent and Memory models and non-Qwen image services (Qwen ones become text-to-image models);
+- once Qwen recognition or synthesis is configured, points agents at Qwen and deletes other synthesis models with their voices and
+  unused other recognition models;
+- moves each agent's synthesis parameters onto its voice, splitting off variants where agents sharing a voice used different settings.
+
 ## Measured in production (2026-09-13)
 
 The replacement was carried out on the existing deployment; these numbers are from the
@@ -482,9 +529,9 @@ and onnxruntime both work under the default profile.
 ## Tests
 
 ```bash
-npm test        # 121 tests: API contract, authorisation boundaries, device identity and binding, migrations
+npm test        # 240 tests: API contract, authorisation boundaries, device identity and binding, migrations, voices, agent runtime
 npm run check   # typecheck plus tests
-python3 -m unittest discover -s server/tests -v   # 29 plugin tests: card fields, weather parsing, dates, volume
+python3 -m unittest discover -s server/tests -v   # 116 unit tests: plugin cards, weather parsing, tool-call text, Qwen speech and emotion tags
 ```
 
 The contract tests assert the response shapes the server actually consumes, and each one

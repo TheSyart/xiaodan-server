@@ -29,7 +29,8 @@ CONSOLE_TOOLS.set(IMAGE_PLUGIN, () => {
       if (!prompt) return { ok: false, content: '没有说要画什么,问一下用户。' };
       try {
         const record = await generateImage(ctx.deps, {
-          prompt, mac: ctx.device.mac, agentId: ctx.agent.id, childSafe: ctx.agent.safety_level === 'child', signal: ctx.signal,
+          prompt, mac: ctx.device.mac, agentId: ctx.agent.id, modelId: ctx.agent.image_model_id,
+          childSafe: ctx.agent.safety_level === 'child', signal: ctx.signal,
         });
         const canShow = xiaodanVersion(ctx.device) >= 2;
         if (canShow) for (const message of imageMessages(record.id, { size: 128, palette: record.palette, packed: record.packed })) ctx.sink.device(message);

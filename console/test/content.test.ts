@@ -129,7 +129,7 @@ describe('检索与工具', () => {
   test('需要长回答时放宽模型输出上限', async () => {
     run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_X', 'LLM', 'x', 'openai', ?)",
       JSON.stringify({ base_url: 'https://llm.example/v1', model_name: 'm', max_tokens: 1200 }));
-    run(conn, "UPDATE agents SET llm_model_id = 'LLM_X', runtime = 'agent' WHERE id = ?", DEFAULT_AGENT_ID);
+    run(conn, "UPDATE agents SET llm_model_id = 'LLM_X' WHERE id = ?", DEFAULT_AGENT_ID);
     const bodies: any[] = [];
     const fetchImpl = async (_url: string, init: RequestInit = {}) => {
       const body = JSON.parse(String(init.body));
@@ -196,6 +196,37 @@ describe('故事音频合成', () => {
     assert.equal(requests[0].input.format, 'mp3');
     assert.equal(requests[0].input.voice, 'longanhuan_v3.6');
     assert.match(requests[0].input.instruction, /温柔/u);
+  });
+
+  test('讲故事用选定的音色和它的说话设置,故事自带的语气接在后面', async () => {
+    seedMedia(conn, dataDir, SEED_DIR);
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Q', 'TTS', 'q', 'qwen_audio_tts', ?)",
+      JSON.stringify({ type: 'qwen_audio_tts', api_key: 'sk' }));
+    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status, dialect, rate, volume, tone_tags)
+               VALUES ('v_mom', 'TTS_Q', '妈妈', 'qwen-audio-3.0-tts-flash-mom-001', 'clone', 'ok', '四川话', 0.9, 60, '["soft"]')`);
+    const app = createApp(conn, { agent: { bridge: new QuietBridge(), dataDir: () => dataDir, log: () => {} } });
+    const put = (voiceId: string) => app.request('http://localhost/api/media/story-voice', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ voice_id: voiceId }),
+    });
+    assert.equal((await put('nope')).status, 400);
+    assert.equal((await put('v_mom')).status, 200);
+    const list = await (await app.request('http://localhost/api/media')).json() as { story_voice: string; story_voice_effective: string };
+    assert.deepEqual([list.story_voice, list.story_voice_effective], ['v_mom', 'v_mom']);
+
+    const requests: any[] = [];
+    const fetchImpl = async (_url: string, init: RequestInit = {}) => {
+      requests.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ output: { audio: { data: Buffer.from('MP3|').toString('base64') } } }));
+    };
+    await synthesizeStory({ conn, fetch: fetchImpl, bridge: new QuietBridge(), dataDir: () => dataDir, log: () => {} }, 'moon-postman');
+    const input = requests[0].input;
+    assert.deepEqual([input.voice, input.rate, input.volume], ['qwen-audio-3.0-tts-flash-mom-001', 0.9, 60]);
+    assert.match(input.instruction, /^请用四川话表达,轻声细语,./u);
+
+    // 选的音色还在审核:退回默认音色,不至于合成失败
+    run(conn, "UPDATE voices SET status = 'pending' WHERE id = 'v_mom'");
+    const fallback = await (await app.request('http://localhost/api/media')).json() as { story_voice_effective: string };
+    assert.equal(fallback.story_voice_effective, 'TTS_Q__longanhuan_v3.6');
   });
 
   test('没有千问合成模型时报错并记为失败', async () => {

@@ -1,10 +1,10 @@
-// 外部服务商配置(service_providers 表):联网搜索、文生图。一类可以配多家,默认那家生效。
+// 外部服务商配置(service_providers 表):联网搜索。可以配多家,默认那家生效。
 // 配置里的密钥可以直接填,也可以引用「模型」页里某个模型的密钥(例如用 DeepSeek 对话模型的 Key 做搜索),免得填两遍。
 
 import type { Db } from '../db.ts';
 import { one } from '../db.ts';
 
-export type ServiceKind = 'search' | 'image';
+export type ServiceKind = 'search';
 
 export interface ServiceRow {
   id: string;

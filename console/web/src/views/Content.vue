@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { api, type MediaItem, type VocabBook, type VocabProgress } from '../api';
+import { api, type MediaItem, type VocabBook, type VocabProgress, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -16,6 +16,8 @@ const tab = ref<Tab>('story');
 const items = ref<MediaItem[]>([]);
 const ttsReady = ref(false);
 const storyVoice = ref('');
+const storyVoiceEffective = ref<string | null>(null);
+const voices = ref<Voice[]>([]);
 const books = ref<VocabBook[]>([]);
 const progress = ref<VocabProgress[]>([]);
 const loading = ref(true);
@@ -24,11 +26,14 @@ const loadError = ref('');
 async function load() {
   loadError.value = '';
   try {
-    const [m, b, p] = await Promise.all([
-      api.get<{ items: MediaItem[]; tts_ready: boolean; story_voice: string }>('/media'),
+    const [m, b, p, v] = await Promise.all([
+      api.get<{ items: MediaItem[]; tts_ready: boolean; story_voice: string; story_voice_effective: string | null }>('/media'),
       api.get<{ items: VocabBook[] }>('/vocab/books'),
       api.get<{ items: VocabProgress[] }>('/vocab/progress'),
+      api.get<{ items: Voice[] }>('/voices'),
     ]);
+    voices.value = v.items.filter((voice) => voice.status === 'ok' && voice.compatible);
+    storyVoiceEffective.value = m.story_voice_effective;
     items.value = m.items;
     ttsReady.value = m.tts_ready;
     storyVoice.value = m.story_voice;
@@ -42,6 +47,17 @@ async function load() {
 }
 onMounted(load);
 onBeforeUnmount(stopPlayback);
+
+async function chooseStoryVoice(id: string) {
+  try {
+    await api.put('/media/story-voice', { voice_id: id });
+    storyVoice.value = id;
+    toast('讲故事的音色已更换。已经合成过的故事点「重新合成」才会换声音。');
+    await load();
+  } catch (e) {
+    toastError(e);
+  }
+}
 
 const stories = computed(() => items.value.filter((i) => i.kind === 'story'));
 const music = computed(() => items.value.filter((i) => i.kind === 'music'));
@@ -225,9 +241,13 @@ async function removeBook(book: VocabBook) {
       <div class="card-head">
         <div>
           <h2><AppIcon name="news" :size="18" />有声故事</h2>
-          <p>自带 6 个原创故事。音频由千问合成(音色 <span class="chip-mono">{{ storyVoice }}</span>,在设置页可改)。</p>
+          <p>自带 6 个原创故事。音频由千问按下面选的音色合成,音色的语速、方言与语气也会带上。</p>
         </div>
         <div class="card-actions">
+          <select class="select" style="width: auto; min-width: 160px" :value="storyVoice" aria-label="讲故事的音色" @change="chooseStoryVoice(($event.target as HTMLSelectElement).value)">
+            <option value="">默认音色{{ storyVoiceEffective && !storyVoice ? `(${voices.find((v) => v.id === storyVoiceEffective)?.name ?? ''})` : '' }}</option>
+            <option v-for="voice in voices" :key="voice.id" :value="voice.id">{{ voice.name }}</option>
+          </select>
           <button v-if="ttsReady && missingAudio" class="btn btn-sm" type="button" @click="synthesizeAll"><AppIcon name="volume" :size="14" /><span>合成缺音频的 {{ missingAudio }} 个</span></button>
           <button class="btn btn-sm" type="button" @click="openStory(null)"><AppIcon name="plus" :size="14" /><span>新故事</span></button>
         </div>

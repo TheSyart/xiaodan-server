@@ -12,16 +12,14 @@ import { seed, SECRET_KEY } from './seed.ts';
 import { authMode, clearLocalAdmin, setAdmin } from './auth.ts';
 import { getSetting, setSetting } from './settings.ts';
 import { providerDef, type ModelType } from './catalog.ts';
+import { defaultVoiceOf, loadTtsModel, syncSystemVoices } from './voice/store.ts';
 
 /** 单模块 .config.yaml 里的模块段 → 我们的模型类型。 */
 const SECTIONS: [string, ModelType][] = [
   ['ASR', 'ASR'],
   ['LLM', 'LLM'],
   ['TTS', 'TTS'],
-  ['VLLM', 'VLLM'],
   ['VAD', 'VAD'],
-  ['Memory', 'Memory'],
-  ['Intent', 'Intent'],
 ];
 
 /**
@@ -86,13 +84,17 @@ function importSingleConfig(path: string): void {
   // 把导入的模型挂到默认智能体上,省得再去页面点一遍
   const agent = one<{ id: string }>(conn, 'SELECT id FROM agents WHERE is_default = 1 LIMIT 1');
   if (agent) {
-    const columns: Record<string, string> = {
-      VAD: 'vad_model_id', ASR: 'asr_model_id', LLM: 'llm_model_id', VLLM: 'vllm_model_id',
-      TTS: 'tts_model_id', Memory: 'memory_model_id', Intent: 'intent_model_id',
-    };
+    const columns: Record<string, string> = { VAD: 'vad_model_id', ASR: 'asr_model_id', LLM: 'llm_model_id' };
     for (const [type, id] of Object.entries(chosen)) {
       const column = columns[type];
       if (column) run(conn, `UPDATE agents SET ${column} = ? WHERE id = ?`, id, agent.id);
+    }
+    // 合成模型挂在音色上:导入的千问合成模型补齐系统音色,默认智能体用它的默认音色
+    const tts = chosen['TTS'] ? loadTtsModel(conn, chosen['TTS']) : undefined;
+    if (tts) {
+      syncSystemVoices(conn, tts.id);
+      const voice = defaultVoiceOf(conn, tts);
+      if (voice) run(conn, 'UPDATE agents SET tts_voice_id = ? WHERE id = ?', voice.id, agent.id);
     }
     console.log(`已挂到默认智能体 ${agent.id}`);
   }

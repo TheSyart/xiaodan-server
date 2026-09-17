@@ -76,10 +76,11 @@ export interface SetupStatus {
 export interface ProviderField {
   key: string;
   label: string;
-  type: 'string' | 'password' | 'number' | 'boolean' | 'text';
+  type: 'string' | 'password' | 'number' | 'boolean' | 'text' | 'select';
   default?: string | number | boolean;
   required?: boolean;
   hint?: string;
+  options?: { value: string; label: string }[];
 }
 
 export interface ProviderDef {
@@ -95,15 +96,25 @@ export interface PluginDef {
   description: string;
   keyless: boolean;
   fields: ProviderField[];
-  /** engine 只在引擎旧路径生效;agent 只在控制塔运行时生效;both 两边都行 */
-  runtime: 'engine' | 'agent' | 'both';
-  group?: string;
+  group: string;
+}
+
+/** 音色设置的词表(与控制塔 voice/profile.ts 一致) */
+export interface VoiceCatalog {
+  languages: { label: string; code: string; english: string; sample: string }[];
+  dialects: string[];
+  tone_chips: { id: string; label: string; phrase: string }[];
+  control_tags: { tag: string; label: string }[];
+  rich_tags: { tag: string; label: string }[];
+  recommended_tags: string[];
+  instruction_units: number;
 }
 
 export interface Catalog {
   providers: Record<string, ProviderDef[]>;
   plugins: PluginDef[];
   modelTypes: string[];
+  voice: VoiceCatalog;
 }
 
 export interface Model {
@@ -117,13 +128,30 @@ export interface Model {
   remark: string;
 }
 
-export interface Voice {
+/** 音色的说话设置 */
+export interface VoiceProfile {
+  language: string;
+  dialect: string;
+  volume: number;
+  rate: number;
+  pitch: number;
+  tone_tags: string[];
+  tone_text: string;
+  emotion_tags: string[];
+}
+
+export interface Voice extends VoiceProfile {
   id: string;
   tts_model_id: string;
+  model_label: string;
+  model_name: string;
+  family: 'flash' | 'plus';
   name: string;
+  /** 百炼里的音色值 */
   voice: string;
-  languages: string;
-  /** system 服务商自带;design 声音设计;clone 声音复刻 */
+  /** 能说的语种 */
+  languages: string[];
+  /** system 百炼自带;design 声音设计;clone 声音复刻 */
   kind: 'system' | 'design' | 'clone';
   /** 设计与复刻的音色要百炼审核通过(ok)才能用 */
   status: 'ok' | 'pending' | 'failed';
@@ -132,36 +160,30 @@ export interface Voice {
   prompt: string;
   status_detail: string;
   created_at: string | null;
+  updated_at: string | null;
+  gender: string;
+  age: number | null;
+  /** 复制出来的变体指回原音色 */
+  parent_id: string | null;
+  /** 与所属合成模型相符(flash/plus 不能混用) */
+  compatible: boolean;
+  /** 合成出来的语气指令 */
+  instruction: string;
+  summary: string;
   agent_count: number;
-}
-
-/** 千问合成按智能体调的参数 */
-export interface TtsParams {
-  rate?: number;
-  pitch?: number;
-  volume?: number;
-  instruction?: string;
+  agents: { id: string; name: string }[];
 }
 
 export interface Agent {
   id: string;
   name: string;
   system_prompt: string;
-  vad_model_id: string | null;
   asr_model_id: string | null;
   llm_model_id: string | null;
-  vllm_model_id: string | null;
-  tts_model_id: string | null;
-  memory_model_id: string | null;
-  intent_model_id: string | null;
+  image_model_id: string | null;
+  /** 智能体绑一个音色:合成模型、音量语速、方言语气都跟着它 */
   tts_voice_id: string | null;
-  /** 合成语言;为空时取所选音色支持列表里的第一个 */
-  tts_language: string | null;
   chat_history_conf: number;
-  /** TtsParams 的 JSON */
-  tts_params_json: string;
-  /** 大脑在哪:engine 引擎旧路径 / agent 控制塔智能体运行时 */
-  runtime: 'engine' | 'agent';
   max_steps: number;
   safety_level: 'standard' | 'child';
   description: string;
@@ -200,6 +222,7 @@ export interface RoleTemplate {
   skills: string[];
   /** 千问系统音色名 */
   voice: string;
+  voice_name: string;
   note?: string;
   /** 模板要用、但技能页里还没有的技能 */
   missing_skills: string[];
@@ -354,7 +377,7 @@ export interface ServiceDef {
 
 export interface ServiceProvider {
   id: string;
-  kind: 'search' | 'image';
+  kind: 'search';
   name: string;
   provider: string;
   config: Record<string, unknown>;

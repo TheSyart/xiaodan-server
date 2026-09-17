@@ -59,8 +59,8 @@ export const DEFAULT_SETTINGS: SettingDef[] = [
   },
 
   // ---- 内容库 ----
-  { key: 'media.story_voice', value: 'longanhuan_v3.6', type: 'string', label: '有声故事的合成音色(千问音色名)' },
-  { key: 'media.story_tts_model', value: '', type: 'string', label: '合成有声故事用的语音合成模型 id(留空自动选千问合成模型)' },
+  // 值是音色 id(音色页里的某个音色);留空用默认千问合成模型的默认音色。在内容库页选择。
+  { key: 'media.story_voice', value: '', type: 'string', label: '讲有声故事用的音色', internal: true },
 
   // ---- 对话行为 ----
   {

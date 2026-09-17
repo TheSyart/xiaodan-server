@@ -27,15 +27,15 @@ export function loadAgent(deps: AgentDeps, id: string): AgentRow | undefined {
     name: String(row['name'] ?? ''),
     system_prompt: String(row['system_prompt'] ?? ''),
     llm_model_id: (row['llm_model_id'] as string | null) ?? null,
-    tts_model_id: (row['tts_model_id'] as string | null) ?? null,
+    image_model_id: (row['image_model_id'] as string | null) ?? null,
     tts_voice_id: (row['tts_voice_id'] as string | null) ?? null,
+    chat_history_conf: Number(row['chat_history_conf'] ?? 1),
     description: String(row['description'] ?? ''),
     role_template: String(row['role_template'] ?? ''),
     safety_level: row['safety_level'] === 'child' ? 'child' : 'standard',
     max_steps: Number(row['max_steps'] ?? 6),
     llm_params_json: String(row['llm_params_json'] ?? '{}'),
     greeting: String(row['greeting'] ?? ''),
-    runtime: row['runtime'] === 'agent' ? 'agent' : 'engine',
   };
 }
 
@@ -166,6 +166,8 @@ const trySchema = z.object({
   conversation_id: z.string().min(1).max(64).default('default'),
   /** 借用一台在线设备:引擎工具在它身上执行,卡片也推到它的屏幕上 */
   device_mac: z.string().max(32).nullish(),
+  /** 随消息发来的图片(浏览器里压缩过的 data URL);对话模型支持看图时才会交给它 */
+  images: z.array(z.string().max(3_000_000).regex(/^data:image\/(png|jpeg|webp);base64,/u, '图片格式不对')).max(3).default([]),
 });
 
 export function agentAdminRoutes(deps: AgentDeps): Hono {
@@ -223,6 +225,7 @@ export function agentAdminRoutes(deps: AgentDeps): Hono {
         agent,
         device: context,
         query: input.message,
+        images: input.images,
         engineMessages: [],
         conversationKey: `web:${agent.id}:${input.conversation_id}`,
         record: null,

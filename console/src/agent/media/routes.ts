@@ -12,7 +12,7 @@ import { all, one, run } from '../../db.ts';
 import { SECRET_KEY } from '../../seed.ts';
 import type { AgentDeps } from '../types.ts';
 import { extensionOf, list, mediaById, mediaDir, mediaPath, type MediaRow } from './store.ts';
-import { storyTtsModel, synthesizeMissing, synthesizeStory } from './synth.ts';
+import { storyVoice, synthesizeMissing, synthesizeStory } from './synth.ts';
 
 const MIME: Record<string, string> = { mp3: 'audio/mpeg', ogg: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4' };
 const MAX_UPLOAD = 40 * 1024 * 1024;
@@ -53,9 +53,23 @@ export function mediaAdminRoutes(deps: AgentDeps): Hono {
 
   app.get('/', (c) => c.json({
     items: all<MediaRow>(conn, 'SELECT * FROM media_items ORDER BY kind, builtin DESC, title').map(view),
-    tts_ready: storyTtsModel(deps) !== null,
+    tts_ready: storyVoice(deps) !== null,
     story_voice: one<{ value: string }>(conn, "SELECT value FROM settings WHERE key = 'media.story_voice'")?.value ?? '',
+    /** 实际会用的音色(没选或选的用不了时是默认音色) */
+    story_voice_effective: storyVoice(deps)?.voice?.id ?? null,
   }));
+
+  /** 讲故事用哪个音色;空串为默认。换了音色要重新合成才生效 */
+  app.put('/story-voice', async (c) => {
+    const parsed = z.object({ voice_id: z.string().max(128) }).safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: '参数不正确' }, 400);
+    const id = parsed.data.voice_id;
+    if (id && !one(conn, 'SELECT 1 FROM voices WHERE id = ?', id)) return c.json({ error: '音色不存在' }, 400);
+    run(conn,
+      `INSERT INTO settings (key, value, value_type, label, internal) VALUES ('media.story_voice', ?, 'string', '讲有声故事用的音色', 1)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`, id);
+    return c.json({ ok: true });
+  });
 
   app.get('/:id', (c) => {
     const row = mediaById(conn, c.req.param('id'));
@@ -152,7 +166,7 @@ export function mediaAdminRoutes(deps: AgentDeps): Hono {
   });
 
   app.post('/synthesize-missing', (c) => {
-    if (!storyTtsModel(deps)) return c.json({ error: '还没有配置带 API Key 的千问语音合成模型' }, 400);
+    if (!storyVoice(deps)) return c.json({ error: '还没有配置带 API Key 的千问语音合成模型' }, 400);
     void synthesizeMissing(deps);
     return c.json({ ok: true, started: true });
   });

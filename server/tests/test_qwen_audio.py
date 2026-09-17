@@ -147,6 +147,36 @@ class TtsTest(unittest.TestCase):
         self.assertFalse(qa.speakable("…！🙂"))
         self.assertFalse(qa.speakable(""))
 
+    def test_inline_tags(self):
+        allowed = qa.parse_allowed_tags(["excited", "laughing"])
+        self.assertEqual(qa.parse_allowed_tags("excited, laughing"), allowed)
+        self.assertEqual(qa.parse_allowed_tags(None), frozenset())
+        self.assertEqual(qa.filter_tags("[excited]哇[sad]好[laughing]", allowed), "[excited]哇好[laughing]")
+        self.assertEqual(qa.filter_tags("[excited]哇", frozenset()), "哇", "没有允许的标签时全部去掉")
+        self.assertEqual(qa.strip_tags("[excited]哇 [clears throat] 好"), "哇 好")
+        self.assertEqual(qa.tags_only("[laughing]。[sighing]"), "[laughing][sighing]")
+        self.assertEqual(qa.strip_tags("[1] 与 [ABC] 不是标签"), "[1] 与 [ABC] 不是标签")
+
+    def test_speakable_ignores_tags(self):
+        self.assertFalse(qa.speakable("[laughing]"))
+        self.assertFalse(qa.speakable("[laughing]!"))
+        self.assertTrue(qa.speakable("[laughing]哈"))
+
+    def test_trim_segment_keeps_tags(self):
+        # 与上游 textUtils.is_punctuation_or_emoji 的标点集一致(含方括号)
+        punct = set("，,。.！!“”\"：:-－、[]【】")
+        trim = lambda ch: ch.isspace() or ch in punct
+        self.assertEqual(qa.trim_segment("[excited]哇,你做到啦![laughing]", trim), "[excited]哇,你做到啦![laughing]")
+        self.assertEqual(qa.trim_segment("！[sad]我好难过。", trim), "[sad]我好难过")
+        self.assertEqual(qa.trim_segment("，好的。", trim), "好的")
+        self.assertEqual(qa.trim_segment("[不是标签]", trim), "不是标签")
+
+    def test_split_segments_never_cuts_inside_tag(self):
+        text = "啊" * 190 + "[clears throat]" + "呀" * 30
+        segments = qa.split_segments(text)
+        self.assertEqual("".join(segments), text)
+        self.assertTrue(segments[1].startswith("[clears throat]"), segments)
+
     def test_keepalive(self):
         keepalive = qa.Keepalive(every=3)
         self.assertEqual([keepalive.tick() for _ in range(7)], [False, False, True, False, False, True, False])

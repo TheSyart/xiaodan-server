@@ -13,6 +13,11 @@
   - 音频文件只有二进制帧,设备的播放看门狗 60 秒收不到 JSON 就收起播放,长音乐、长故事会被截断,
     所以播文件时每约 20 秒插一条 sentence_start。
 
+情感标签([excited]、[laughing]……,见 core/utils/qwen_audio.py):
+  - 基类切句后修边会把方括号当标点去掉,所以 _get_segment_text 与 _process_remaining_text_stream 换成保住标签的修边;
+  - 只保留控制塔下发的 inline_tags,其余去掉;一段只剩标签时留给这一轮的下一段;
+  - 发给设备的字幕去掉全部标签。
+
 配置示例(控制台模型页填):
   TTS:
     QwenAudioTTS:
@@ -24,7 +29,8 @@
       volume: 50                        # 0-100
       rate: 1.0                         # 0.5-2.0
       pitch: 1.0                        # 0.5-2.0
-      instruction: 用温柔亲切的语气说话   # 可选,至多 100 个单位(一个汉字算 2 个)
+      instruction: 用温柔亲切的语气说话   # 可选,至多 100 个单位(一个汉字算 2 个);方言也写在这里
+      inline_tags: [excited, laughing]  # 允许模型写在文字里的情感标签;不给就全部去掉
       output_dir: tmp/
 """
 
@@ -66,6 +72,10 @@ class TTSProvider(TTSProviderBase):
         self._lock = threading.Lock()
         # 设备桥登记的音频文件标题,播放保活时显示在字幕上
         self.xd_media_titles = {}
+        # 允许的情感标签;一段只剩标签时暂存,留给同一轮的下一段
+        self.inline_tags = qa.parse_allowed_tags(config.get("inline_tags"))
+        self._carry_tags = ""
+        self._carry_sentence = None
 
     # ---- 连接 ----
 
@@ -150,15 +160,20 @@ class TTSProvider(TTSProviderBase):
                 raise RuntimeError(error)
 
     def to_tts_stream(self, text, opus_handler=None) -> None:
-        original_text = text
-        text = MarkdownCleaner.clean_markdown(text)
+        conn = self.conn
+        sentence_id = getattr(self, "current_sentence_id", None)
+        if self._carry_sentence != sentence_id:
+            self._carry_tags = ""
+            self._carry_sentence = sentence_id
+        original_text = qa.filter_tags(self._carry_tags + (text or ""), self.inline_tags)
+        self._carry_tags = ""
+        text = MarkdownCleaner.clean_markdown(original_text)
         if self._correct_words_pattern:
             text = self._correct_words_pattern.sub(lambda m: self.correct_words[m.group(0)], text)
         if not qa.speakable(text):
+            # 只剩标签(比如句末的 [laughing] 被切成了单独一段):留给下一段,这一轮没有下一段就作罢
+            self._carry_tags = qa.tags_only(text)
             return None
-
-        conn = self.conn
-        sentence_id = getattr(self, "current_sentence_id", None)
 
         def should_stop():
             return bool(
@@ -173,8 +188,10 @@ class TTSProvider(TTSProviderBase):
         for segment in qa.split_segments(text):
             if should_stop():
                 return None
-            # 字幕用原文(替换词还原前的文本)。过长的一句会被切段,每段各发一条 sentence_start
-            shown = original_text if segment == text else segment
+            if not qa.speakable(segment):
+                continue
+            # 字幕用原文(替换词还原前的文本),去掉情感标签。过长的一句会被切段,每段各发一条 sentence_start
+            shown = qa.strip_tags(original_text if segment == text else segment).strip()
             self.tts_audio_queue.put((SentenceType.FIRST, None, shown, sentence_id))
             for attempt in (1, 2):
                 produced = []
@@ -201,6 +218,7 @@ class TTSProvider(TTSProviderBase):
 
     async def text_to_speak(self, text, output_file):
         """整段合成成 WAV(唤醒词回复等非流式场景用)。"""
+        text = qa.filter_tags(text, self.inline_tags)
         if not qa.speakable(text):
             return None
         chunks = []
@@ -222,6 +240,30 @@ class TTSProvider(TTSProviderBase):
 
     # ---- 修补基类 ----
 
+    def _get_segment_text(self):
+        """与上游基类(c7b126c)相同,只把修边换成保住情感标签的 qa.trim_segment。"""
+        from core.utils import textUtils
+
+        full_text = "".join(self.tts_text_buff)
+        current_text = full_text[self.processed_chars:]
+        last_punct_pos = -1
+        punctuations_to_use = self.first_sentence_punctuations if self.is_first_sentence else self.punctuations
+        for punct in punctuations_to_use:
+            pos = current_text.rfind(punct)
+            if (pos != -1 and last_punct_pos == -1) or (pos != -1 and pos < last_punct_pos):
+                last_punct_pos = pos
+        if last_punct_pos != -1:
+            segment_text_raw = current_text[: last_punct_pos + 1]
+            segment_text = qa.trim_segment(segment_text_raw, textUtils.is_punctuation_or_emoji)
+            self.processed_chars += len(segment_text_raw)
+            if self.is_first_sentence:
+                self.is_first_sentence = False
+            return segment_text
+        if self.tts_stop_request and current_text:
+            self.is_first_sentence = True
+            return current_text
+        return None
+
     def _process_remaining_text_stream(self, opus_handler=None):
         full_text = "".join(self.tts_text_buff)
         remaining_text = full_text[self.processed_chars:]
@@ -230,7 +272,7 @@ class TTSProvider(TTSProviderBase):
         if remaining_text:
             from core.utils import textUtils
 
-            segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
+            segment_text = qa.trim_segment(remaining_text, textUtils.is_punctuation_or_emoji)
             if segment_text:
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
                 return True

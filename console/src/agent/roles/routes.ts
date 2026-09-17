@@ -7,6 +7,7 @@ import { canonicalMac } from '../../identity.ts';
 import { listMemory, MAX_FACT_CHARS, privacyReason, remember } from '../memory/store.ts';
 import type { AgentDeps } from '../types.ts';
 import { applyTemplate, ROLE_TEMPLATES, templateById } from './templates.ts';
+import { systemVoiceOf } from '../../voice/system-voices.ts';
 
 const idSchema = z.string().min(1).max(128);
 
@@ -21,6 +22,7 @@ export function roleTemplateRoutes(deps: AgentDeps): Hono {
     return c.json({
       items: ROLE_TEMPLATES.map((template) => ({
         ...template,
+        voice_name: systemVoiceOf(template.voice)?.name ?? template.voice,
         missing_skills: template.skills.filter((name) => !skills.has(name)),
         created: created.find((row) => row.role_template === template.id)?.n ?? 0,
       })),
@@ -32,13 +34,11 @@ export function roleTemplateRoutes(deps: AgentDeps): Hono {
     if (!template) return c.json({ error: '没有这个模板' }, 404);
     const parsed = z.object({
       name: z.string().max(64).optional(),
-      tts_model_id: idSchema.nullish(),
       llm_model_id: idSchema.nullish(),
     }).safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
-    for (const key of ['tts_model_id', 'llm_model_id'] as const) {
-      const value = parsed.data[key];
-      if (value && !one(deps.conn, 'SELECT 1 FROM models WHERE id = ?', value)) return c.json({ error: '所选模型不存在' }, 400);
+    if (parsed.data.llm_model_id && !one(deps.conn, "SELECT 1 FROM models WHERE id = ? AND model_type = 'LLM'", parsed.data.llm_model_id)) {
+      return c.json({ error: '所选模型不存在' }, 400);
     }
     const result = applyTemplate(deps.conn, template, parsed.data);
     return c.json({ ok: true, ...result });

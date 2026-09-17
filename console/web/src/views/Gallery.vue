@@ -68,7 +68,7 @@ async function remove(item: ImageItem) {
   </div>
   <div v-if="loading" class="card"><SkeletonRows :rows="3" /></div>
   <div v-else-if="items.length === 0" class="card">
-    <EmptyState title="还没有画" description="给智能体打开「画画」工具并在「工具与服务」页配置画图服务,然后在设备上说「画一只戴帽子的小猫」。" />
+    <EmptyState title="还没有画" description="给智能体打开「画画」工具并在「模型」页添加千问文生图模型,然后在设备上说「画一只戴帽子的小猫」。" />
   </div>
   <div v-else class="grid-cards">
     <article v-for="item in items" :key="item.id" class="card" style="padding: 12px">

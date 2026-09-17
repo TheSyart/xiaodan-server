@@ -1,12 +1,10 @@
-// 外部服务商管理接口(挂在 /api/service-providers):联网搜索与文生图。
+// 外部服务商管理接口(挂在 /api/service-providers):联网搜索。文生图是「模型」页里的一种模型,不在这里。
 
 import { randomBytes } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { all, one, run, tx } from '../db.ts';
 import { SEARCH_PROVIDERS } from './search/providers.ts';
-import { IMAGE_PROVIDERS } from './image/providers.ts';
-import { pixelateInWorker } from './image/run.ts';
 import { maskConfig, serviceById } from './services.ts';
 import type { AgentDeps } from './types.ts';
 
@@ -44,48 +42,10 @@ export const SERVICE_CATALOG = {
       ],
     },
   ],
-  image: [
-    {
-      provider: 'qwen-image',
-      label: '千问 qwen-image(百炼)',
-      note: '百炼 compatible-mode 的图片生成接口,中文提示词效果好,自带内容安全审核;qwen-image-3.0 约 0.2 元一张。可以沿用千问语音模型的 API Key 与业务空间。',
-      fields: [
-        { key: 'key_from_model', label: '沿用哪个模型的密钥', type: 'model', hint: '选千问语音识别或合成模型即可' },
-        { key: 'api_key', label: '百炼 API Key', type: 'password' },
-        { key: 'workspace_id', label: '业务空间 ID', type: 'string' },
-        { key: 'model', label: '模型', type: 'string', default: 'qwen-image-3.0' },
-        { key: 'size', label: '尺寸', type: 'string', default: '1024x1024' },
-      ],
-    },
-    {
-      provider: 'dashscope',
-      label: '百炼原生接口(z-image-turbo、wan2.7-image 等)',
-      note: '百炼的同步图片生成接口,适合 z-image-turbo(约 0.1 元一张)与万相系列。尺寸写成 1024*1024。',
-      fields: [
-        { key: 'key_from_model', label: '沿用哪个模型的密钥', type: 'model' },
-        { key: 'api_key', label: '百炼 API Key', type: 'password' },
-        { key: 'workspace_id', label: '业务空间 ID', type: 'string' },
-        { key: 'model', label: '模型', type: 'string', default: 'z-image-turbo' },
-        { key: 'size', label: '尺寸', type: 'string', default: '1024*1024' },
-      ],
-    },
-    {
-      provider: 'openai-images',
-      label: 'OpenAI 兼容图片接口',
-      note: '任何提供 /images/generations 的服务:OpenAI、火山方舟 Seedream、硅基流动等。',
-      fields: [
-        { key: 'base_url', label: '接口地址', type: 'string', required: true, hint: '例如 https://ark.cn-beijing.volces.com/api/v3' },
-        { key: 'api_key', label: 'API Key', type: 'password', required: true },
-        { key: 'model', label: '模型', type: 'string', required: true },
-        { key: 'size', label: '尺寸', type: 'string', default: '1024x1024' },
-        { key: 'response_format', label: '返回格式', type: 'string', hint: '留空由服务商决定;OpenAI 可填 b64_json' },
-      ],
-    },
-  ],
 };
 
 const schema = z.object({
-  kind: z.enum(['search', 'image']),
+  kind: z.enum(['search']),
   name: z.string().min(1).max(64),
   provider: z.string().min(1).max(64),
   config: z.record(z.string(), z.unknown()).default({}),
@@ -104,7 +64,7 @@ export function serviceRoutes(deps: AgentDeps): Hono {
     ).map((row) => ({ ...row, config: maskConfig(JSON.parse(row.config_json) as Record<string, unknown>), config_json: undefined })),
   }));
 
-  const known = (kind: 'search' | 'image', provider: string) => SERVICE_CATALOG[kind].some((item) => item.provider === provider);
+  const known = (kind: 'search', provider: string) => SERVICE_CATALOG[kind].some((item) => item.provider === provider);
 
   app.post('/', async (c) => {
     const parsed = schema.safeParse(await c.req.json().catch(() => ({})));
@@ -155,21 +115,12 @@ export function serviceRoutes(deps: AgentDeps): Hono {
   app.post('/:id/test', async (c) => {
     const service = serviceById(conn, c.req.param('id'));
     if (!service) return c.json({ error: '不存在' }, 404);
-    if (service.kind === 'search') {
-      const provider = SEARCH_PROVIDERS[service.provider];
-      if (!provider) return c.json({ error: '不认识的服务商' }, 400);
-      try {
-        const started = Date.now();
-        const outcome = await provider(deps.fetch, service.config, '今天的科技新闻');
-        return c.json({ ok: true, ms: Date.now() - started, count: outcome.results.length, sample: outcome.results.slice(0, 3), summary: outcome.summary ?? null });
-      } catch (error) {
-        return c.json({ error: (error as Error).message }, 502);
-      }
-    }
-    const test = IMAGE_TESTERS[service.provider];
-    if (!test) return c.json({ error: '这个服务商不支持测试' }, 400);
+    const provider = SEARCH_PROVIDERS[service.provider];
+    if (!provider) return c.json({ error: '不认识的服务商' }, 400);
     try {
-      return c.json(await test(deps, service.config));
+      const started = Date.now();
+      const outcome = await provider(deps.fetch, service.config, '今天的科技新闻');
+      return c.json({ ok: true, ms: Date.now() - started, count: outcome.results.length, sample: outcome.results.slice(0, 3), summary: outcome.summary ?? null });
     } catch (error) {
       return c.json({ error: (error as Error).message }, 502);
     }
@@ -177,13 +128,3 @@ export function serviceRoutes(deps: AgentDeps): Hono {
 
   return app;
 }
-
-/** 文生图服务商的测试:画一张小图并像素化,返回耗时与像素预览 */
-export const IMAGE_TESTERS: Record<string, (deps: AgentDeps, config: Record<string, unknown>) => Promise<Record<string, unknown>>> = Object.fromEntries(
-  Object.entries(IMAGE_PROVIDERS).map(([name, provider]) => [name, async (deps: AgentDeps, config: Record<string, unknown>) => {
-    const started = Date.now();
-    const outcome = await provider(deps.fetch, config, '一只可爱的小猫坐在草地上,卡通风格,画面简洁');
-    const art = await pixelateInWorker(outcome.bytes);
-    return { ok: true, ms: Date.now() - started, bytes: outcome.bytes.length, preview: `data:image/png;base64,${art.preview.toString('base64')}` };
-  }]),
-);

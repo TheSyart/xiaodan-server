@@ -95,7 +95,7 @@ beforeEach(() => {
   seed(conn);
   run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_DS', 'LLM', 'DeepSeek', 'openai', ?)",
     JSON.stringify({ type: 'openai', base_url: 'https://api.deepseek.com/v1', model_name: 'deepseek-chat', api_key: 'sk-ds' }));
-  run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS', runtime = 'agent' WHERE id = ?", DEFAULT_AGENT_ID);
+  run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS' WHERE id = ?", DEFAULT_AGENT_ID);
   run(conn, 'DELETE FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID);
   run(conn, "INSERT INTO devices (mac, agent_id) VALUES (?, ?)", MAC, DEFAULT_AGENT_ID);
   conversations.reset(`device:${MAC}`);
@@ -233,8 +233,9 @@ describe('MCP', () => {
   });
 
   test('结果内容拼接', () => {
-    assert.deepEqual(contentToText({ content: [{ type: 'text', text: 'a' }, { type: 'image', data: 'x' }, { type: 'resource', resource: { text: 'b' } }], isError: true }),
-      { text: 'a\n[图片,无法朗读]\nb', isError: true });
+    assert.deepEqual(contentToText({ content: [{ type: 'text', text: 'a' }, { type: 'image', data: 'eA==', mimeType: 'image/jpeg' }, { type: 'resource', resource: { text: 'b' } }], isError: true }),
+      { text: 'a\n[图片]\nb', isError: true, images: ['data:image/jpeg;base64,eA=='] }, '图片单独取出,文字里留占位');
+    assert.deepEqual(contentToText({ content: [{ type: 'image', data: 'eA==', mimeType: 'text/html' }] }).images, ['data:image/png;base64,eA=='], '不认识的类型按 png');
     assert.equal(contentToText({ content: [], structuredContent: { x: 1 } }).text, '{"x":1}');
   });
 

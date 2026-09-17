@@ -9,11 +9,11 @@ import SkeletonRows from '../components/SkeletonRows.vue';
 import SwitchToggle from '../components/SwitchToggle.vue';
 import { confirmDialog, toast, toastError } from '../ui';
 
-// 智能体工具背后的外部服务:联网搜索、文生图。一类可以配多家,默认那家生效,随时切换。
+// 智能体工具背后的外部服务:联网搜索。可以配多家,默认那家生效,随时切换。文生图是「模型」页里的一种模型。
 
-type Kind = 'search' | 'image';
+type Kind = 'search';
 
-const catalog = ref<Record<Kind, ServiceDef[]>>({ search: [], image: [] });
+const catalog = ref<Record<Kind, ServiceDef[]>>({ search: [] });
 const items = ref<ServiceProvider[]>([]);
 const models = ref<Model[]>([]);
 const loading = ref(true);
@@ -38,9 +38,8 @@ async function load() {
 }
 onMounted(load);
 
-const KINDS: { kind: Kind; title: string; hint: string; icon: 'globe' | 'sparkles' }[] = [
+const KINDS: { kind: Kind; title: string; hint: string; icon: 'globe' }[] = [
   { kind: 'search', title: '联网搜索', hint: '「联网搜索」工具用这里的默认服务。DeepSeek 官方联网搜索可以直接沿用 DeepSeek 对话模型的密钥。', icon: 'globe' },
-  { kind: 'image', title: '文生图', hint: '「画画」工具用这里的默认服务。换服务商不影响智能体配置。', icon: 'sparkles' },
 ];
 const ofKind = (kind: Kind) => items.value.filter((item) => item.kind === kind);
 const defOf = (kind: Kind, provider: string) => catalog.value[kind].find((d) => d.provider === provider);
@@ -116,17 +115,13 @@ async function save() {
 
 const testing = ref('');
 const testResult = ref<Record<string, string>>({});
-const testPreview = ref<Record<string, string>>({});
 async function test(item: ServiceProvider) {
   testing.value = item.id;
   try {
-    const result = await api.post<{ ms: number; count?: number; sample?: { title: string }[]; preview?: string }>(`/service-providers/${item.id}/test`);
-    if (result.preview) testPreview.value = { ...testPreview.value, [item.id]: result.preview };
+    const result = await api.post<{ ms: number; count?: number; sample?: { title: string }[] }>(`/service-providers/${item.id}/test`);
     testResult.value = {
       ...testResult.value,
-      [item.id]: item.kind === 'search'
-        ? `可用 · ${result.count ?? 0} 条结果 · ${(result.ms / 1000).toFixed(1)} 秒${result.sample?.[0] ? ` · 例如「${result.sample[0].title}」` : ''}`
-        : `可用 · ${(result.ms / 1000).toFixed(1)} 秒`,
+      [item.id]: `可用 · ${result.count ?? 0} 条结果 · ${(result.ms / 1000).toFixed(1)} 秒${result.sample?.[0] ? ` · 例如「${result.sample[0].title}」` : ''}`,
     };
   } catch (e) {
     testResult.value = { ...testResult.value, [item.id]: `失败:${(e as Error).message}` };
@@ -157,7 +152,7 @@ async function remove(item: ServiceProvider) {
 </script>
 
 <template>
-  <PageHeader title="工具与服务" description="智能体工具背后用到的外部服务。每一类可以配多家,点「设为默认」随时切换。" />
+  <PageHeader title="工具与服务" description="智能体工具背后用到的外部服务。可以配多家,点「设为默认」随时切换。文生图模型在「模型」页。" />
 
   <div v-if="loadError" class="callout danger" role="alert">
     <AppIcon name="alert" :size="18" /><div class="callout-body"><strong>加载失败。</strong>{{ loadError }}</div>
@@ -186,7 +181,6 @@ async function remove(item: ServiceProvider) {
             <span v-if="item.enabled === 0" class="tag">已停用</span>
           </div>
           <div class="cell-sub">{{ defOf(item.kind, item.provider)?.label ?? item.provider }}<template v-if="testResult[item.id]"> · {{ testResult[item.id] }}</template></div>
-          <img v-if="testPreview[item.id]" :src="testPreview[item.id]" alt="设备上的像素画预览" style="width: 128px; height: 128px; image-rendering: pixelated; border-radius: 8px; margin-top: 8px" />
         </div>
         <div class="row" style="gap: 2px">
           <button class="btn btn-ghost btn-sm" type="button" :aria-busy="testing === item.id" @click="test(item)"><AppIcon name="zap" :size="14" /><span>测试</span></button>

@@ -174,7 +174,7 @@ const memories = ref<MemoryItem[]>([]);
 const newMemory = ref('');
 const savingRoles = ref(false);
 const addingMemory = ref(false);
-const agentRuntimeRoles = computed(() => agents.value.filter((agent) => agent.runtime === 'agent'));
+const agentRuntimeRoles = computed(() => agents.value);
 
 async function openRoles(device: Device) {
   const mac = encodeURIComponent(device.mac);
@@ -523,13 +523,13 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
           在设备上说「换童童来陪我」时能切到哪些角色。当前角色要开着「切换角色」工具;新角色声音不同时设备会重连一下,再用新声音打招呼。
         </p>
         <SwitchToggle v-model="restrictRoles" label="只允许切换到勾选的角色" />
-        <p v-if="!restrictRoles" class="field-hint" style="margin: 0">不限制:所有由控制塔驱动的角色都能切换。</p>
+        <p v-if="!restrictRoles" class="field-hint" style="margin: 0">不限制:所有智能体都能切换。</p>
         <div v-else class="chips">
           <label v-for="agent in agentRuntimeRoles" :key="agent.id" class="tag" style="cursor: pointer; gap: 6px">
             <input type="checkbox" :checked="allowedRoles.includes(agent.id)" @change="toggleRole(agent.id, ($event.target as HTMLInputElement).checked)" />
             {{ agent.name }}<template v-if="agent.id === roleDevice.agent_id">(当前)</template>
           </label>
-          <span v-if="agentRuntimeRoles.length === 0" class="field-hint">还没有由控制塔驱动的角色。</span>
+          <span v-if="agentRuntimeRoles.length === 0" class="field-hint">还没有别的智能体。</span>
         </div>
         <div><button class="btn btn-sm" type="button" :aria-busy="savingRoles" @click="saveRoles"><AppIcon name="check" :size="14" /><span>保存角色设置</span></button></div>
       </section>

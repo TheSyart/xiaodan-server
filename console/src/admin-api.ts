@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Db } from './db.ts';
 import { all, dataDir, one, run, tx } from './db.ts';
-import { MODEL_TYPES, PLUGINS, PROVIDERS, providerDef, type ModelType } from './catalog.ts';
+import { EDITABLE_MODEL_TYPES, MODEL_TYPES, PLUGINS, PROVIDERS, providerDef, type ModelType } from './catalog.ts';
 import { DEFAULT_SETTINGS, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
 import {
@@ -26,6 +26,9 @@ import { imageRoutes } from './agent/image/routes.ts';
 import { deviceRoleRoutes, roleTemplateRoutes } from './agent/roles/routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
+import { VOICE_CATALOG } from './voice/profile.ts';
+import { defaultVoiceId, parseConfig, QWEN_TTS, syncSystemVoices } from './voice/store.ts';
+import { familyOf } from './voice/system-voices.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
 
@@ -55,39 +58,44 @@ const modelSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
+/** 音色 id 形如 TTS_Qwen__longanhuan_v3.6:带点号 */
+const voiceIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/u, '音色 id 不正确');
+
 const agentSchema = z.object({
   name: z.string().min(1).max(64),
   system_prompt: z.string().max(8000).default(''),
-  vad_model_id: idSchema.nullish(),
   asr_model_id: idSchema.nullish(),
   llm_model_id: idSchema.nullish(),
-  vllm_model_id: idSchema.nullish(),
-  tts_model_id: idSchema.nullish(),
-  memory_model_id: idSchema.nullish(),
-  intent_model_id: idSchema.nullish(),
-  tts_voice_id: idSchema.nullish(),
-  tts_language: z.string().max(32).nullish(),
-  chat_history_conf: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
-  // 大脑在哪:engine 旧路径 / agent 控制塔运行时
-  runtime: z.enum(['engine', 'agent']).default('engine'),
+  image_model_id: idSchema.nullish(),
+  // 智能体绑一个音色;合成模型、音量、语速、方言、语气都跟着音色走
+  tts_voice_id: voiceIdSchema.nullish(),
+  chat_history_conf: z.union([z.literal(0), z.literal(1)]).default(1),
   max_steps: z.number().int().min(1).max(10).default(6),
   safety_level: z.enum(['standard', 'child']).default('standard'),
   description: z.string().max(200).default(''),
   greeting: z.string().max(200).default(''),
   role_template: z.string().max(64).default(''),
   llm_params: z.object({ thinking: z.boolean().optional(), temperature: z.number().min(0).max(2).optional() }).default({}),
-  // 千问合成的语速、音调、音量与语气指令。整体覆盖:不传视为清空
-  tts_params: z
-    .object({
-      rate: z.number().min(0.5).max(2).optional(),
-      pitch: z.number().min(0.5).max(2).optional(),
-      volume: z.number().int().min(0).max(100).optional(),
-      instruction: z.string().max(100).optional(),
-    })
-    .default({}),
 });
 
 const nullable = (value: string | null | undefined) => (value === undefined || value === '' ? null : value);
+
+/** 业务上的冲突(409),与参数错误(400)区分开 */
+class ConflictError extends Error {}
+
+/** 智能体引用的模型与音色要存在且类型对:否则外键约束会让接口变成 500 */
+function agentRefError(conn: Db, d: z.infer<typeof agentSchema>): string | null {
+  const checks: [string | null | undefined, string, string][] = [
+    [d.asr_model_id, 'ASR', '语音识别模型'],
+    [d.llm_model_id, 'LLM', '对话模型'],
+    [d.image_model_id, 'Image', '文生图模型'],
+  ];
+  for (const [id, type, label] of checks) {
+    if (id && !one(conn, 'SELECT 1 FROM models WHERE id = ? AND model_type = ?', id, type)) return `所选的${label}不存在`;
+  }
+  if (d.tts_voice_id && !one(conn, 'SELECT 1 FROM voices WHERE id = ?', d.tts_voice_id)) return '所选的音色不存在';
+  return null;
+}
 
 export interface AdminDeps {
   /** 访问百炼等外部服务用的 fetch,测试里换成假的 */
@@ -153,7 +161,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   });
 
   /** 供应商与插件目录。前端据此渲染表单,不必把字段定义硬编码两遍。 */
-  app.get('/catalog', (c) => c.json({ providers: PROVIDERS, plugins: PLUGINS, modelTypes: MODEL_TYPES }));
+  app.get('/catalog', (c) => c.json({ providers: PROVIDERS, plugins: PLUGINS, modelTypes: EDITABLE_MODEL_TYPES, voice: VOICE_CATALOG }));
 
   // ---- 系统参数 ----
 
@@ -232,8 +240,41 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
       for (const field of def.fields) delete base[field.key];
     }
 
+    // 按目录校验与规范化:下拉只收列出的值,开关转成布尔,数字转成数字
+    const submitted: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(payload.config)) {
+      const field = def.fields.find((item) => item.key === key);
+      if (!field) {
+        submitted[key] = value;
+        continue;
+      }
+      if (field.type === 'boolean') {
+        submitted[key] = value === true || value === 'true' || value === 1 || value === '1';
+      } else if (field.type === 'select') {
+        if (value === '' || value === undefined || value === null) continue;
+        if (!field.options?.some((option) => option.value === value)) throw new Error(`「${field.label}」不能选 ${String(value)}`);
+        submitted[key] = value;
+      } else if (field.type === 'number' && typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+        submitted[key] = Number(value);
+      } else {
+        submitted[key] = value;
+      }
+    }
+
+    // flash 与 plus 的音色不能混用:已经有智能体在用这个模型的音色时,不许换到另一套
+    if (!creating && payload.model_type === 'TTS') {
+      const old = parseConfig(one<{ config_json: string }>(conn, 'SELECT config_json FROM models WHERE id = ?', payload.id)?.config_json);
+      // 更新时目录字段没提交就是清除,清除了 model_name 就按 flash 算
+      const nextName = submitted['model_name'];
+      if (familyOf(old['model_name']) !== familyOf(nextName)) {
+        const inUse = one<{ n: number }>(conn,
+          'SELECT COUNT(*) AS n FROM agents a JOIN voices v ON v.id = a.tts_voice_id WHERE v.tts_model_id = ?', payload.id)?.n ?? 0;
+        if (inUse > 0) throw new ConflictError(`有 ${inUse} 个智能体正在用这个模型的音色,flash 与 plus 的音色不能混用。先给它们换音色,或者新建一个合成模型。`);
+      }
+    }
+
     // type 必须写进 config:服务端就是靠它决定加载哪个 provider 模块的。
-    const config = { ...base, ...payload.config, type: payload.provider };
+    const config = { ...base, ...submitted, type: payload.provider };
 
     if (creating) {
       run(
@@ -253,6 +294,13 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
         payload.enabled ? 1 : 0, payload.remark, payload.id,
       );
     }
+
+    if (payload.model_type === 'TTS' && payload.provider === QWEN_TTS) {
+      // 这一套的系统音色自动出现在音色页;还没有音色的智能体顺手绑上默认音色,设备马上有声音
+      syncSystemVoices(conn, payload.id);
+      const voiceId = defaultVoiceId(conn);
+      if (voiceId) run(conn, 'UPDATE agents SET tts_voice_id = ? WHERE tts_voice_id IS NULL', voiceId);
+    }
   };
 
   app.post('/models', async (c) => {
@@ -264,7 +312,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     try {
       upsertModel(parsed.data, true);
     } catch (error) {
-      return c.json({ error: (error as Error).message }, 400);
+      return c.json({ error: (error as Error).message }, error instanceof ConflictError ? 409 : 400);
     }
     return c.json({ ok: true });
   });
@@ -277,7 +325,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     try {
       upsertModel(parsed.data, false);
     } catch (error) {
-      return c.json({ error: (error as Error).message }, 400);
+      return c.json({ error: (error as Error).message }, error instanceof ConflictError ? 409 : 400);
     }
     return c.json({ ok: true });
   });
@@ -297,14 +345,15 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const id = c.req.param('id');
     // 正被智能体引用的模型不能删,否则设备连上来会拿到一份缺模块的配置。
     //
-    // 这里用七个普通的 ? 而不是重复的 ?1:node:sqlite 不支持编号占位符复用,
+    // 这里用多个普通的 ? 而不是重复的 ?1:node:sqlite 不支持编号占位符复用,
     // 会抛 "column index out of range",接口就变成 500 而不是友好的提示。
+    // 合成模型没有直接挂在智能体上:智能体选的音色属于它,就算在用。
     const used = one<{ n: number }>(
       conn,
       `SELECT COUNT(*) AS n FROM agents
-       WHERE vad_model_id = ? OR asr_model_id = ? OR llm_model_id = ? OR vllm_model_id = ?
-          OR tts_model_id = ? OR memory_model_id = ? OR intent_model_id = ?`,
-      id, id, id, id, id, id, id,
+       WHERE vad_model_id = ? OR asr_model_id = ? OR llm_model_id = ? OR image_model_id = ?
+          OR tts_voice_id IN (SELECT id FROM voices WHERE tts_model_id = ?)`,
+      id, id, id, id, id,
     );
     if ((used?.n ?? 0) > 0) return c.json({ error: '还有智能体在用这个模型,请先改掉它们的选择' }, 409);
     run(conn, 'DELETE FROM models WHERE id = ?', id);
@@ -348,19 +397,18 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   app.post('/agents', async (c) => {
     const parsed = agentSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
+    const refError = agentRefError(conn, parsed.data);
+    if (refError) return c.json({ error: refError }, 400);
     const id = `agent_${randomBytes(8).toString('hex')}`;
     const d = parsed.data;
     run(
       conn,
-      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, vllm_model_id,
-                           tts_model_id, memory_model_id, intent_model_id, tts_voice_id, tts_language,
-                           chat_history_conf, tts_params_json, runtime, max_steps, safety_level, description,
-                           greeting, role_template, llm_params_json, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      id, d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
-      nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
-      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params),
-      d.runtime, d.max_steps, d.safety_level, d.description, d.greeting, d.role_template, JSON.stringify(d.llm_params),
+      `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, llm_model_id, image_model_id, tts_voice_id,
+                           chat_history_conf, max_steps, safety_level, description, greeting, role_template, llm_params_json, is_default)
+       VALUES (?, ?, ?, (SELECT id FROM models WHERE model_type = 'VAD' ORDER BY is_default DESC, id LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      id, d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id), nullable(d.image_model_id),
+      nullable(d.tts_voice_id) ?? defaultVoiceId(conn), d.chat_history_conf, d.max_steps, d.safety_level, d.description,
+      d.greeting, d.role_template, JSON.stringify(d.llm_params),
     );
     return c.json({ ok: true, id });
   });
@@ -370,19 +418,18 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     if (!one(conn, 'SELECT 1 FROM agents WHERE id = ?', id)) return c.json({ error: '智能体不存在' }, 404);
     const parsed = agentSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
+    const refError = agentRefError(conn, parsed.data);
+    if (refError) return c.json({ error: refError }, 400);
     const d = parsed.data;
     run(
       conn,
-      `UPDATE agents SET name = ?, system_prompt = ?, vad_model_id = ?, asr_model_id = ?, llm_model_id = ?,
-                         vllm_model_id = ?, tts_model_id = ?, memory_model_id = ?, intent_model_id = ?,
-                         tts_voice_id = ?, tts_language = ?, chat_history_conf = ?, tts_params_json = ?,
-                         runtime = ?, max_steps = ?, safety_level = ?, description = ?, greeting = ?, role_template = ?,
-                         llm_params_json = ?, updated_at = datetime('now')
+      `UPDATE agents SET name = ?, system_prompt = ?, asr_model_id = ?, llm_model_id = ?, image_model_id = ?,
+                         tts_voice_id = ?, chat_history_conf = ?, max_steps = ?, safety_level = ?, description = ?,
+                         greeting = ?, role_template = ?, llm_params_json = ?, updated_at = datetime('now')
        WHERE id = ?`,
-      d.name, d.system_prompt, nullable(d.vad_model_id), nullable(d.asr_model_id), nullable(d.llm_model_id),
-      nullable(d.vllm_model_id), nullable(d.tts_model_id), nullable(d.memory_model_id), nullable(d.intent_model_id),
-      nullable(d.tts_voice_id), nullable(d.tts_language), d.chat_history_conf, JSON.stringify(d.tts_params),
-      d.runtime, d.max_steps, d.safety_level, d.description, d.greeting, d.role_template, JSON.stringify(d.llm_params), id,
+      d.name, d.system_prompt, nullable(d.asr_model_id), nullable(d.llm_model_id), nullable(d.image_model_id),
+      nullable(d.tts_voice_id), d.chat_history_conf, d.max_steps, d.safety_level, d.description,
+      d.greeting, d.role_template, JSON.stringify(d.llm_params), id,
     );
     return c.json({ ok: true });
   });

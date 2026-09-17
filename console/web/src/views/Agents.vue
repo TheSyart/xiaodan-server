@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { onBeforeRouteLeave, RouterLink } from 'vue-router';
-import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type RoleTemplate, type RoleTemplateApplied, type Skill, type TtsParams, type Voice } from '../api';
+import { api, type Agent, type Catalog, type McpServerView, type Model, type PluginDef, type RoleTemplate, type RoleTemplateApplied, type Skill, type Voice } from '../api';
 import { playBlob, stopPlayback } from '../audio';
 import AppIcon from '../components/AppIcon.vue';
 import EmptyState from '../components/EmptyState.vue';
@@ -27,8 +27,6 @@ const loadError = ref('');
 const editing = ref<Agent | null>(null);
 /** 插件代号 → 参数。只有被勾选的才在这个表里。 */
 const pluginState = ref<Record<string, Record<string, string>>>({});
-/** 千问合成的语速、音调、音量与语气指令;表单里一律是完整的数值,保存时再去掉默认值 */
-const ttsParams = ref({ rate: 1, pitch: 1, volume: 50, instruction: '' });
 /** 模型参数:是否开思考 */
 const llmParams = ref({ thinking: false });
 const snapshot = ref('');
@@ -62,10 +60,6 @@ onMounted(load);
 
 const byType = (type: string) => models.value.filter((m) => m.model_type === type && m.enabled === 1);
 const modelById = (id: string | null) => (id ? models.value.find((m) => m.id === id) : undefined);
-const toolsOn = (agent: Agent) => {
-  const model = modelById(agent.intent_model_id);
-  return !!model && model.provider !== 'nointent';
-};
 const pluginLabel = (code: string) => catalog.value?.plugins.find((p) => p.code === code)?.label;
 const agentPluginLabels = (agent: Agent) =>
   agent.plugins.map((p) => pluginLabel(p.plugin_code)).filter((label): label is string => !!label);
@@ -76,15 +70,30 @@ const agentPluginLabels = (agent: Agent) =>
  */
 const defaultOf = (type: string) => byType(type).find((m) => m.is_default === 1)?.id ?? null;
 
-const voicesOfModel = computed(() =>
-  editing.value?.tts_model_id ? voices.value.filter((v) => v.tts_model_id === editing.value!.tts_model_id) : [],
-);
-const voiceLanguages = computed(() => {
-  const voice = voices.value.find((v) => v.id === editing.value?.tts_voice_id);
-  return voice ? voice.languages.split('、').map((item) => item.trim()).filter(Boolean) : [];
+/** 对话模型能不能看图(模型页的「支持看图」) */
+const visionOf = (id: string | null) => {
+  try {
+    const config = JSON.parse(modelById(id)?.config_json ?? '{}') as { vision?: unknown };
+    return config.vision === true || config.vision === 'true';
+  } catch {
+    return false;
+  }
+};
+const voiceById = (id: string | null) => voices.value.find((voice) => voice.id === id);
+const selectedVoice = computed(() => voiceById(editing.value?.tts_voice_id ?? null));
+const VOICE_GROUPS: [Voice['kind'], string][] = [['system', '系统音色'], ['clone', '复刻音色'], ['design', '设计音色']];
+const usableVoices = computed(() => voices.value.filter((voice) => voice.compatible));
+const hasImagePlugin = computed(() => 'image' in pluginState.value);
+/** 工具按分组显示 */
+const pluginGroups = computed(() => {
+  const groups = new Map<string, PluginDef[]>();
+  for (const plugin of catalog.value?.plugins ?? []) {
+    const list = groups.get(plugin.group) ?? [];
+    list.push(plugin);
+    groups.set(plugin.group, list);
+  }
+  return [...groups.entries()];
 });
-const toolsEnabled = computed(() => !!editing.value && (editing.value.runtime === 'agent' || toolsOn(editing.value)));
-const isAgentRuntime = computed(() => editing.value?.runtime === 'agent');
 
 function toggleMcp(server: McpServerView, on: boolean) {
   mcpState.value = { ...mcpState.value, [server.id]: { on, allow: mcpState.value[server.id]?.allow ?? null } };
@@ -121,68 +130,14 @@ function missingTools(skill: Skill): string[] {
     return !toolNames.has(tool);
   });
 }
-/** 控制塔智能体自己管工具与记忆,这两项选了也不生效,不显示 */
-const visibleModelLabels = computed(() =>
-  MODEL_LABELS.filter(([key]) => !isAgentRuntime.value || (key !== 'intent_model_id' && key !== 'memory_model_id')));
-/** 当前大脑能用的插件 */
-const visiblePlugins = computed(() =>
-  (catalog.value?.plugins ?? []).filter((plugin) =>
-    plugin.runtime === 'both' || plugin.runtime === (isAgentRuntime.value ? 'agent' : 'engine')),
-);
-const qwenTts = computed(() => modelById(editing.value?.tts_model_id ?? null)?.provider === 'qwen_audio_tts');
-const selectedVoice = computed(() => voices.value.find((v) => v.id === editing.value?.tts_voice_id));
-const VOICE_STATUS: Record<Voice['status'], string> = { ok: '', pending: '(审核中,暂不可用)', failed: '(未通过审核)' };
-
-function parseTtsParams(json: string | undefined) {
-  let parsed: TtsParams = {};
-  try {
-    parsed = JSON.parse(json || '{}') as TtsParams;
-  } catch {
-    /* 坏数据按默认值 */
-  }
-  return {
-    rate: typeof parsed.rate === 'number' ? parsed.rate : 1,
-    pitch: typeof parsed.pitch === 'number' ? parsed.pitch : 1,
-    volume: typeof parsed.volume === 'number' ? parsed.volume : 50,
-    instruction: typeof parsed.instruction === 'string' ? parsed.instruction : '',
-  };
-}
-
-/** 与默认值相同的参数不存:以后调默认值时,没改过的智能体跟着变。 */
-function ttsParamsPayload(): TtsParams {
-  const t = ttsParams.value;
-  const result: TtsParams = {};
-  if (Number(t.rate) !== 1) result.rate = Number(t.rate);
-  if (Number(t.pitch) !== 1) result.pitch = Number(t.pitch);
-  if (Number(t.volume) !== 50) result.volume = Number(t.volume);
-  if (t.instruction.trim()) result.instruction = t.instruction.trim();
-  return result;
-}
-
 const previewing = ref(false);
 async function previewVoice() {
   const agent = editing.value;
-  if (!agent?.tts_model_id || previewing.value) return;
-  const model = modelById(agent.tts_model_id);
-  let voice = selectedVoice.value?.voice;
-  if (!voice) {
-    try {
-      voice = String((JSON.parse(model?.config_json ?? '{}') as Record<string, unknown>)['voice'] ?? '');
-    } catch {
-      voice = '';
-    }
-  }
-  if (!voice) {
-    toast('还没有选音色,模型也没有配默认音色。', 'warn');
-    return;
-  }
+  const voice = selectedVoice.value;
+  if (!agent || !voice || previewing.value) return;
   previewing.value = true;
   try {
-    const blob = await api.postForBlob('/voices/preview', {
-      tts_model_id: agent.tts_model_id, voice,
-      text: `你好呀,我是${agent.name || '小单'},很高兴认识你。`,
-      ...ttsParamsPayload(),
-    });
+    const blob = await api.postForBlob('/voices/preview', { voice_id: voice.id });
     await playBlob(blob);
   } catch (e) {
     toastError(e);
@@ -191,19 +146,15 @@ async function previewVoice() {
   }
 }
 onBeforeUnmount(stopPlayback);
-const functionCallModel = computed(() =>
-  models.value.find((m) => m.model_type === 'Intent' && m.enabled === 1 && m.provider === 'function_call'),
-);
 
 const draftJson = () => JSON.stringify({
-  agent: editing.value, plugins: pluginState.value, tts: ttsParams.value, llm: llmParams.value, mcp: mcpState.value, skills: skillState.value,
+  agent: editing.value, plugins: pluginState.value, llm: llmParams.value, mcp: mcpState.value, skills: skillState.value,
 });
 const dirty = computed(() => !!editing.value && draftJson() !== snapshot.value);
 
 function startEditing(agent: Agent, plugins: Record<string, Record<string, string>>) {
   editing.value = agent;
   pluginState.value = plugins;
-  ttsParams.value = parseTtsParams(agent.tts_params_json);
   mcpState.value = Object.fromEntries((agent.mcp_servers ?? []).map((row) => [row.server_id, {
     on: true, allow: row.tool_allowlist_json ? (JSON.parse(row.tool_allowlist_json) as string[]) : null,
   }]));
@@ -239,11 +190,10 @@ function create() {
   startEditing(
     {
       id: '', name: '新的智能体', system_prompt: '',
-      vad_model_id: defaultOf('VAD'), asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'),
-      vllm_model_id: null, tts_model_id: defaultOf('TTS'),
-      memory_model_id: defaultOf('Memory'), intent_model_id: defaultOf('Intent'),
-      tts_voice_id: null, tts_language: null, chat_history_conf: 1, tts_params_json: '{}', is_default: 0,
-      runtime: 'agent', max_steps: 6, safety_level: 'standard', description: '', greeting: '', role_template: '',
+      asr_model_id: defaultOf('ASR'), llm_model_id: defaultOf('LLM'), image_model_id: null,
+      tts_voice_id: usableVoices.value.find((voice) => voice.status === 'ok' && voice.kind === 'system')?.id ?? null,
+      chat_history_conf: 1, is_default: 0,
+      max_steps: 6, safety_level: 'standard', description: '', greeting: '', role_template: '',
       llm_params_json: '{}', plugins: [], device_count: 0, mcp_servers: [], skills: [],
     },
     {},
@@ -266,11 +216,6 @@ async function openTemplates() {
     toastError(e);
   }
 }
-
-const SYSTEM_VOICE_NAMES: Record<string, string> = {
-  'longanhuan_v3.6': '安欢', longanfengyue: '安风月', longanyuanfei: '安元妃', longanlingxi: '安灵犀', longanxiaoxin: '安小欣',
-  'longjielidou_v3.6': '杰力豆', 'longpaopao_v3.6': '泡泡', 'longhuohuo_v3.6': '火火',
-};
 
 async function applyTemplate(template: RoleTemplate) {
   if (applying.value) return;
@@ -311,12 +256,6 @@ function togglePlugin(plugin: PluginDef, on: boolean) {
   }
 }
 
-function enableTools() {
-  if (!editing.value || !functionCallModel.value) return;
-  editing.value.intent_model_id = functionCallModel.value.id;
-  toast('已改为函数调用,保存后生效。', 'info');
-}
-
 async function save() {
   if (!editing.value || saving.value) return;
   const agent = editing.value;
@@ -328,16 +267,11 @@ async function save() {
   const payload = {
     name: agent.name.trim(),
     system_prompt: agent.system_prompt,
-    vad_model_id: agent.vad_model_id, asr_model_id: agent.asr_model_id,
-    llm_model_id: agent.llm_model_id, vllm_model_id: agent.vllm_model_id,
-    tts_model_id: agent.tts_model_id, memory_model_id: agent.memory_model_id,
-    intent_model_id: agent.intent_model_id, tts_voice_id: agent.tts_voice_id,
-    // 接口是整体覆盖,漏传这个字段会把已设的语言清空
-    tts_language: agent.tts_language ?? null,
-    chat_history_conf: agent.chat_history_conf,
-    // 同样是整体覆盖:不传会清空。非千问合成时也照存,换回千问时参数还在
-    tts_params: ttsParamsPayload(),
-    runtime: agent.runtime,
+    asr_model_id: agent.asr_model_id,
+    llm_model_id: agent.llm_model_id,
+    image_model_id: agent.image_model_id,
+    tts_voice_id: agent.tts_voice_id,
+    chat_history_conf: agent.chat_history_conf ? 1 : 0,
     max_steps: Number(agent.max_steps) || 6,
     safety_level: agent.safety_level,
     description: agent.description,
@@ -391,26 +325,10 @@ async function remove(agent: Agent) {
 // 人设里的占位符。写在这里而不是模板里:模板中嵌套的 {{ 会让 Vue 的插值解析器失配。
 const NAME_PLACEHOLDER = '{' + '{assistant_name}' + '}';
 
-const MODEL_LABELS: [keyof Agent, string, string, string][] = [
-  ['llm_model_id', 'LLM', '对话模型', '决定它怎么思考和回话'],
-  ['tts_model_id', 'TTS', '语音合成', '决定它的声音'],
-  ['asr_model_id', 'ASR', '语音识别', '把用户说的话转成文字'],
-  ['intent_model_id', 'Intent', '工具调用', '选「函数调用」才能用下面的工具'],
-  ['vad_model_id', 'VAD', '语音活动检测', '判断用户什么时候说完了'],
-  ['memory_model_id', 'Memory', '记忆', '要不要记住之前聊过什么'],
-  ['vllm_model_id', 'VLLM', '视觉模型', '本硬件没有摄像头,可以不选'],
-];
-
 const PLUGIN_ICON: Record<string, IconName> = {
   show_calendar: 'calendar',
   get_weather: 'cloud',
   set_volume: 'volume',
-  change_role: 'sparkles',
-  web_search: 'globe',
-  get_news_from_newsnow: 'news',
-  get_news_from_chinanews: 'news',
-  play_music: 'music',
-  hass_state: 'home',
   search: 'globe',
   reminders: 'clock',
   stories: 'message',
@@ -437,7 +355,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
 
     <ModalDialog :open="templatesOpen" wide title="从模板创建角色" @close="templatesOpen = false">
       <p class="field-hint" style="margin: 0 0 12px">
-        建出来的是普通智能体:大脑在控制塔,模型沿用默认智能体的选择,之后在编辑页随意改。设备上说「换童童来陪我」就能切换(需要开启「切换角色」工具)。
+        建出来的是普通智能体:模型沿用默认智能体的选择,之后在编辑页随意改。设备上说「换童童来陪我」就能切换(需要开启「切换角色」工具)。
       </p>
       <div class="template-grid">
         <article v-for="template in templates" :key="template.id" class="card template-card">
@@ -446,7 +364,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
             <div style="flex: 1; min-width: 0">
               <h3 class="truncate">{{ template.name }}</h3>
               <div class="cell-sub">
-                音色 {{ SYSTEM_VOICE_NAMES[template.voice] ?? template.voice }}<template v-if="template.safety_level === 'child'"> · 儿童模式</template>
+                音色 {{ template.voice_name }}<template v-if="template.safety_level === 'child'"> · 儿童模式</template>
                 <template v-if="template.created"> · 已建 {{ template.created }} 个</template>
               </div>
             </div>
@@ -494,17 +412,15 @@ const PLUGIN_ICON: Record<string, IconName> = {
         <dl class="meta">
           <dt>对话模型</dt>
           <dd :class="{ muted: !modelById(agent.llm_model_id) }">{{ modelById(agent.llm_model_id)?.name ?? '未设置' }}</dd>
-          <dt>语音合成</dt>
-          <dd :class="{ muted: !modelById(agent.tts_model_id) }">
-            {{ modelById(agent.tts_model_id)?.name ?? '未设置' }}<template v-if="voices.find((v) => v.id === agent.tts_voice_id)">
-              · {{ voices.find((v) => v.id === agent.tts_voice_id)?.name }}</template>
-          </dd>
+          <dt>音色</dt>
+          <dd :class="{ muted: !voiceById(agent.tts_voice_id) }">{{ voiceById(agent.tts_voice_id)?.name ?? '默认音色' }}</dd>
           <dt>语音识别</dt>
-          <dd :class="{ muted: !modelById(agent.asr_model_id) }">{{ modelById(agent.asr_model_id)?.name ?? '未设置' }}</dd>
-          <dt>大脑</dt>
+          <dd :class="{ muted: !modelById(agent.asr_model_id) }">{{ modelById(agent.asr_model_id)?.name ?? '默认' }}</dd>
+          <dt>模式</dt>
           <dd>
-            <span v-if="agent.runtime === 'agent'" class="tag dot ok">控制塔智能体{{ agent.safety_level === 'child' ? ' · 儿童模式' : '' }}</span>
-            <span v-else class="tag dot" :class="toolsOn(agent) ? 'ok' : ''">引擎旧路径 · 工具{{ toolsOn(agent) ? '已开启' : '未开启' }}</span>
+            <span v-if="agent.safety_level === 'child'" class="tag dot ok">儿童模式</span>
+            <span v-else class="tag dot">标准</span>
+            <span v-if="visionOf(agent.llm_model_id)" class="tag sky" style="margin-left: 4px">能看图</span>
           </dd>
         </dl>
         <div v-if="agentPluginLabels(agent).length" class="chips">
@@ -557,26 +473,76 @@ const PLUGIN_ICON: Record<string, IconName> = {
 
     <section class="card">
       <div class="card-head">
-        <div>
-          <h2><AppIcon name="sparkles" :size="18" />大脑</h2>
-          <p>「控制塔智能体」支持一轮里连续调用多个工具、MCP、技能、提醒与内容库;「引擎旧路径」是原来的做法,切回去即回退。</p>
-        </div>
+        <div><h2><AppIcon name="layers" :size="18" />模型与声音</h2><p>对话、识别、文生图模型在「模型」页维护;声音的音量、语速、方言与语气在「音色」页调。</p></div>
         <div class="card-actions"><RouterLink class="btn btn-sm" to="/playground"><AppIcon name="message" :size="14" /><span>去试聊</span></RouterLink></div>
       </div>
       <div class="form-grid">
         <label class="field">
-          <span class="field-label">大脑</span>
-          <select v-model="editing.runtime" class="select">
-            <option value="agent">控制塔智能体(推荐)</option>
-            <option value="engine">引擎旧路径</option>
+          <span class="field-label">对话模型</span>
+          <select v-model="editing.llm_model_id" class="select">
+            <option :value="null">请选择</option>
+            <option v-for="model in byType('LLM')" :key="model.id" :value="model.id">{{ model.name }}{{ visionOf(model.id) ? ' · 能看图' : '' }}</option>
+          </select>
+          <span class="field-hint">{{ visionOf(editing.llm_model_id) ? '这个模型能看图,用户发的图片它能看懂。' : '这个模型看不了图;要看图能力,选一个在模型页打开了「支持看图」的模型。' }}</span>
+        </label>
+        <label class="field">
+          <span class="field-label">语音识别</span>
+          <select v-model="editing.asr_model_id" class="select">
+            <option :value="null">默认{{ defaultOf('ASR') ? `(${modelById(defaultOf('ASR'))?.name})` : '' }}</option>
+            <option v-for="model in byType('ASR')" :key="model.id" :value="model.id">{{ model.name }}</option>
           </select>
         </label>
-        <label v-if="isAgentRuntime" class="field">
+        <div class="field span-all">
+          <span class="field-label">音色</span>
+          <div class="row" style="gap: 8px; flex-wrap: wrap">
+            <select v-model="editing.tts_voice_id" class="select" style="flex: 1; min-width: 220px">
+              <option :value="null">默认音色</option>
+              <optgroup v-for="[kind, label] in VOICE_GROUPS" :key="kind" :label="label">
+                <option
+                  v-for="voice in usableVoices.filter((v) => v.kind === kind)" :key="voice.id" :value="voice.id"
+                  :disabled="voice.status !== 'ok' && voice.id !== editing.tts_voice_id"
+                >{{ voice.name }}{{ voice.status === 'pending' ? '(审核中)' : voice.status === 'failed' ? '(未通过审核)' : '' }}</option>
+              </optgroup>
+            </select>
+            <button class="btn" type="button" :disabled="!selectedVoice || selectedVoice.status !== 'ok'" :aria-busy="previewing" @click="previewVoice">
+              <AppIcon name="volume" :size="16" /><span>试听</span>
+            </button>
+            <RouterLink class="btn btn-ghost" to="/voices"><AppIcon name="sliders" :size="16" /><span>去音色页调整</span></RouterLink>
+          </div>
+          <span class="field-hint">{{ selectedVoice ? selectedVoice.summary : '用默认千问合成模型的默认音色。' }}</span>
+        </div>
+        <label v-if="hasImagePlugin" class="field">
+          <span class="field-label">文生图模型</span>
+          <select v-model="editing.image_model_id" class="select">
+            <option :value="null">默认{{ defaultOf('Image') ? `(${modelById(defaultOf('Image'))?.name})` : '' }}</option>
+            <option v-for="model in byType('Image')" :key="model.id" :value="model.id">{{ model.name }}</option>
+          </select>
+          <span class="field-hint">「画画」工具用它出图。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">对话记录</span>
+          <select v-model.number="editing.chat_history_conf" class="select">
+            <option :value="1">记录</option>
+            <option :value="0">不记录</option>
+          </select>
+        </label>
+      </div>
+      <div v-if="!editing.llm_model_id" class="callout warn" style="margin: 12px 0 0">
+        <AppIcon name="alert" :size="18" /><div class="callout-body">还没有选对话模型,设备说话时它只会提示去配置。</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div><h2><AppIcon name="sparkles" :size="18" />对话行为</h2></div>
+      </div>
+      <div class="form-grid">
+        <label class="field">
           <span class="field-label">一轮最多调用几步工具</span>
           <input v-model.number="editing.max_steps" class="input" type="number" min="1" max="10" />
           <span class="field-hint">到上限后强制回答。步数越多越能办复杂的事,也越慢。</span>
         </label>
-        <label v-if="isAgentRuntime" class="field">
+        <label class="field">
           <span class="field-label">内容安全</span>
           <select v-model="editing.safety_level" class="select">
             <option value="standard">标准</option>
@@ -584,85 +550,16 @@ const PLUGIN_ICON: Record<string, IconName> = {
           </select>
           <span class="field-hint">儿童模式在提示词里加儿童安全规则,搜索与画画按儿童标准约束。</span>
         </label>
-        <label v-if="isAgentRuntime" class="field">
+        <label class="field">
           <span class="field-label">深度思考</span>
           <select v-model="llmParams.thinking" class="select">
             <option :value="false">关闭(推荐,回答快)</option>
             <option :value="true">开启(更慢,适合复杂推理)</option>
           </select>
         </label>
-        <label v-if="isAgentRuntime" class="field span-all">
+        <label class="field span-all">
           <span class="field-label">切换到这个角色时的招呼</span>
           <input v-model="editing.greeting" class="input" type="text" maxlength="200" placeholder="例如:嗨,我是童童,今天想听故事还是学单词呀?" />
-        </label>
-      </div>
-      <div v-if="isAgentRuntime && !editing.llm_model_id" class="callout warn" style="margin: 12px 0 0">
-        <AppIcon name="alert" :size="18" /><div class="callout-body">控制塔智能体需要在下面的「对话模型」里选一个模型(例如 DeepSeek)。</div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <div><h2><AppIcon name="layers" :size="18" />模型组合</h2><p>选「不启用」表示不用这个模块。可选的模型在「模型」页维护。</p></div>
-      </div>
-      <div class="form-grid">
-        <label v-for="[key, type, label, hint] in visibleModelLabels" :key="type" class="field">
-          <span class="field-label">{{ label }}</span>
-          <select v-model="(editing as any)[key]" class="select">
-            <option :value="null">不启用</option>
-            <option v-for="model in byType(type)" :key="model.id" :value="model.id">{{ model.name }}</option>
-          </select>
-          <span class="field-hint">{{ hint }}</span>
-        </label>
-        <label v-if="voicesOfModel.length" class="field">
-          <span class="field-label">音色</span>
-          <select v-model="editing.tts_voice_id" class="select" @change="editing.tts_language = null">
-            <option :value="null">用语音合成模型自带的默认音色</option>
-            <option
-              v-for="voice in voicesOfModel" :key="voice.id" :value="voice.id"
-              :disabled="voice.status !== 'ok' && voice.id !== editing.tts_voice_id"
-            >{{ voice.name }}{{ VOICE_STATUS[voice.status] }}</option>
-          </select>
-          <span class="field-hint">音色在「音色」页管理;审核中的定制音色暂时不能选。</span>
-        </label>
-        <label v-if="voiceLanguages.length" class="field">
-          <span class="field-label">合成语言</span>
-          <select v-model="editing.tts_language" class="select">
-            <option :value="null">自动({{ voiceLanguages[0] }})</option>
-            <option v-for="language in voiceLanguages" :key="language" :value="language">{{ language }}</option>
-          </select>
-        </label>
-        <template v-if="qwenTts">
-          <label class="field">
-            <span class="field-label">语速 {{ Number(ttsParams.rate).toFixed(2) }}</span>
-            <input v-model.number="ttsParams.rate" type="range" min="0.5" max="2" step="0.05" />
-          </label>
-          <label class="field">
-            <span class="field-label">音调 {{ Number(ttsParams.pitch).toFixed(2) }}</span>
-            <input v-model.number="ttsParams.pitch" type="range" min="0.5" max="2" step="0.05" />
-          </label>
-          <label class="field">
-            <span class="field-label">音量 {{ ttsParams.volume }}</span>
-            <input v-model.number="ttsParams.volume" type="range" min="0" max="100" step="1" />
-          </label>
-          <label class="field">
-            <span class="field-label">语气指令</span>
-            <input v-model="ttsParams.instruction" class="input" type="text" maxlength="50" placeholder="例如:像幼儿园老师一样温柔、耐心" />
-            <span class="field-hint">千问合成专用,至多 50 个汉字。</span>
-          </label>
-          <div class="field" style="justify-content: flex-end">
-            <button class="btn" type="button" style="align-self: flex-start" :aria-busy="previewing" @click="previewVoice">
-              <AppIcon name="volume" :size="16" /><span>试听当前声音</span>
-            </button>
-          </div>
-        </template>
-        <label class="field">
-          <span class="field-label">对话记录</span>
-          <select v-model.number="editing.chat_history_conf" class="select">
-            <option :value="0">不记录</option>
-            <option :value="1">记录文字</option>
-            <option :value="2">记录文字与音频(控制台仍只存文字)</option>
-          </select>
         </label>
       </div>
     </section>
@@ -671,21 +568,13 @@ const PLUGIN_ICON: Record<string, IconName> = {
       <div class="card-head">
         <div>
           <h2><AppIcon name="zap" :size="18" />工具</h2>
-          <p v-if="isAgentRuntime">打开后,智能体会在需要时调用它们;一件事要好几步时会连续调用直到办完。</p>
-          <p v-else>打开后,模型会在需要时调用它们。识别告别与查农历由服务端始终开启,不在这里列出。</p>
+          <p>这个智能体能做哪些事。打开后,它会在需要时调用;一件事要好几步时会连续调用直到办完。</p>
         </div>
       </div>
-      <div v-if="!toolsEnabled" class="callout warn">
-        <AppIcon name="alert" :size="18" />
-        <div class="callout-body">
-          <strong>工具调用没有开启。</strong>模型组合里的「工具调用」不是函数调用,下面的工具不会生效。
-          <div v-if="functionCallModel" class="callout-actions">
-            <button class="btn btn-sm btn-primary" type="button" @click="enableTools"><span>改为函数调用</span></button>
-          </div>
-        </div>
-      </div>
+      <template v-for="[group, plugins] in pluginGroups" :key="group">
+      <h3 class="plugin-group-title">{{ group }}</h3>
       <div class="plugin-grid">
-        <div v-for="plugin in visiblePlugins" :key="plugin.code" class="plugin" :class="{ on: plugin.code in pluginState }">
+        <div v-for="plugin in plugins" :key="plugin.code" class="plugin" :class="{ on: plugin.code in pluginState }">
           <div class="plugin-head">
             <span class="plugin-icon"><AppIcon :name="PLUGIN_ICON[plugin.code] ?? 'zap'" :size="18" /></span>
             <span class="plugin-title">{{ plugin.label }}</span>
@@ -710,9 +599,10 @@ const PLUGIN_ICON: Record<string, IconName> = {
           </div>
         </div>
       </div>
+      </template>
     </section>
 
-    <section v-if="isAgentRuntime" class="card">
+    <section class="card">
       <div class="card-head">
         <div>
           <h2><AppIcon name="link" :size="18" />MCP 服务器</h2>
@@ -738,7 +628,7 @@ const PLUGIN_ICON: Record<string, IconName> = {
       </div>
     </section>
 
-    <section v-if="isAgentRuntime" class="card">
+    <section class="card">
       <div class="card-head">
         <div>
           <h2><AppIcon name="sparkles" :size="18" />技能</h2>

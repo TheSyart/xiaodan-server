@@ -14,6 +14,15 @@ export interface LlmConfig {
   temperature?: unknown;
   max_tokens?: unknown;
   top_p?: unknown;
+  /** 模型能看图(模型页的「支持看图」) */
+  vision?: unknown;
+}
+
+/** OpenAI 兼容的多模态内容:文字与图片地址(data: 或 https) */
+export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
+export function supportsVision(config: LlmConfig): boolean {
+  return config.vision === true || config.vision === 'true';
 }
 
 export interface ToolCall {
@@ -23,7 +32,8 @@ export interface ToolCall {
 }
 
 export type ChatMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | ContentPart[] }
   | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
   | { role: 'tool'; content: string; tool_call_id: string };
 

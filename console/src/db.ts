@@ -42,18 +42,39 @@ export function runMigrations(conn: Db, migrations: readonly Migration[] = MIGRA
   }
   for (const migration of migrations) {
     if (schemaVersion(conn) >= migration.version) continue;
-    conn.exec('BEGIN IMMEDIATE');
+    // 要重建被外键引用的表时关掉外键:开着的时候 DROP TABLE 会先按 ON DELETE 删掉或清空引用它的行。
+    // 这个开关在事务里设置无效,必须在 BEGIN 之前;结束后一定恢复。
+    const foreignKeysOff = migration.disableForeignKeys === true;
+    if (foreignKeysOff) conn.exec('PRAGMA foreign_keys = OFF');
     try {
-      if (schemaVersion(conn) < migration.version) {
-        migration.up(conn);
-        conn.exec(`PRAGMA user_version = ${Number(migration.version)}`);
+      conn.exec('BEGIN IMMEDIATE');
+      try {
+        if (schemaVersion(conn) < migration.version) {
+          const before = foreignKeysOff ? foreignKeyProblems(conn) : new Set<string>();
+          migration.up(conn);
+          if (foreignKeysOff) {
+            // 关着外键时迁移自己负责清理引用;只追究这一步新造出来的悬空引用,库里原有的不算
+            const introduced = [...foreignKeyProblems(conn)].filter((item) => !before.has(item));
+            if (introduced.length) {
+              throw new Error(`迁移 ${migration.version} 留下了 ${introduced.length} 处对不上的外键引用:${introduced.slice(0, 3).join(';')}`);
+            }
+          }
+          conn.exec(`PRAGMA user_version = ${Number(migration.version)}`);
+        }
+        conn.exec('COMMIT');
+      } catch (error) {
+        conn.exec('ROLLBACK');
+        throw error;
       }
-      conn.exec('COMMIT');
-    } catch (error) {
-      conn.exec('ROLLBACK');
-      throw error;
+    } finally {
+      if (foreignKeysOff) conn.exec('PRAGMA foreign_keys = ON');
     }
   }
+}
+
+function foreignKeyProblems(conn: Db): Set<string> {
+  const rows = conn.prepare('PRAGMA foreign_key_check').all() as { table: string; rowid: number | null; parent: string; fkid: number }[];
+  return new Set(rows.map((row) => `${row.table}#${row.rowid ?? '-'}→${row.parent}#${row.fkid}`));
 }
 
 /**

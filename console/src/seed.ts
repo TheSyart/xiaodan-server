@@ -8,6 +8,7 @@ import type { Db } from './db.ts';
 import { all, one, run, tx } from './db.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 import { seedBuiltinSkills } from './agent/skills/builtin.ts';
+import { syncSystemVoices } from './voice/store.ts';
 
 export const DEFAULT_AGENT_ID = 'agent_xiaodan';
 
@@ -50,8 +51,8 @@ export function seed(conn: Db): void {
       );
     }
 
-    // 三个"不需要配置就能用"的模块。没有它们服务端起不来:
-    // VAD 是本地模型,Intent/Memory 的 nointent/nomem 是空实现。
+    // 本地语音活动检测。引擎起不来没有它;它只有这一种,页面上不展示。
+    // (意图与记忆模块由控制塔下发配置时固定为空实现,不再建模型行。)
     seedModel(conn, {
       id: 'VAD_SileroVAD',
       type: 'VAD',
@@ -65,44 +66,16 @@ export function seed(conn: Db): void {
       },
       isDefault: true,
     });
-    // 工具调用默认开启:新装的实例开箱就能查日期、查天气、调音量(server/plugins/)。
-    // 只影响新库 —— seedModel 与下面的默认智能体都是"缺了才插",已有实例的默认模型与智能体配置不会被改。
-    seedModel(conn, {
-      id: 'Intent_nointent',
-      type: 'Intent',
-      name: '不启用工具',
-      provider: 'nointent',
-      config: { type: 'nointent' },
-      isDefault: false,
-    });
-    seedModel(conn, {
-      id: 'Intent_function_call',
-      type: 'Intent',
-      name: '函数调用',
-      provider: 'function_call',
-      config: { type: 'function_call' },
-      isDefault: true,
-    });
-    seedModel(conn, {
-      id: 'Memory_nomem',
-      type: 'Memory',
-      name: '不记忆',
-      provider: 'nomem',
-      config: { type: 'nomem' },
-      isDefault: true,
-    });
 
     // 默认智能体。人设按「角色 / 人设标签 / 互动方式 / 语言风格」四段写,只管性格与说话方式;
-    // 简短、能力边界、工具与输出格式这类规则统一放在引擎的提示词模板(server/prompts/xiaodan-base-prompt.txt)里。
-    // 【能力边界必须显式写明】—— 上游默认模板的示例本身在演示放歌和报天气,
-    // 模型照着学就会承诺它没有的能力(被要求开灯时回答"你想开哪个房间的灯")。
+    // 简短、能力边界、工具与输出格式这类规则由控制塔按角色组装(agent/prompt.ts)。
     // 参考表达里的语气词只用设备字库里有的字:欸、喔、嗯在屏幕上显示不出来。
+    // 只写 v0 就有的列:迁移测试会在旧版本的库上调 seed。
     if (!one(conn, 'SELECT 1 FROM agents WHERE id = ?', DEFAULT_AGENT_ID)) {
       run(
         conn,
-        `INSERT INTO agents (id, name, system_prompt, vad_model_id, asr_model_id, memory_model_id,
-                             intent_model_id, chat_history_conf, is_default)
-         VALUES (?, ?, ?, 'VAD_SileroVAD', NULL, 'Memory_nomem', 'Intent_function_call', 1, 1)`,
+        `INSERT INTO agents (id, name, system_prompt, vad_model_id, chat_history_conf, is_default)
+         VALUES (?, ?, ?, 'VAD_SileroVAD', 1, 1)`,
         DEFAULT_AGENT_ID,
         '小单',
         [
@@ -130,6 +103,9 @@ export function seed(conn: Db): void {
 
     // 内置技能(睡前故事、单词陪练、AI 资讯速递),缺了才补,用户改过的不覆盖
     seedBuiltinSkills(conn);
+
+    // 千问合成模型的系统音色自动列出,不用再手动导入
+    syncSystemVoices(conn);
   });
 }
 

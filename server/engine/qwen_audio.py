@@ -12,6 +12,8 @@
 - 合成 qwen-audio-3.0-tts-flash:与 CosyVoice 同一套 WebSocket 协议,wss://{host}/api-ws/v1/inference,
   run-task → task-started → continue-task → finish-task → 二进制音频帧 + result-generated → task-finished。
 - 两者默认走业务空间域名 {WorkspaceId}.cn-beijing.maas.aliyuncs.com;新模型能否走旧的共享域名文档未写明。
+- 情感标签:要念的文字里可以写 [excited]、[laughing] 这类英文方括号标签,控制这一句的情绪或插入声音。
+  控制塔按音色下发允许的标签(inline_tags),其余的在这里去掉;字幕里一律去掉。
 """
 
 import base64
@@ -35,9 +37,72 @@ _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _SPEAKABLE = re.compile(r"[0-9A-Za-z㐀-鿿豈-﫿]")
 
 
+# 百炼的情感标签:半角方括号里的小写英文,如 [excited]、[clears throat]
+INLINE_TAG = re.compile(r"\[([a-z][a-z ]{0,30})\]")
+_SPACES = re.compile(r"[ \t]{2,}")
+# 修边时暂时替换完整标签用的占位字符(Unicode 私用区,不是标点也不是表情)
+_PLACEHOLDER_BASE = 0xE000
+_PLACEHOLDER = re.compile("[\ue000-\uf8ff]")
+
+
 def speakable(text):
-    """至少有一个字母、数字或汉字才值得合成。只剩标点或表情时发出去只会浪费一次请求。"""
-    return bool(text) and _SPEAKABLE.search(text) is not None
+    """去掉情感标签后至少有一个字母、数字或汉字才值得合成。只剩标点、表情或标签时发出去只会浪费一次请求。"""
+    return bool(text) and _SPEAKABLE.search(strip_tags(text)) is not None
+
+
+def parse_allowed_tags(value):
+    """控制塔下发的允许标签:列表或逗号分隔的串。"""
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+    else:
+        items = []
+    return frozenset(str(item).strip() for item in items if str(item).strip())
+
+
+def filter_tags(text, allowed):
+    """只留允许的情感标签。没有允许的标签时全部去掉,模型乱写的也不会被念出来。"""
+    return _SPACES.sub(" ", INLINE_TAG.sub(lambda m: m.group(0) if m.group(1) in allowed else "", text or ""))
+
+
+def strip_tags(text):
+    """去掉全部情感标签(字幕用)。"""
+    return _SPACES.sub(" ", INLINE_TAG.sub("", text or ""))
+
+
+def tags_only(text):
+    """文字里的标签原样拼起来(一段只剩标签时,留给下一段)。"""
+    return "".join(m.group(0) for m in INLINE_TAG.finditer(text or ""))
+
+
+def trim_segment(text, is_trim_char):
+    """按引擎的规则去掉首尾的标点、空白与表情,但保住完整的情感标签。
+
+    引擎切句后用 get_string_no_punctuation_or_emoji 修边,它把 [ 与 ] 也当成要去掉的标点,
+    句首的 [excited] 会变成 excited]。这里先把完整标签换成占位字符,修完边再换回来。
+    """
+    tags = []
+
+    def protect(match):
+        if len(tags) >= 0x18FF:
+            return match.group(0)
+        tags.append(match.group(0))
+        return chr(_PLACEHOLDER_BASE + len(tags) - 1)
+
+    chars = list(INLINE_TAG.sub(protect, text or ""))
+    start, end = 0, len(chars) - 1
+    while start <= end and is_trim_char(chars[start]):
+        start += 1
+    while end >= start and is_trim_char(chars[end]):
+        end -= 1
+    trimmed = "".join(chars[start:end + 1])
+
+    def restore(match):
+        index = ord(match.group(0)) - _PLACEHOLDER_BASE
+        return tags[index] if index < len(tags) else ""
+
+    return _PLACEHOLDER.sub(restore, trimmed)
 
 
 def http_base(config):
@@ -265,8 +330,16 @@ def parse_event(message):
 _SPLIT_AT = "。！？!?；;\n，,、 "
 
 
+def _inside_tag(text, index):
+    """切在 index 之后时会不会劈开一个情感标签:返回那个标签的起点,不会则返回 None。"""
+    for match in INLINE_TAG.finditer(text):
+        if match.start() <= index < match.end() - 1:
+            return match.start()
+    return None
+
+
 def split_segments(text, limit=SEGMENT_CHARS):
-    """把过长的文字切成不超过 limit 个字符的段,尽量在标点处切。"""
+    """把过长的文字切成不超过 limit 个字符的段,尽量在标点处切,不劈开情感标签。"""
     text = text or ""
     segments = []
     while len(text) > limit:
@@ -274,6 +347,9 @@ def split_segments(text, limit=SEGMENT_CHARS):
         cut = max(window.rfind(ch) for ch in _SPLIT_AT)
         if cut < limit // 2:
             cut = limit - 1
+        tag_start = _inside_tag(text, cut)
+        if tag_start is not None and tag_start > 0:
+            cut = tag_start - 1
         segments.append(text[: cut + 1])
         text = text[cut + 1:]
     if text:

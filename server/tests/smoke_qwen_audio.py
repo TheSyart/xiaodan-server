@@ -46,6 +46,7 @@ def tone(seconds, rate=RATE):
 # ---- 假的百炼合成服务 ----
 
 seen_runs = []
+seen_texts = []
 
 
 def tts_handler(ws):
@@ -68,6 +69,7 @@ def _tts_session(ws):
             ws.send(json.dumps({"header": {"event": "task-started", "task_id": task_id}}))
         elif header["action"] == "continue-task":
             text = data["payload"]["input"]["text"]
+            seen_texts.append(text)
         elif header["action"] == "finish-task":
             if "失败" in text:
                 ws.send(json.dumps({"header": {"event": "task-failed", "task_id": task_id,
@@ -177,6 +179,35 @@ tts.tts_text_buff.append("。然后继续")
 assert tts._process_remaining_text_stream(opus_handler=tts.handle_opus)
 spoken = [item[2] for item in drain(tts) if item[0] == SentenceType.FIRST]
 assert spoken == ["然后继续"], f"插入文件后的文字被跳过了: {spoken}"
+
+# 5b. 情感标签:允许的标签留在要念的文字里,字幕去掉;不允许的去掉;只剩标签的一段留给下一段;句首标签不被修边剥坏
+tts, conn = new_tts(inline_tags=["excited", "laughing"])
+tts.tts_text_buff = ["[excited]你好呀！[sad]今天真好"]
+tts.processed_chars = 0
+segment = tts._get_segment_text()
+assert segment == "[excited]你好呀", segment
+tts.to_tts_stream(segment, opus_handler=tts.handle_opus)
+items = drain(tts)
+assert items[0][2] == "你好呀", f"字幕应去掉标签: {items[0]}"
+assert seen_texts[-1] == "[excited]你好呀", f"要念的文字应保留允许的标签: {seen_texts[-1]}"
+
+tts.tts_stop_request = True
+assert tts._process_remaining_text_stream(opus_handler=tts.handle_opus)
+items = drain(tts)
+assert [item[2] for item in items if item[0] == SentenceType.FIRST] == ["今天真好"], items
+assert seen_texts[-1] == "今天真好", f"不允许的 [sad] 应去掉: {seen_texts[-1]}"
+tts.tts_text_buff.append("[laughing]")
+before = len(seen_runs)
+tts._process_remaining_text_stream(opus_handler=tts.handle_opus)
+assert len(seen_runs) == before, "只剩标签的一段不该发合成任务"
+assert tts._carry_tags == "[laughing]", tts._carry_tags
+tts.to_tts_stream("还有一句。", opus_handler=tts.handle_opus)
+assert tts._carry_tags == "" and [item[2] for item in drain(tts) if item[0] == SentenceType.FIRST] == ["还有一句。"]
+assert seen_texts[-1] == "[laughing]还有一句。", seen_texts[-1]
+tts3, _ = new_tts()
+tts3.to_tts_stream("[excited]没有允许的标签。", opus_handler=tts3.handle_opus)
+assert [item[2] for item in drain(tts3) if item[0] == SentenceType.FIRST] == ["没有允许的标签。"]
+assert seen_texts[-1] == "没有允许的标签。", seen_texts[-1]
 
 # 6. 长音频文件:约每 20 秒插一条 sentence_start
 fd, path = tempfile.mkstemp(suffix=".wav")

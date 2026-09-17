@@ -1,17 +1,20 @@
-// 音色定制:系统音色导入、试听、声音设计、声音复刻(两条样本通道)、状态刷新、删除,
-// 以及智能体的合成参数与审核状态如何进到下发给引擎的配置里。百炼接口全部用假的 fetch 代替。
+// 音色页:系统音色自动同步(flash 与 plus 各一套)、说话设置的合成与校验、复制为新音色、试听、
+// 声音设计、声音复刻(两条样本通道)、状态刷新、删除。下发给引擎的合成配置在 manager-api.test.ts。
+// 百炼接口全部用假的 fetch 代替。
 
 import { strict as assert } from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb, one, run, type Db } from '../src/db.ts';
-import { DEFAULT_AGENT_ID, SECRET_KEY, seed } from '../src/seed.ts';
+import { DEFAULT_AGENT_ID, seed } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
-import { hashClientId } from '../src/identity.ts';
 import { clampInstruction, httpBase, mapVoiceStatus, voicePrefix } from '../src/voice/dashscope.ts';
+import {
+  composeInstruction, DEFAULT_PROFILE, filterInlineTags, instructionUnits, readProfile, stripInlineTags, ttsOverrides, validateProfile,
+  type VoiceProfile,
+} from '../src/voice/profile.ts';
 import { sampleUrl } from '../src/voice/samples.ts';
 
 interface Call {
@@ -59,6 +62,12 @@ beforeEach(() => {
   );
   run(
     conn,
+    "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Plus', 'TTS', '千问 plus', 'qwen_audio_tts', ?)",
+    JSON.stringify({ type: 'qwen_audio_tts', api_key: 'sk-test', model_name: 'qwen-audio-3.0-tts-plus' }),
+  );
+  // 旧版留下的别家合成模型:目录里已不支持,音色操作要拒绝
+  run(
+    conn,
     "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Edge', 'TTS', 'Edge', 'edge', '{\"type\":\"edge\"}')",
   );
   handler = () => jsonResponse({ code: 'Unexpected', message: '测试没有设置假百炼' }, 500);
@@ -70,6 +79,18 @@ const api = (method: string, path: string, body?: unknown, headers: Record<strin
     headers: { 'content-type': 'application/json', ...headers },
     ...(body === undefined ? {} : { body: body instanceof Uint8Array ? body : JSON.stringify(body) }),
   });
+
+const profile = (patch: Partial<VoiceProfile> = {}): VoiceProfile => ({ ...DEFAULT_PROFILE, tone_tags: [], emotion_tags: [], ...patch });
+const HUAN = 'TTS_Qwen__longanhuan_v3.6';
+
+/** 试听限流窗口是 400 毫秒:连续点试听的测试之间要等一下 */
+const pastPreviewWindow = () => new Promise((resolve) => setTimeout(resolve, 450));
+
+async function listVoices() {
+  const response = await api('GET', '/voices');
+  assert.equal(response.status, 200);
+  return ((await response.json()) as { items: Record<string, any>[] }).items;
+}
 
 describe('纯函数', () => {
   test('地址、前缀、状态映射与语气指令截断', () => {
@@ -86,47 +107,163 @@ describe('纯函数', () => {
     assert.equal(sampleUrl('https://a.example/xiaozhi/ota', 'tok', 'wav'), 'https://a.example/xiaozhi/ota/voice-sample/tok.wav');
     assert.equal(sampleUrl('http://a.example/xiaozhi/ota/', 'tok', 'wav'), null, '百炼只该拿到 https 链接');
   });
+
+  test('语气指令:方言(仅中文)→ 固定语气 → 补充说明 → 额外要求,按 100 单位截断', () => {
+    const sichuan = profile({ dialect: '四川话', tone_tags: ['gentle', 'slow'], tone_text: '带点笑意' });
+    assert.equal(composeInstruction(sichuan), '请用四川话表达,语气温柔,语速稍慢,带点笑意');
+    assert.equal(composeInstruction(sichuan, '讲睡前故事'), '请用四川话表达,语气温柔,语速稍慢,带点笑意,讲睡前故事');
+    assert.equal(composeInstruction({ ...sichuan, language: '英语' }), '语气温柔,语速稍慢,带点笑意', '英语不带方言');
+    assert.equal(composeInstruction(profile()), '');
+    const long = composeInstruction(profile({ tone_text: '好'.repeat(50) }), '再加一句');
+    assert.equal(instructionUnits(long), 100);
+    assert.equal(instructionUnits('abc中文'), 7);
+  });
+
+  test('设置校验给出人能看懂的原因', () => {
+    const zhEn = ['中文', '英语'];
+    assert.equal(validateProfile(profile({ dialect: '四川话', tone_tags: ['gentle'] }), zhEn), null);
+    assert.match(validateProfile(profile({ language: '英语', dialect: '四川话' }), zhEn)!, /方言只在语种为中文时可用/u);
+    assert.match(validateProfile(profile({ language: '日语' }), zhEn)!, /不会说日语/u);
+    assert.equal(validateProfile(profile({ language: '日语' }), []), null, '不知道能说什么语种时不拦');
+    assert.match(validateProfile(profile({ dialect: '火星话' }), zhEn)!, /不认识的方言/u);
+    assert.match(validateProfile(profile({ tone_tags: ['angry-ish'] }), zhEn)!, /不认识的语气/u);
+    assert.match(validateProfile(profile({ emotion_tags: ['dancing'] }), zhEn)!, /不认识的情感标签/u);
+    assert.match(validateProfile(profile({ rate: 3 }), zhEn)!, /语速/u);
+    assert.match(validateProfile(profile({ tone_text: '好'.repeat(51) }), zhEn)!, /不能超过 50 个字/u);
+    assert.match(validateProfile(profile({ dialect: '宁夏话', tone_tags: ['story', 'excited', 'patient'], tone_text: '好'.repeat(30) }), zhEn)!,
+      /已用 \d+\/100/u);
+  });
+
+  test('情感标签:只认半角方括号里的小写英文;过滤只留允许的', () => {
+    assert.equal(stripInlineTags('[excited]哇,你做到啦![laughing]'), '哇,你做到啦!');
+    assert.equal(stripInlineTags('数组 a[0] 与 [Note] 不是标签'), '数组 a[0] 与 [Note] 不是标签');
+    assert.equal(filterInlineTags('[excited]哇[sad]好吧[laughing]', ['excited', 'laughing']), '[excited]哇好吧[laughing]');
+    assert.equal(filterInlineTags('[deep and loud shouting]站住', []), '站住');
+  });
+
+  test('读库里的设置时坏值按默认;下发参数带上指令与允许的标签', () => {
+    assert.deepEqual(readProfile({ volume: 'x', tone_tags: '{bad', emotion_tags: '["excited"]', language: '' }),
+      { ...DEFAULT_PROFILE, tone_tags: [], emotion_tags: ['excited'] });
+    assert.deepEqual(ttsOverrides({ voice: 'longpaopao_v3.6', rate: 0.9, tone_tags: '["gentle"]', emotion_tags: '["giggles"]' } as { voice: string }), {
+      private_voice: 'longpaopao_v3.6', volume: 50, rate: 0.9, pitch: 1, inline_tags: ['giggles'], instruction: '语气温柔',
+    });
+    assert.equal('instruction' in ttsOverrides({ voice: 'v' }), false);
+  });
 });
 
 describe('系统音色', () => {
-  test('一键导入千问的 12 个系统音色,重复导入不重复加', async () => {
-    let response = await api('POST', '/voices/import-system', { tts_model_id: 'TTS_Qwen' });
-    assert.equal(response.status, 200);
-    assert.equal(((await response.json()) as { added: number }).added, 12);
-    response = await api('POST', '/voices/import-system', { tts_model_id: 'TTS_Qwen' });
-    assert.equal(((await response.json()) as { added: number }).added, 0);
-    const child = one<{ kind: string; status: string; tags: string }>(
-      conn, "SELECT kind, status, tags FROM voices WHERE voice = 'longpaopao_v3.6'",
+  test('打开音色页就按模型补齐那一套系统音色:flash 12 个、plus 2 个,不混用,不重复', async () => {
+    const items = await listVoices();
+    const byModel = (id: string) => items.filter((item) => item.tts_model_id === id);
+    assert.equal(byModel('TTS_Qwen').length, 12);
+    assert.deepEqual(byModel('TTS_Plus').map((item) => item.voice).sort(), ['longanlingxin', 'longanlufeng']);
+    assert.equal(byModel('TTS_Edge').length, 0);
+    assert.equal((await listVoices()).length, 14);
+
+    const paopao = items.find((item) => item.id === 'TTS_Qwen__longpaopao_v3.6')!;
+    assert.deepEqual(
+      { name: paopao.name, kind: paopao.kind, status: paopao.status, tags: paopao.tags, gender: paopao.gender, age: paopao.age, compatible: paopao.compatible, family: paopao.family },
+      { name: '龙泡泡', kind: 'system', status: 'ok', tags: '儿童', gender: '女', age: 5, compatible: true, family: 'flash' },
     );
-    assert.deepEqual({ ...child }, { kind: 'system', status: 'ok', tags: '儿童' });
+    assert.deepEqual(paopao.languages, ['中文', '英语']);
+    assert.equal(items.find((item) => item.voice === 'longanlingxin')!.model_name, 'qwen-audio-3.0-tts-plus');
   });
 
-  test('非千问合成模型不能导入', async () => {
-    const response = await api('POST', '/voices/import-system', { tts_model_id: 'TTS_Edge' });
+  test('改过名字与设置的系统音色,再次同步不会被覆盖;删掉的会以默认设置回来', async () => {
+    await listVoices();
+    run(conn, "UPDATE voices SET name = '安安', rate = 0.8 WHERE id = ?", HUAN);
+    run(conn, "DELETE FROM voices WHERE id = 'TTS_Qwen__loongjohn'");
+    const items = await listVoices();
+    assert.deepEqual([items.find((item) => item.id === HUAN)!.name, items.find((item) => item.id === HUAN)!.rate], ['安安', 0.8]);
+    assert.equal(items.find((item) => item.id === 'TTS_Qwen__loongjohn')!.rate, 1);
+  });
+
+  test('按 ID 添加基础音色;重复添加 409;非千问模型 400', async () => {
+    let response = await api('POST', '/voices', { tts_model_id: 'TTS_Qwen', name: '瑶瑶', voice: 'qwen-audio-3.0-tts-flash-longyaoxuanke' });
+    assert.equal(response.status, 200);
+    const { id } = (await response.json()) as { id: string };
+    assert.equal(id, 'TTS_Qwen__qwen-audio-3.0-tts-flash-longyaoxuanke');
+    assert.equal((await api('POST', '/voices', { tts_model_id: 'TTS_Qwen', name: 'x', voice: 'qwen-audio-3.0-tts-flash-longyaoxuanke' })).status, 409);
+    assert.equal((await api('POST', '/voices', { tts_model_id: 'TTS_Edge', name: 'x', voice: 'abc' })).status, 400);
+    // 按 ID 加的 flash 基础音色挂到 plus 模型下,标出不兼容
+    await api('POST', '/voices', { tts_model_id: 'TTS_Plus', name: '错配', voice: 'qwen-audio-3.0-tts-flash-longyaoxuanke' });
+    assert.equal((await listVoices()).find((item) => item.id === 'TTS_Plus__qwen-audio-3.0-tts-flash-longyaoxuanke')!.compatible, false);
+  });
+});
+
+describe('说话设置', () => {
+  test('保存后列表里带着合成指令、摘要与在用的智能体', async () => {
+    await listVoices();
+    run(conn, 'UPDATE agents SET tts_voice_id = ? WHERE id = ?', HUAN, DEFAULT_AGENT_ID);
+    const response = await api('PUT', `/voices/${HUAN}`, {
+      name: '安欢老师', description: '幼儿园老师',
+      profile: profile({ dialect: '四川话', volume: 70, rate: 0.95, tone_tags: ['gentle', 'story', 'gentle'], tone_text: ' 带点笑意 ', emotion_tags: ['excited', 'laughing'] }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const row = one<Record<string, unknown>>(conn, 'SELECT name, dialect, volume, rate, tone_tags, tone_text, emotion_tags, updated_at FROM voices WHERE id = ?', HUAN)!;
+    assert.deepEqual({ ...row, updated_at: typeof row['updated_at'] }, {
+      name: '安欢老师', dialect: '四川话', volume: 70, rate: 0.95, tone_tags: '["gentle","story"]', tone_text: '带点笑意',
+      emotion_tags: '["excited","laughing"]', updated_at: 'string',
+    });
+    const view = (await listVoices()).find((item) => item.id === HUAN)!;
+    assert.equal(view.instruction, '请用四川话表达,语气温柔,像讲故事一样娓娓道来,带点笑意');
+    assert.equal(view.summary, '中文 · 四川话 · 语速 0.95 · 音量 70 · 温柔、讲故事 · 带点笑意 · 情感标签 2 个');
+    assert.deepEqual(view.tone_tags, ['gentle', 'story']);
+    assert.equal(view.agent_count, 1);
+    assert.deepEqual(view.agents, [{ id: DEFAULT_AGENT_ID, name: '小单' }]);
+  });
+
+  test('不合规的设置拒绝保存,库里不变', async () => {
+    await listVoices();
+    const put = (patch: Partial<VoiceProfile>) => api('PUT', `/voices/${HUAN}`, { name: '龙安欢', profile: profile(patch) });
+    let response = await put({ language: '英语', dialect: '四川话' });
     assert.equal(response.status, 400);
+    assert.match(((await response.json()) as { error: string }).error, /方言只在语种为中文时可用/u);
+    response = await put({ dialect: '宁夏话', tone_tags: ['story', 'excited', 'patient'], tone_text: '好'.repeat(30) });
+    assert.equal(response.status, 400);
+    assert.match(((await response.json()) as { error: string }).error, /已用/u);
+    assert.equal((await put({ language: '日语' })).status, 400, '系统音色只会中文与英语');
+    assert.equal((await put({ volume: 101 })).status, 400);
+    assert.equal((await api('PUT', '/voices/nope', { name: 'x', profile: profile() })).status, 404);
+    assert.equal(one<{ dialect: string }>(conn, 'SELECT dialect FROM voices WHERE id = ?', HUAN)?.dialect, '');
   });
 
-  test('手动添加与改名', async () => {
-    let response = await api('POST', '/voices', { id: 'v.base', tts_model_id: 'TTS_Qwen', name: '基础', voice: 'qwen-audio-3.0-tts-flash-longyaoxuanke' });
+  test('复制为新音色:同一个百炼音色,新设置;复制变体时仍指向最初的音色', async () => {
+    await listVoices();
+    let response = await api('POST', `/voices/${HUAN}/duplicate`, { profile: profile({ rate: 1.2 }) });
     assert.equal(response.status, 200);
-    response = await api('PUT', '/voices/v.base', { name: '瑶瑶', description: '女孩 · 7 岁', tags: '儿童' });
-    assert.equal(response.status, 200);
-    assert.equal(one<{ name: string }>(conn, "SELECT name FROM voices WHERE id = 'v.base'")?.name, '瑶瑶');
+    const first = ((await response.json()) as { id: string }).id;
+    assert.equal(first, `${HUAN}__2`);
+    response = await api('POST', `/voices/${first}/duplicate`, { name: '安欢·慢' });
+    const second = ((await response.json()) as { id: string }).id;
+    assert.equal(second, `${HUAN}__3`);
+    const rows = conn.prepare('SELECT id, name, voice, parent_id, rate, kind FROM voices WHERE id IN (?, ?) ORDER BY id').all(first, second);
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { id: first, name: '龙安欢(副本)', voice: 'longanhuan_v3.6', parent_id: HUAN, rate: 1.2, kind: 'system' },
+      { id: second, name: '安欢·慢', voice: 'longanhuan_v3.6', parent_id: HUAN, rate: 1.2, kind: 'system' },
+    ]);
+    // 变体不会让同步再补一个同名系统音色
+    assert.equal((await listVoices()).filter((item) => item.voice === 'longanhuan_v3.6').length, 3);
+    assert.equal((await api('POST', `/voices/${HUAN}/duplicate`, { profile: profile({ language: '英语', dialect: '四川话' }) })).status, 400);
   });
 });
 
 describe('试听', () => {
-  test('合成后下载音频交给浏览器,并带上语气与语速', async () => {
-    handler = (call) => {
-      if (call.url.endsWith('/api/v1/services/audio/tts/SpeechSynthesizer')) {
-        return jsonResponse({ output: { audio: { url: 'https://oss.example/a.wav' } } });
-      }
-      if (call.url === 'https://oss.example/a.wav') return new Response(WAV, { headers: { 'content-type': 'audio/wav' } });
-      return jsonResponse({}, 404);
-    };
-    const response = await api('POST', '/voices/preview', {
-      tts_model_id: 'TTS_Qwen', voice: 'longanhuan_v3.6', text: '你好', rate: 1.2, instruction: '温柔一点',
-    });
+  const synthHandler = (call: Call) => {
+    if (call.url.endsWith('/api/v1/services/audio/tts/SpeechSynthesizer')) {
+      return jsonResponse({ output: { audio: { url: 'https://oss.example/a.wav' } } });
+    }
+    if (call.url === 'https://oss.example/a.wav') return new Response(WAV, { headers: { 'content-type': 'audio/wav' } });
+    return jsonResponse({}, 404);
+  };
+  const synthInput = () => (calls.find((call) => call.url.endsWith('/SpeechSynthesizer'))!.body as { model: string; input: Record<string, unknown> });
+
+  test('用已保存的设置合成,不在允许名单里的标签去掉', async () => {
+    await pastPreviewWindow();
+    await listVoices();
+    run(conn, `UPDATE voices SET dialect = '四川话', volume = 70, rate = 0.9, tone_tags = '["gentle"]', emotion_tags = '["excited","laughing"]' WHERE id = ?`, HUAN);
+    handler = synthHandler;
+    const response = await api('POST', '/voices/preview', { voice_id: HUAN, text: '[excited]你好[sad]呀[laughing]' });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-type'), 'audio/wav');
     assert.equal(Buffer.from(await response.arrayBuffer()).length, WAV.length);
@@ -134,25 +271,48 @@ describe('试听', () => {
     assert.equal(synth.url, 'https://ws-1.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer');
     assert.equal(synth.headers['authorization'], 'Bearer sk-test');
     assert.equal(synth.headers['x-dashscope-workspace'], 'ws-1');
-    const input = (synth.body as { model: string; input: Record<string, unknown> });
-    assert.equal(input.model, 'qwen-audio-3.0-tts-flash');
-    assert.deepEqual(input.input, {
-      text: '你好', voice: 'longanhuan_v3.6', format: 'wav', sample_rate: 24000, volume: 50, rate: 1.2, pitch: 1, instruction: '温柔一点',
+    assert.equal(synthInput().model, 'qwen-audio-3.0-tts-flash');
+    assert.deepEqual(synthInput().input, {
+      text: '[excited]你好呀[laughing]', voice: 'longanhuan_v3.6', format: 'wav', sample_rate: 24000,
+      volume: 70, rate: 0.9, pitch: 1, instruction: '请用四川话表达,语气温柔',
     });
   });
 
-  test('百炼报错原样提示,不是 500', async () => {
+  test('弹窗里没保存的草稿也能试听,且不写库;不给文字时按语种给一句带标签的问候', async () => {
+    await pastPreviewWindow();
+    await listVoices();
+    handler = synthHandler;
+    const response = await api('POST', '/voices/preview', {
+      voice_id: HUAN, draft: profile({ language: '英语', rate: 1.3, tone_tags: ['lively'], emotion_tags: ['curious', 'giggles'] }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(synthInput().input, {
+      text: '[curious]Hi there, nice to meet you. How is your day going?[giggles]', voice: 'longanhuan_v3.6', format: 'wav', sample_rate: 24000,
+      volume: 50, rate: 1.3, pitch: 1, instruction: '活泼开朗',
+    });
+    assert.equal(one<{ rate: number }>(conn, 'SELECT rate FROM voices WHERE id = ?', HUAN)?.rate, 1);
+  });
+
+  test('plus 音色走 plus 模型;审核中的不能试听;百炼报错原样提示', async () => {
+    await pastPreviewWindow();
+    await listVoices();
+    handler = synthHandler;
+    assert.equal((await api('POST', '/voices/preview', { voice_id: 'TTS_Plus__longanlingxin', text: '你好' })).status, 200);
+    assert.equal(synthInput().model, 'qwen-audio-3.0-tts-plus');
+
+    run(conn, "INSERT INTO voices (id, tts_model_id, name, voice, kind, status) VALUES ('v_new', 'TTS_Qwen', '新', 'qwen-vc-9', 'clone', 'pending')");
+    assert.equal((await api('POST', '/voices/preview', { voice_id: 'v_new' })).status, 409);
+
+    await pastPreviewWindow();
     handler = () => jsonResponse({ code: 'InvalidParameter', message: 'voice not found' }, 400);
-    // 限流窗口是 400 毫秒,上一个测试刚点过
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    const response = await api('POST', '/voices/preview', { tts_model_id: 'TTS_Qwen', voice: 'nope' });
+    const response = await api('POST', '/voices/preview', { voice_id: HUAN });
     assert.equal(response.status, 400);
     assert.match(((await response.json()) as { error: string }).error, /InvalidParameter/u);
   });
 });
 
 describe('声音设计', () => {
-  test('创建后记为待审核并返回试听,刷新后变为可用', async () => {
+  test('创建后记为待审核并返回试听;记下目标模型与语种;刷新时变体一起更新', async () => {
     let status = 'DEPLOYING';
     handler = (call) => {
       const body = call.body as { model: string; input: Record<string, unknown>; parameters?: unknown };
@@ -169,22 +329,33 @@ describe('声音设计', () => {
     });
     assert.equal(response.status, 200);
     const created = (await response.json()) as { id: string; status: string; preview: string };
+    assert.equal(created.id, 'TTS_Qwen__qwen-audio-3.0-tts-flash-vd-story-abc123');
     assert.equal(created.status, 'pending');
     assert.ok(created.preview.length > 100);
     const create = calls[0]!.body as { input: Record<string, unknown>; parameters: Record<string, unknown> };
     assert.equal(create.input['target_model'], 'qwen-audio-3.0-tts-flash');
     assert.equal(create.input['prefix'], 'story');
+    assert.deepEqual(create.input['language_hints'], ['zh']);
     assert.deepEqual(create.parameters, { sample_rate: 24000, response_format: 'wav' });
+    const row = one<{ kind: string; target_model: string; language: string; languages: string }>(
+      conn, 'SELECT kind, target_model, language, languages FROM voices WHERE id = ?', created.id)!;
+    assert.deepEqual({ kind: row.kind, target_model: row.target_model, language: row.language }, { kind: 'design', target_model: 'qwen-audio-3.0-tts-flash', language: '中文' });
+    assert.ok(row.languages.includes('日语'), '设计出的音色能说复刻支持的全部语种');
 
+    response = await api('POST', `/voices/${created.id}/duplicate`, {});
+    const variant = ((await response.json()) as { id: string }).id;
     status = 'OK';
-    response = await api('POST', `/voices/${created.id}/refresh`);
+    response = await api('POST', `/voices/${variant}/refresh`);
     assert.equal(((await response.json()) as { status: string }).status, 'ok');
-    assert.equal(one<{ status: string }>(conn, 'SELECT status FROM voices WHERE id = ?', created.id)?.status, 'ok');
+    assert.deepEqual(conn.prepare('SELECT status FROM voices WHERE voice = ? ORDER BY id').all('qwen-audio-3.0-tts-flash-vd-story-abc123').map((r) => r['status']), ['ok', 'ok']);
   });
 
   test('参数不合规时直接拒绝,不打百炼', async () => {
     const response = await api('POST', '/voices/design', { tts_model_id: 'TTS_Qwen', name: 'x', prompt: '温柔', preview_text: '太短' });
     assert.equal(response.status, 400);
+    assert.equal((await api('POST', '/voices/design', {
+      tts_model_id: 'TTS_Edge', name: 'x', prompt: '温柔的声音', preview_text: '从前有一只小兔子,它最喜欢在月光下散步。',
+    })).status, 400);
     assert.equal(calls.length, 0);
   });
 });
@@ -232,8 +403,10 @@ describe('声音复刻', () => {
     assert.equal(response.status, 200);
     const created = (await response.json()) as { id: string; status: string; via: string };
     assert.deepEqual({ status: created.status, via: created.via }, { status: 'ok', via: 'oss' });
-    const row = one<{ kind: string; sample_file: string }>(conn, 'SELECT kind, sample_file FROM voices WHERE id = ?', created.id);
-    assert.equal(row?.kind, 'clone');
+    const row = one<{ kind: string; sample_file: string; target_model: string; language: string }>(
+      conn, 'SELECT kind, sample_file, target_model, language FROM voices WHERE id = ?', created.id);
+    assert.deepEqual({ kind: row?.kind, target_model: row?.target_model, language: row?.language },
+      { kind: 'clone', target_model: 'qwen-audio-3.0-tts-flash', language: '中文' });
     assert.ok(existsSync(join(dataDir, 'voice-samples', row!.sample_file)), '样本要留在数据目录里,便于以后重新复刻');
   });
 
@@ -256,10 +429,14 @@ describe('声音复刻', () => {
       if (body.input['action'] === 'query_voice') return jsonResponse({ output: { status: 'DEPLOYING' } });
       return jsonResponse({}, 404);
     };
-    const response = await clone('tts_model_id=TTS_Qwen&name=mom&consent=1');
+    const response = await clone('tts_model_id=TTS_Qwen&name=mom&consent=1&language=en');
     assert.equal(response.status, 200);
-    assert.equal(((await response.json()) as { via: string }).via, 'link');
+    const linked = (await response.json()) as { via: string; id: string };
+    assert.equal(linked.via, 'link');
     assert.ok(fetchedSample);
+    assert.equal(one<{ language: string }>(conn, 'SELECT language FROM voices WHERE id = ?', linked.id)?.language, '英语');
+    const create = calls.find((call) => (call.body as { input?: Record<string, unknown> })?.input?.['action'] === 'create_voice')!;
+    assert.deepEqual((create.body as { input: Record<string, unknown> }).input['language_hints'], ['en']);
     // 创建请求结束后链接立即作废
     const token = calls.find((call) => (call.body as { input?: Record<string, unknown> })?.input?.['url'])!;
     const url = String((token.body as { input: Record<string, unknown> }).input['url']).replace('https://agent.example', 'http://localhost');
@@ -296,59 +473,36 @@ describe('删除', () => {
     assert.equal(response.status, 200);
   });
 
-  test('系统音色直接删,不打百炼', async () => {
-    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice) VALUES ('v_s', 'TTS_Qwen', 's', 'longanhuan_v3.6')`);
-    assert.equal((await api('DELETE', '/voices/v_s')).status, 200);
+  test('还有变体共用时只删本地:删变体不碰云端;删原音色时样本与来源交给剩下的,智能体改用默认', async () => {
+    const dir = join(dataDir, 'voice-samples');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'dad.wav'), WAV);
+    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status, sample_file) VALUES ('v_dad', 'TTS_Qwen', '爸爸', 'qwen-vc-dad', 'clone', 'ok', 'dad.wav')`);
+    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status, parent_id) VALUES ('v_dad__2', 'TTS_Qwen', '爸爸·慢', 'qwen-vc-dad', 'clone', 'ok', 'v_dad')`);
+    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status, parent_id) VALUES ('v_dad__3', 'TTS_Qwen', '爸爸·快', 'qwen-vc-dad', 'clone', 'ok', 'v_dad')`);
+    run(conn, "UPDATE agents SET tts_voice_id = 'v_dad' WHERE id = ?", DEFAULT_AGENT_ID);
+
+    let response = await api('DELETE', '/voices/v_dad__3');
+    assert.deepEqual(await response.json(), { ok: true, local_only: true });
+    response = await api('DELETE', '/voices/v_dad');
+    assert.deepEqual(await response.json(), { ok: true, local_only: true });
     assert.equal(calls.length, 0);
-  });
-});
+    assert.deepEqual({ ...one(conn, "SELECT parent_id, sample_file FROM voices WHERE id = 'v_dad__2'") }, { parent_id: null, sample_file: 'dad.wav' });
+    assert.ok(existsSync(join(dir, 'dad.wav')));
+    assert.equal(one<{ tts_voice_id: string | null }>(conn, 'SELECT tts_voice_id FROM agents WHERE id = ?', DEFAULT_AGENT_ID)?.tts_voice_id, null);
 
-describe('下发给引擎的合成配置', () => {
-  const MAC = '4c:11:ae:31:7a:30';
-  const CLIENT_ID = randomBytes(32).toString('hex');
-
-  async function agentModels() {
-    const secret = one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', SECRET_KEY)!.value;
-    const response = await app.request('http://localhost/xiaozhi/config/agent-models', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ macAddress: MAC, clientId: CLIENT_ID, selectedModule: {} }),
-    });
-    return ((await response.json()) as { data: { TTS?: Record<string, Record<string, unknown>> } }).data;
-  }
-
-  beforeEach(() => {
-    run(conn, 'INSERT INTO devices (mac, agent_id, secret_hash) VALUES (?, ?, ?)', MAC, DEFAULT_AGENT_ID, hashClientId(CLIENT_ID));
+    // 最后一个:删云端,也删样本
+    handler = () => jsonResponse({ output: {} });
+    response = await api('DELETE', '/voices/v_dad__2');
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(calls.length, 1);
+    assert.ok(!existsSync(join(dir, 'dad.wav')));
   });
 
-  test('智能体的语速、音调、音量与语气指令合进千问合成配置', async () => {
-    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status) VALUES ('v_kid', 'TTS_Qwen', '泡泡', 'longpaopao_v3.6', 'system', 'ok')`);
-    const response = await api('PUT', `/agents/${DEFAULT_AGENT_ID}`, {
-      name: '小单', tts_model_id: 'TTS_Qwen', tts_voice_id: 'v_kid',
-      tts_params: { rate: 0.9, pitch: 1.1, volume: 60, instruction: '像幼儿园老师一样温柔' },
-    });
-    assert.equal(response.status, 200);
-    const tts = (await agentModels()).TTS!['TTS_Qwen']!;
-    assert.equal(tts['private_voice'], 'longpaopao_v3.6');
-    assert.deepEqual([tts['rate'], tts['pitch'], tts['volume'], tts['instruction']], [0.9, 1.1, 60, '像幼儿园老师一样温柔']);
-  });
-
-  test('审核中的音色不下发,设备用模型默认音色', async () => {
-    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status) VALUES ('v_new', 'TTS_Qwen', '新', 'qwen-vc-9', 'clone', 'pending')`);
-    run(conn, "UPDATE agents SET tts_model_id = 'TTS_Qwen', tts_voice_id = 'v_new' WHERE id = ?", DEFAULT_AGENT_ID);
-    const tts = (await agentModels()).TTS!['TTS_Qwen']!;
-    assert.equal(tts['private_voice'], undefined);
-  });
-
-  test('别家合成模型不合并这些参数', async () => {
-    run(conn, "UPDATE agents SET tts_model_id = 'TTS_Edge', tts_params_json = ? WHERE id = ?", JSON.stringify({ rate: 1.5 }), DEFAULT_AGENT_ID);
-    const tts = (await agentModels()).TTS!['TTS_Edge']!;
-    assert.equal(tts['rate'], undefined);
-  });
-
-  test('超出范围的参数被丢弃', async () => {
-    run(conn, "UPDATE agents SET tts_model_id = 'TTS_Qwen', tts_params_json = ? WHERE id = ?", JSON.stringify({ rate: 9, volume: -1, instruction: '  ' }), DEFAULT_AGENT_ID);
-    const tts = (await agentModels()).TTS!['TTS_Qwen']!;
-    assert.deepEqual([tts['rate'], tts['volume'], tts['instruction']], [undefined, undefined, undefined]);
+  test('系统音色直接删,不打百炼', async () => {
+    await listVoices();
+    assert.equal((await api('DELETE', `/voices/${HUAN}`)).status, 200);
+    assert.equal(calls.length, 0);
+    assert.equal(one(conn, 'SELECT 1 FROM voices WHERE id = ?', HUAN), undefined);
   });
 });

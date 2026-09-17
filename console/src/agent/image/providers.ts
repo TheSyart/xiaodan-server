@@ -1,16 +1,23 @@
-// 文生图的几家实现,统一返回图片字节。换服务商只改「工具与服务」页的默认项。
+// 千问(百炼)文生图,返回图片字节。模型在「模型」页配置(类型 Image),智能体可以单独选。
 //
-// qwen-image:百炼 compatible-mode 的 /images/generations(OpenAI 形状,只有 qwen-image-3.0 系列支持),返回 24 小时有效的 PNG 地址。
-// dashscope:百炼原生同步接口 multimodal-generation(z-image-turbo、wan2.7-image、qwen-image 各代都支持)。
-// openai-images:任意 OpenAI 兼容的 /images/generations(OpenAI、火山方舟 Seedream、硅基流动等)。
+// 两种接口(2026-09 百炼文档「文生图」):
+//   同步  qwen-image-3.0-pro / qwen-image-2.0 / z-image-turbo:
+//         POST {base}/api/v1/services/aigc/multimodal-generation/generation,直接返回图片地址
+//   异步  wan2.7-image / wan2.7-image-pro(万相):
+//         POST {base}/api/v1/services/aigc/image-generation/generation,带 X-DashScope-Async: enable 拿 task_id,
+//         再轮询 GET {base}/api/v1/tasks/{task_id} 到 SUCCEEDED
+// 两种结果都在 output.choices[0].message.content[].image,地址 24 小时有效,拿到就下载。
 
 import type { FetchLike } from '../../voice/dashscope.ts';
-import { httpBase } from '../../voice/dashscope.ts';
+import { DashscopeError, dashscopeHeaders, httpBase } from '../../voice/dashscope.ts';
+import { IMAGE_MODELS } from '../../catalog.ts';
 
 export class ImageError extends Error {}
 
 const str = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const POLL_MS = 2000;
+const DEADLINE_MS = 110_000;
 
 export interface ImageOutcome {
   bytes: Buffer;
@@ -30,14 +37,14 @@ async function postJson(fetchImpl: FetchLike, url: string, headers: Record<strin
       signal: AbortSignal.any(signals),
     });
   } catch (error) {
-    throw new ImageError(`连不上画图服务:${(error as Error).message}`);
+    throw new ImageError(`连不上百炼:${(error as Error).message}`);
   }
   const text = await response.text();
   let data: Record<string, unknown>;
   try {
     data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
   } catch {
-    throw new ImageError(`画图服务返回的不是 JSON(HTTP ${response.status})`);
+    throw new ImageError(`百炼返回的不是 JSON(HTTP ${response.status})`);
   }
   if (!response.ok || (typeof data['code'] === 'string' && data['code'])) {
     const error = data['error'] as { message?: string; code?: string } | undefined;
@@ -45,13 +52,13 @@ async function postJson(fetchImpl: FetchLike, url: string, headers: Record<strin
     const message = str(data['message']) || str(error?.message) || text.slice(0, 160);
     // 百炼的内容审核不通过是 DataInspectionFailed,单独说清楚
     if (/DataInspection|content_policy|sensitive/iu.test(`${code} ${message}`)) throw new ImageError('画图请求没有通过内容安全审核,换个说法试试');
-    throw new ImageError(`画图服务报错 ${code || response.status}:${message}`);
+    throw new ImageError(`百炼报错 ${code || response.status}:${message}`);
   }
   return data;
 }
 
 async function download(fetchImpl: FetchLike, url: string, signal?: AbortSignal): Promise<Buffer> {
-  if (!/^https:\/\//u.test(url)) throw new ImageError('画图服务返回的图片地址不是 https');
+  if (!/^https:\/\//u.test(url)) throw new ImageError('百炼返回的图片地址不是 https');
   const signals = [AbortSignal.timeout(30_000)];
   if (signal) signals.push(signal);
   const response = await fetchImpl(url, { signal: AbortSignal.any(signals) });
@@ -61,66 +68,108 @@ async function download(fetchImpl: FetchLike, url: string, signal?: AbortSignal)
   return bytes;
 }
 
-async function fromOpenAiShape(fetchImpl: FetchLike, data: Record<string, unknown>, signal?: AbortSignal): Promise<ImageOutcome> {
-  const first = (Array.isArray(data['data']) ? data['data'][0] : undefined) as Record<string, unknown> | undefined;
-  if (!first) throw new ImageError('画图服务没有返回图片');
-  const revised = str(first['revised_prompt']);
-  if (str(first['b64_json'])) return { bytes: Buffer.from(str(first['b64_json']), 'base64'), ...(revised ? { revisedPrompt: revised } : {}) };
-  if (str(first['url'])) return { bytes: await download(fetchImpl, str(first['url']), signal), ...(revised ? { revisedPrompt: revised } : {}) };
-  throw new ImageError('画图服务没有返回图片');
-}
-
-export async function qwenImage(fetchImpl: FetchLike, config: Record<string, unknown>, prompt: string, signal?: AbortSignal): Promise<ImageOutcome> {
-  const apiKey = str(config['api_key']);
-  if (!apiKey) throw new ImageError('画图服务没有配置百炼 API Key');
-  const base = httpBase({ base_url: config['base_url'], workspace_id: config['workspace_id'] });
-  const data = await postJson(fetchImpl, `${base}/compatible-mode/v1/images/generations`, { Authorization: `Bearer ${apiKey}` }, {
-    model: str(config['model']) || 'qwen-image-3.0',
-    prompt,
-    size: str(config['size']) || '1024x1024',
-    n: 1,
-    prompt_extend: false,
-    watermark: false,
-  }, signal);
-  return fromOpenAiShape(fetchImpl, data, signal);
-}
-
-export async function dashscopeImage(fetchImpl: FetchLike, config: Record<string, unknown>, prompt: string, signal?: AbortSignal): Promise<ImageOutcome> {
-  const apiKey = str(config['api_key']);
-  if (!apiKey) throw new ImageError('画图服务没有配置百炼 API Key');
-  const base = httpBase({ base_url: config['base_url'], workspace_id: config['workspace_id'] });
-  const data = await postJson(fetchImpl, `${base}/api/v1/services/aigc/multimodal-generation/generation`, { Authorization: `Bearer ${apiKey}` }, {
-    model: str(config['model']) || 'z-image-turbo',
-    input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
-    parameters: { size: str(config['size']) || '1024*1024', prompt_extend: false, watermark: false },
-  }, signal);
-  const choices = ((data['output'] as Record<string, unknown> | undefined)?.['choices'] ?? []) as Record<string, unknown>[];
+function imageUrlOf(data: Record<string, unknown>): string | undefined {
+  const output = (data['output'] ?? {}) as Record<string, unknown>;
+  const choices = (Array.isArray(output['choices']) ? output['choices'] : []) as Record<string, unknown>[];
   const content = ((choices[0]?.['message'] as Record<string, unknown> | undefined)?.['content'] ?? []) as Record<string, unknown>[];
-  const url = content.map((item) => str(item['image'])).find(Boolean);
-  if (!url) throw new ImageError('画图服务没有返回图片');
-  return { bytes: await download(fetchImpl, url, signal) };
+  const fromChoices = content.map((item) => str(item['image'])).find(Boolean);
+  if (fromChoices) return fromChoices;
+  // 旧版万相的结果形状
+  const results = (Array.isArray(output['results']) ? output['results'] : []) as Record<string, unknown>[];
+  return results.map((item) => str(item['url'])).find(Boolean);
 }
 
-export async function openaiImages(fetchImpl: FetchLike, config: Record<string, unknown>, prompt: string, signal?: AbortSignal): Promise<ImageOutcome> {
-  const apiKey = str(config['api_key']);
-  const base = str(config['base_url']).replace(/\/+$/u, '');
-  if (!base || !apiKey) throw new ImageError('画图服务没有配置接口地址或 API Key');
-  const url = base.endsWith('/images/generations') ? base : `${base}/images/generations`;
-  const data = await postJson(fetchImpl, url, { Authorization: `Bearer ${apiKey}` }, {
-    model: str(config['model']),
-    prompt,
-    size: str(config['size']) || '1024x1024',
-    n: 1,
-    ...(str(config['response_format']) ? { response_format: str(config['response_format']) } : {}),
-  }, signal);
-  return fromOpenAiShape(fetchImpl, data, signal);
+function headersFor(config: Record<string, unknown>, extra: Record<string, string> = {}): Record<string, string> {
+  try {
+    return dashscopeHeaders(config, extra);
+  } catch (error) {
+    throw new ImageError(error instanceof DashscopeError ? '文生图模型没有配置百炼 API Key' : (error as Error).message);
+  }
 }
 
-export const IMAGE_PROVIDERS: Record<string, (fetchImpl: FetchLike, config: Record<string, unknown>, prompt: string, signal?: AbortSignal) => Promise<ImageOutcome>> = {
-  'qwen-image': qwenImage,
-  dashscope: dashscopeImage,
-  'openai-images': openaiImages,
-};
+function baseOf(config: Record<string, unknown>): string {
+  try {
+    return httpBase({ base_url: config['base_url'], workspace_id: config['workspace_id'] });
+  } catch (error) {
+    throw new ImageError((error as Error).message);
+  }
+}
+
+export function isAsyncModel(model: string): boolean {
+  return IMAGE_MODELS.find((item) => item.value === model)?.async ?? model.startsWith('wan');
+}
+
+export async function generateQwenImage(
+  fetchImpl: FetchLike, config: Record<string, unknown>, prompt: string, signal?: AbortSignal,
+): Promise<ImageOutcome & { model: string }> {
+  const model = str(config['model_name']) || 'qwen-image-3.0-pro';
+  const base = baseOf(config);
+  const parameters: Record<string, unknown> = { size: str(config['size']) || '1024*1024', n: 1, watermark: false };
+  const negative = str(config['negative_prompt']);
+  const input = { messages: [{ role: 'user', content: [{ text: prompt }] }] };
+
+  if (!isAsyncModel(model)) {
+    parameters['prompt_extend'] = config['prompt_extend'] === true;
+    if (negative) parameters['negative_prompt'] = negative;
+    const data = await postJson(fetchImpl, `${base}/api/v1/services/aigc/multimodal-generation/generation`, headersFor(config),
+      { model, input, parameters }, signal);
+    const url = imageUrlOf(data);
+    if (!url) throw new ImageError('百炼没有返回图片');
+    return { bytes: await download(fetchImpl, url, signal), model };
+  }
+
+  // 万相:异步任务
+  if (negative) parameters['negative_prompt'] = negative;
+  const created = await postJson(fetchImpl, `${base}/api/v1/services/aigc/image-generation/generation`,
+    headersFor(config, { 'X-DashScope-Async': 'enable' }), { model, input, parameters }, signal);
+  const taskId = str((created['output'] as Record<string, unknown> | undefined)?.['task_id']);
+  if (!taskId) throw new ImageError('百炼没有返回画图任务');
+  const deadline = Date.now() + DEADLINE_MS;
+  for (;;) {
+    if (signal?.aborted) throw new ImageError('画图被打断了');
+    if (Date.now() > deadline) throw new ImageError('画图超时了,稍后再试');
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, POLL_MS);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new ImageError('画图被打断了'));
+      }, { once: true });
+    });
+    const data = await getJson(fetchImpl, `${base}/api/v1/tasks/${encodeURIComponent(taskId)}`, headersFor(config), signal);
+    const output = (data['output'] ?? {}) as Record<string, unknown>;
+    const status = str(output['task_status']);
+    if (status === 'SUCCEEDED') {
+      const url = imageUrlOf(data);
+      if (!url) throw new ImageError('百炼没有返回图片');
+      return { bytes: await download(fetchImpl, url, signal), model };
+    }
+    if (status === 'FAILED' || status === 'CANCELED' || status === 'UNKNOWN') {
+      const message = str(output['message']) || str(output['code']) || status;
+      if (/DataInspection|sensitive/iu.test(message)) throw new ImageError('画图请求没有通过内容安全审核,换个说法试试');
+      throw new ImageError(`画图失败:${message}`);
+    }
+  }
+}
+
+async function getJson(fetchImpl: FetchLike, url: string, headers: Record<string, string>, signal?: AbortSignal) {
+  const signals = [AbortSignal.timeout(20_000)];
+  if (signal) signals.push(signal);
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { headers, signal: AbortSignal.any(signals) });
+  } catch (error) {
+    throw new ImageError(`连不上百炼:${(error as Error).message}`);
+  }
+  const text = await response.text();
+  try {
+    const data = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
+    if (!response.ok) throw new ImageError(`查询画图任务失败 ${str(data['code']) || response.status}:${str(data['message']) || text.slice(0, 160)}`);
+    return data;
+  } catch (error) {
+    if (error instanceof ImageError) throw error;
+    throw new ImageError(`百炼返回的不是 JSON(HTTP ${response.status})`);
+  }
+}
 
 /** 给小屏幕的提示词:主体居中、色块分明、背景简单,量化成 16 色也好看 */
 export function devicePrompt(prompt: string, childSafe: boolean): string {

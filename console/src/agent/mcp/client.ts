@@ -183,11 +183,14 @@ export async function listTools(fetchImpl: FetchLike, server: McpServer, signal?
 export interface McpCallResult {
   text: string;
   isError: boolean;
+  /** 结果里的图片(data URL,至多 3 张);对话模型能看图时交给它 */
+  images?: string[];
 }
 
-/** 把 tools/call 的结果内容拼成文字:文本原样,资源取其文本,图片与音频只留占位说明。 */
+/** 把 tools/call 的结果内容拼成文字:文本原样,资源取其文本,图片单独取出、文字里留个占位,音频只留占位。 */
 export function contentToText(result: Record<string, unknown>): McpCallResult {
   const parts: string[] = [];
+  const images: string[] = [];
   for (const item of (Array.isArray(result['content']) ? result['content'] : []) as Record<string, unknown>[]) {
     if (item['type'] === 'text' && typeof item['text'] === 'string') parts.push(item['text']);
     else if (item['type'] === 'resource') {
@@ -195,11 +198,17 @@ export function contentToText(result: Record<string, unknown>): McpCallResult {
       if (typeof resource['text'] === 'string') parts.push(resource['text']);
       else if (typeof resource['uri'] === 'string') parts.push(`[资源 ${resource['uri']}]`);
     } else if (item['type'] === 'resource_link' && typeof item['uri'] === 'string') parts.push(`[链接 ${item['uri']}]`);
-    else if (item['type'] === 'image') parts.push('[图片,无法朗读]');
+    else if (item['type'] === 'image') {
+      parts.push('[图片]');
+      if (typeof item['data'] === 'string' && item['data']) {
+        const mime = typeof item['mimeType'] === 'string' && /^image\/(png|jpeg|webp|gif)$/u.test(item['mimeType']) ? item['mimeType'] : 'image/png';
+        images.push(`data:${mime};base64,${item['data']}`);
+      }
+    }
     else if (item['type'] === 'audio') parts.push('[音频]');
   }
   if (parts.length === 0 && result['structuredContent'] !== undefined) parts.push(JSON.stringify(result['structuredContent']));
-  return { text: parts.join('\n').trim(), isError: result['isError'] === true };
+  return { text: parts.join('\n').trim(), isError: result['isError'] === true, ...(images.length ? { images: images.slice(0, 3) } : {}) };
 }
 
 export async function callTool(

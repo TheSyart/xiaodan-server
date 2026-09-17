@@ -1,10 +1,14 @@
 // 音色管理接口(挂在 /api/voices 下,沿用管理接口的登录鉴权)。
 //
-// 音色挂在某个语音合成模型下。千问合成(qwen_audio_tts)支持三种来源:
-//   system  百炼自带的音色,可一键导入有名字的那 12 个,也可按 ID 手动加;
+// 音色是智能体「怎么说话」的全部:用百炼里哪个音色(系统音色、声音复刻、声音设计),再加上语种、方言、
+// 音量、语速、固定语气与允许的情感标签。智能体只选一个音色。
+//
+// 音色挂在某个千问合成模型下:
+//   system  百炼自带,这一套(flash / plus)的有名音色自动列出;五百多个基础音色可以按 ID 添加;
 //   design  声音设计:一段文字描述生成音色;
 //   clone   声音复刻:一段 10-20 秒的录音生成音色,必须勾选已获授权。
-// 设计与复刻在百炼侧要审核,状态 pending → ok 后才会被下发给设备;选了未通过的音色,设备回落到模型默认音色。
+// 设计与复刻在百炼侧要审核,状态 pending → ok 后才会被下发给设备;选了未通过的音色,设备先用默认音色。
+// 「复制为新音色」得到的变体与原音色共用百炼里的同一个音色,只是说话设置不同。
 
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -15,17 +19,23 @@ import type { Db } from '../db.ts';
 import { all, one, run } from '../db.ts';
 import {
   cloneVoice, DashscopeError, deleteVoice, designVoice, queryVoice, synthesize, targetModel, uploadTemporary,
-  type DashscopeConfig, type FetchLike,
+  type FetchLike,
 } from './dashscope.ts';
+import {
+  composeInstruction, DEFAULT_PROFILE, filterInlineTags, LANGUAGES, languagesOf, profileColumns, profileSummary, readProfile,
+  validateProfile, type VoiceProfile,
+} from './profile.ts';
 import { issueSampleToken, revokeSampleToken, sampleUrl } from './samples.ts';
-import { QWEN_AUDIO_TTS_FLASH_VOICES } from './system-voices.ts';
+import { loadTtsModel, QWEN_TTS, syncSystemVoices, voiceFits, type TtsModelRow, type VoiceRow } from './store.ts';
+import { familyOf, voiceKey } from './system-voices.ts';
+
+export { voiceKey };
 
 export interface VoiceDeps {
   fetch: FetchLike;
   dataDir: () => string;
 }
 
-const QWEN_TTS = 'qwen_audio_tts';
 const MAX_SAMPLE_BYTES = 10 * 1024 * 1024;
 const MIN_SAMPLE_BYTES = 16_000;
 const SAMPLE_TYPES: Record<string, string> = {
@@ -39,62 +49,49 @@ const SAMPLE_TYPES: Record<string, string> = {
   'audio/m4a': 'm4a',
 };
 const idSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/u, 'id 只能包含字母、数字、点、下划线与连字符');
+const languageCodes = LANGUAGES.map((item) => item.code) as [string, ...string[]];
+/** 复刻与设计出的音色能说的语种:百炼的复刻支持这些 */
+const ALL_LANGUAGES = LANGUAGES.map((item) => item.label).join('、');
 
-interface TtsModel {
-  id: string;
-  provider: string;
-  config: DashscopeConfig & Record<string, unknown>;
-}
-
-interface VoiceRow {
-  id: string;
-  tts_model_id: string;
-  name: string;
-  voice: string;
-  kind: 'system' | 'design' | 'clone';
-  status: 'ok' | 'pending' | 'failed';
-  sample_file: string;
-}
-
-function loadTtsModel(conn: Db, id: string): TtsModel | undefined {
-  const row = one<{ id: string; provider: string; config_json: string }>(
-    conn, "SELECT id, provider, config_json FROM models WHERE id = ? AND model_type = 'TTS'", id,
-  );
-  if (!row) return undefined;
-  let config: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(row.config_json) as unknown;
-    if (typeof parsed === 'object' && parsed !== null) config = parsed as Record<string, unknown>;
-  } catch {
-    /* 坏配置按空处理,后面会报缺密钥 */
-  }
-  return { id: row.id, provider: row.provider, config };
-}
-
-/** 音色表的主键:模型 id + 音色值,换掉不允许的字符。 */
-export function voiceKey(modelId: string, voice: string): string {
-  return `${modelId}__${voice}`.replace(/[^A-Za-z0-9_.-]/gu, '_').slice(0, 128);
-}
+const profileSchema = z.object({
+  language: z.string().max(16),
+  dialect: z.string().max(16).default(''),
+  volume: z.number().min(0).max(100),
+  rate: z.number().min(0.5).max(2),
+  pitch: z.number().min(0.5).max(2).default(1),
+  tone_tags: z.array(z.string().max(32)).max(10).default([]),
+  tone_text: z.string().max(200).default(''),
+  emotion_tags: z.array(z.string().max(32)).max(30).default([]),
+});
 
 function errorResponse(error: unknown): { message: string; status: 400 | 502 } {
   if (error instanceof DashscopeError) return { message: error.message, status: error.status >= 500 ? 502 : 400 };
   return { message: (error as Error).message ?? String(error), status: 502 };
 }
 
-/** 至多每 400 毫秒一次合成试听:百炼 qwen-audio-3.0-tts-flash 限 3 RPS,还要给设备对话留余量。 */
+/** 至多每 400 毫秒一次合成试听:百炼 qwen-audio-3.0-tts 限 3 RPS,还要给设备对话留余量。 */
 let lastPreviewAt = 0;
+
+/** 试听文字:语种对应的问候;允许情感标签时带上一个,听得出效果 */
+export function previewText(profile: VoiceProfile, name: string): string {
+  const language = LANGUAGES.find((item) => item.label === profile.language) ?? LANGUAGES[0]!;
+  const base = language.label === '中文' ? `你好呀,我是${name},很高兴认识你,今天过得怎么样?` : language.sample;
+  const tag = profile.emotion_tags.find((item) => ['excited', 'curious', 'mischievously'].includes(item)) ?? profile.emotion_tags[0];
+  const rich = profile.emotion_tags.find((item) => ['giggles', 'laughing'].includes(item));
+  return `${tag ? `[${tag}]` : ''}${base}${rich ? `[${rich}]` : ''}`;
+}
 
 export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
   const app = new Hono({ strict: false });
 
-  const requireQwen = (modelId: string): TtsModel => {
+  const requireQwen = (modelId: string): TtsModelRow => {
     const model = loadTtsModel(conn, modelId);
     if (!model) throw new DashscopeError('指定的语音合成模型不存在', 400);
     if (model.provider !== QWEN_TTS) throw new DashscopeError('只有千问语音合成模型支持这个操作', 400);
     return model;
   };
 
-  const refreshStatus = async (model: TtsModel, voiceId: string): Promise<{ status: 'ok' | 'pending' | 'failed'; detail: string }> => {
+  const refreshStatus = async (model: TtsModelRow, voiceId: string): Promise<{ status: 'ok' | 'pending' | 'failed'; detail: string }> => {
     try {
       const result = await queryVoice(deps.fetch, model.config, voiceId);
       return { status: result.status, detail: result.raw };
@@ -104,112 +101,136 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
     }
   };
 
-  app.get('/', (c) =>
-    c.json({
-      items: all(
-        conn,
-        `SELECT id, tts_model_id, name, voice, languages, kind, status, description, tags, prompt,
-                status_detail, created_at,
-                (SELECT COUNT(*) FROM agents a WHERE a.tts_voice_id = voices.id) AS agent_count
-         FROM voices ORDER BY tts_model_id, CASE kind WHEN 'system' THEN 1 ELSE 0 END, sort, created_at DESC, id`,
-      ),
-    }),
-  );
+  const view = (row: VoiceRow & { agent_count: number }, models: Map<string, TtsModelRow>) => {
+    const model = models.get(row.tts_model_id);
+    const profile = readProfile(row);
+    return {
+      ...row,
+      tone_tags: profile.tone_tags,
+      emotion_tags: profile.emotion_tags,
+      languages: languagesOf(row.languages),
+      model_name: model ? (typeof model.config['model_name'] === 'string' && model.config['model_name']) || 'qwen-audio-3.0-tts-flash' : '',
+      model_label: model?.name ?? row.tts_model_id,
+      family: model ? familyOf(model.config['model_name']) : 'flash',
+      compatible: model ? model.provider === QWEN_TTS && voiceFits(row, model) : false,
+      instruction: composeInstruction(profile),
+      summary: profileSummary(profile),
+      agents: all<{ id: string; name: string }>(conn, 'SELECT id, name FROM agents WHERE tts_voice_id = ? ORDER BY name', row.id),
+    };
+  };
 
-  // 手动添加一个系统音色(任何合成模型都可以)
+  app.get('/', (c) => {
+    syncSystemVoices(conn);
+    const models = new Map<string, TtsModelRow>();
+    for (const row of all<{ id: string }>(conn, "SELECT id FROM models WHERE model_type = 'TTS'")) {
+      models.set(row.id, loadTtsModel(conn, row.id)!);
+    }
+    const rows = all<VoiceRow & { agent_count: number }>(conn,
+      `SELECT voices.*, (SELECT COUNT(*) FROM agents a WHERE a.tts_voice_id = voices.id) AS agent_count
+       FROM voices ORDER BY tts_model_id, CASE kind WHEN 'system' THEN 1 ELSE 0 END, sort, COALESCE(parent_id, id), parent_id IS NOT NULL, created_at DESC, id`);
+    return c.json({ items: rows.map((row) => view(row, models)) });
+  });
+
+  // 按 ID 添加一个基础音色(百炼那五百多个)
   app.post('/', async (c) => {
     const parsed = z
       .object({
-        id: idSchema,
         tts_model_id: idSchema,
         name: z.string().min(1).max(64),
-        voice: z.string().min(1).max(128),
-        languages: z.string().max(64).default('中文'),
+        voice: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/u, '音色 ID 只能包含字母、数字、点、下划线与连字符'),
         description: z.string().max(200).default(''),
-        tags: z.string().max(64).default(''),
       })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
     const d = parsed.data;
-    if (!loadTtsModel(conn, d.tts_model_id)) return c.json({ error: '指定的 TTS 模型不存在' }, 400);
-    const existing = one<{ kind: string }>(conn, 'SELECT kind FROM voices WHERE id = ?', d.id);
-    if (existing && existing.kind !== 'system') return c.json({ error: '这个 id 已被设计或复刻的音色占用' }, 409);
-    run(
-      conn,
-      `INSERT INTO voices (id, tts_model_id, name, voice, languages, description, tags, kind, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'system', 'ok', datetime('now'))
-       ON CONFLICT (id) DO UPDATE SET tts_model_id = excluded.tts_model_id, name = excluded.name,
-         voice = excluded.voice, languages = excluded.languages, description = excluded.description, tags = excluded.tags`,
-      d.id, d.tts_model_id, d.name, d.voice, d.languages, d.description, d.tags,
-    );
-    return c.json({ ok: true });
-  });
-
-  // 改显示名、说明、标签。音色值不能改:设计与复刻的音色值是百炼给的。
-  app.put('/:id', async (c) => {
-    const id = c.req.param('id');
-    if (!one(conn, 'SELECT 1 FROM voices WHERE id = ?', id)) return c.json({ error: '音色不存在' }, 404);
-    const parsed = z
-      .object({
-        name: z.string().min(1).max(64),
-        description: z.string().max(200).default(''),
-        tags: z.string().max(64).default(''),
-        languages: z.string().max(64).default('中文'),
-      })
-      .safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
-    const d = parsed.data;
-    run(conn, 'UPDATE voices SET name = ?, description = ?, tags = ?, languages = ? WHERE id = ?',
-      d.name, d.description, d.tags, d.languages, id);
-    return c.json({ ok: true });
-  });
-
-  app.post('/import-system', async (c) => {
-    const parsed = z.object({ tts_model_id: idSchema }).safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) return c.json({ error: '请指定语音合成模型' }, 400);
-    let model: TtsModel;
+    let model: TtsModelRow;
     try {
-      model = requireQwen(parsed.data.tts_model_id);
+      model = requireQwen(d.tts_model_id);
     } catch (error) {
       const { message, status } = errorResponse(error);
       return c.json({ error: message }, status);
     }
-    let added = 0;
-    QWEN_AUDIO_TTS_FLASH_VOICES.forEach((voice, index) => {
-      const id = voiceKey(model.id, voice.voice);
-      if (one(conn, 'SELECT 1 FROM voices WHERE id = ? OR (tts_model_id = ? AND voice = ?)', id, model.id, voice.voice)) {
-        return;
-      }
-      run(
-        conn,
-        `INSERT INTO voices (id, tts_model_id, name, voice, languages, description, tags, kind, status, sort, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'system', 'ok', ?, datetime('now'))`,
-        id, model.id, voice.name, voice.voice, voice.languages, voice.description, voice.tags, 100 + index,
-      );
-      added += 1;
-    });
-    return c.json({ ok: true, added });
+    const id = voiceKey(model.id, d.voice);
+    if (one(conn, 'SELECT 1 FROM voices WHERE id = ?', id)) return c.json({ error: '这个音色已经在列表里了' }, 409);
+    run(conn,
+      `INSERT INTO voices (id, tts_model_id, name, voice, languages, language, description, tags, kind, status, created_at)
+       VALUES (?, ?, ?, ?, '中文、英语', '中文', ?, '', 'system', 'ok', datetime('now'))`,
+      id, model.id, d.name, d.voice, d.description);
+    return c.json({ ok: true, id });
   });
 
-  app.post('/preview', async (c) => {
+  // 改名称、说明与说话设置
+  app.put('/:id', async (c) => {
+    const row = one<VoiceRow>(conn, 'SELECT * FROM voices WHERE id = ?', c.req.param('id'));
+    if (!row) return c.json({ error: '音色不存在' }, 404);
     const parsed = z
-      .object({
-        tts_model_id: idSchema,
-        voice: z.string().min(1).max(128),
-        text: z.string().min(1).max(200).default('你好呀,我是小单,很高兴认识你。'),
-        rate: z.number().min(0.5).max(2).optional(),
-        pitch: z.number().min(0.5).max(2).optional(),
-        volume: z.number().int().min(0).max(100).optional(),
-        instruction: z.string().max(100).optional(),
-      })
+      .object({ name: z.string().min(1).max(64), description: z.string().max(200).default(''), profile: profileSchema })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
+    const profile = readProfile(parsed.data.profile);
+    const problem = validateProfile(profile, languagesOf(row.languages));
+    if (problem) return c.json({ error: problem }, 400);
+    const cols = profileColumns(profile);
+    run(conn,
+      `UPDATE voices SET name = ?, description = ?, language = ?, dialect = ?, volume = ?, rate = ?, pitch = ?,
+                         tone_tags = ?, tone_text = ?, emotion_tags = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+      parsed.data.name, parsed.data.description, cols['language'], cols['dialect'], cols['volume'], cols['rate'], cols['pitch'],
+      cols['tone_tags'], cols['tone_text'], cols['emotion_tags'], row.id);
+    return c.json({ ok: true });
+  });
+
+  // 复制为新音色:同一个百炼音色,另一套说话设置(可以带上页面里还没保存的设置)
+  app.post('/:id/duplicate', async (c) => {
+    const row = one<VoiceRow>(conn, 'SELECT * FROM voices WHERE id = ?', c.req.param('id'));
+    if (!row) return c.json({ error: '音色不存在' }, 404);
+    const parsed = z
+      .object({ name: z.string().min(1).max(64).optional(), profile: profileSchema.optional() })
+      .safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
+    const profile = parsed.data.profile ? readProfile(parsed.data.profile) : readProfile(row);
+    const problem = validateProfile(profile, languagesOf(row.languages));
+    if (problem) return c.json({ error: problem }, 400);
+    const root = row.parent_id ?? row.id;
+    let n = 2;
+    while (one(conn, 'SELECT 1 FROM voices WHERE id = ?', `${root}__${n}`.slice(0, 128))) n += 1;
+    const id = `${root}__${n}`.slice(0, 128);
+    const cols = profileColumns(profile);
+    run(conn,
+      `INSERT INTO voices (id, tts_model_id, name, voice, languages, sort, kind, status, description, tags, prompt, sample_file,
+                           status_detail, created_at, language, dialect, volume, rate, pitch, tone_tags, tone_text, emotion_tags,
+                           target_model, parent_id, gender, age, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+      id, row.tts_model_id, parsed.data.name ?? `${row.name}(副本)`.slice(0, 64), row.voice, row.languages, row.sort, row.kind, row.status,
+      row.description, row.tags, row.prompt, row.status_detail, cols['language'], cols['dialect'], cols['volume'], cols['rate'],
+      cols['pitch'], cols['tone_tags'], cols['tone_text'], cols['emotion_tags'], row.target_model, root, row.gender, row.age);
+    return c.json({ ok: true, id });
+  });
+
+  // 试听:用已保存的设置,或设置弹窗里还没保存的草稿
+  app.post('/preview', async (c) => {
+    const parsed = z
+      .object({ voice_id: idSchema, text: z.string().min(1).max(300).optional(), draft: profileSchema.optional() })
+      .safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
+    const row = one<VoiceRow>(conn, 'SELECT * FROM voices WHERE id = ?', parsed.data.voice_id);
+    if (!row) return c.json({ error: '音色不存在' }, 404);
+    if (row.status !== 'ok') return c.json({ error: '这个音色还没审核通过,暂时不能试听' }, 409);
+    const profile = parsed.data.draft ? readProfile(parsed.data.draft) : readProfile(row);
+    const problem = validateProfile(profile, languagesOf(row.languages));
+    if (problem) return c.json({ error: problem }, 400);
     const now = Date.now();
     if (now - lastPreviewAt < 400) return c.json({ error: '试听太频繁,请稍后再点' }, 429);
     lastPreviewAt = now;
     try {
-      const model = requireQwen(parsed.data.tts_model_id);
-      const { audio, mime } = await synthesize(deps.fetch, model.config, parsed.data);
+      const model = requireQwen(row.tts_model_id);
+      // 不在允许名单里的情感标签去掉,试听与设备上听到的一致
+      const text = filterInlineTags(parsed.data.text ?? previewText(profile, row.name), profile.emotion_tags);
+      const instruction = composeInstruction(profile);
+      const { audio, mime } = await synthesize(deps.fetch, model.config, {
+        text, voice: row.voice, volume: profile.volume, rate: profile.rate, pitch: profile.pitch,
+        ...(instruction ? { instruction } : {}),
+      });
       return c.body(new Uint8Array(audio), 200, { 'Content-Type': mime, 'Cache-Control': 'no-store' });
     } catch (error) {
       const { message, status } = errorResponse(error);
@@ -225,8 +246,7 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
         prompt: z.string().min(4).max(500),
         preview_text: z.string().min(15).max(200),
         prefix: z.string().max(32).optional(),
-        language: z.enum(['zh', 'en']).default('zh'),
-        tags: z.string().max(64).default(''),
+        language: z.enum(languageCodes).default('zh'),
       })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? '参数不正确' }, 400);
@@ -238,14 +258,13 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
       });
       const status = await refreshStatus(model, result.voiceId);
       const id = voiceKey(model.id, result.voiceId);
-      run(
-        conn,
-        `INSERT INTO voices (id, tts_model_id, name, voice, languages, description, tags, kind, status, status_detail,
-                             prompt, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'design', ?, ?, ?, datetime('now'))`,
-        id, model.id, d.name, result.voiceId, d.language === 'en' ? '英文' : '中文',
-        `声音设计 · ${targetModel(model.config)}`, d.tags, status.status, status.detail, d.prompt,
-      );
+      const language = LANGUAGES.find((item) => item.code === d.language)?.label ?? DEFAULT_PROFILE.language;
+      run(conn,
+        `INSERT INTO voices (id, tts_model_id, name, voice, languages, language, description, tags, kind, status, status_detail,
+                             prompt, target_model, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '', 'design', ?, ?, ?, ?, datetime('now'))`,
+        id, model.id, d.name, result.voiceId, ALL_LANGUAGES, language, '声音设计', status.status, status.detail, d.prompt,
+        targetModel(model.config));
       return c.json({
         ok: true, id, voice: result.voiceId, status: status.status,
         preview: result.previewAudio ? result.previewAudio.toString('base64') : null,
@@ -263,9 +282,8 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
         tts_model_id: idSchema,
         name: z.string().min(1).max(64),
         prefix: z.string().max(32).optional(),
-        language: z.enum(['zh', 'en']).default('zh'),
+        language: z.enum(languageCodes).default('zh'),
         consent: z.literal('1', { message: '请先确认你有权使用这段声音' }),
-        tags: z.string().max(64).default(''),
       })
       .safeParse(c.req.query());
     if (!query.success) return c.json({ error: query.error.issues[0]?.message ?? '参数不正确' }, 400);
@@ -276,7 +294,7 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
     const declared = Number(c.req.header('content-length') ?? '0');
     if (declared > MAX_SAMPLE_BYTES) return c.json({ error: '样本不能超过 10 MB' }, 413);
 
-    let model: TtsModel;
+    let model: TtsModelRow;
     try {
       model = requireQwen(q.tts_model_id);
     } catch (error) {
@@ -326,14 +344,12 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
     }
     const status = await refreshStatus(model, voiceId);
     const id = voiceKey(model.id, voiceId);
-    run(
-      conn,
-      `INSERT INTO voices (id, tts_model_id, name, voice, languages, description, tags, kind, status, status_detail,
-                           sample_file, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'clone', ?, ?, ?, datetime('now'))`,
-      id, model.id, q.name, voiceId, q.language === 'en' ? '英文' : '中文',
-      `声音复刻 · ${targetModel(model.config)}`, q.tags, status.status, status.detail, fileName,
-    );
+    const language = LANGUAGES.find((item) => item.code === q.language)?.label ?? DEFAULT_PROFILE.language;
+    run(conn,
+      `INSERT INTO voices (id, tts_model_id, name, voice, languages, language, description, tags, kind, status, status_detail,
+                           sample_file, target_model, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '', 'clone', ?, ?, ?, ?, datetime('now'))`,
+      id, model.id, q.name, voiceId, ALL_LANGUAGES, language, '声音复刻', status.status, status.detail, fileName, targetModel(model.config));
     return c.json({ ok: true, id, voice: voiceId, status: status.status, via });
   });
 
@@ -344,7 +360,9 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
     try {
       const model = requireQwen(row.tts_model_id);
       const result = await queryVoice(deps.fetch, model.config, row.voice);
-      run(conn, 'UPDATE voices SET status = ?, status_detail = ? WHERE id = ?', result.status, result.raw, row.id);
+      // 变体与原音色是百炼里的同一个音色,状态一起更新
+      run(conn, 'UPDATE voices SET status = ?, status_detail = ? WHERE tts_model_id = ? AND voice = ?',
+        result.status, result.raw, row.tts_model_id, row.voice);
       return c.json({ ok: true, status: result.status });
     } catch (error) {
       const { message, status } = errorResponse(error);
@@ -355,6 +373,17 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
   app.delete('/:id', async (c) => {
     const row = one<VoiceRow>(conn, 'SELECT * FROM voices WHERE id = ?', c.req.param('id'));
     if (!row) return c.json({ ok: true });
+    const siblings = all<{ id: string }>(conn, 'SELECT id FROM voices WHERE tts_model_id = ? AND voice = ? AND id != ? ORDER BY parent_id IS NOT NULL, id',
+      row.tts_model_id, row.voice, row.id);
+    if (siblings.length) {
+      // 还有变体(或原音色)共用百炼里的这个音色:只删这一条本地设置,云端与样本都留给剩下的
+      const heir = siblings[0]!.id;
+      run(conn, 'UPDATE voices SET parent_id = ? WHERE parent_id = ? AND id != ?', heir, row.id, heir);
+      if (!row.parent_id) run(conn, 'UPDATE voices SET parent_id = NULL WHERE id = ?', heir);
+      if (row.sample_file) run(conn, "UPDATE voices SET sample_file = ? WHERE id = ? AND sample_file = ''", row.sample_file, heir);
+      run(conn, 'DELETE FROM voices WHERE id = ?', row.id);
+      return c.json({ ok: true, local_only: true });
+    }
     // 设计与复刻的音色在百炼占配额(每个账号 1000 个),先删云端;删不掉时除非强制,否则不删本地记录
     if (row.kind !== 'system' && c.req.query('local_only') !== '1') {
       try {

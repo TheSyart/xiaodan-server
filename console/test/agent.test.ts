@@ -129,6 +129,19 @@ describe('开头表情', () => {
     assert.equal(normalizeEmoji('😢'), '😭');
     assert.equal(normalizeEmoji('🐱'), '🙂');
   });
+
+  test('句首的情感标签:写在表情前后都认,表情挪到最前;标签没写完先扣住', () => {
+    const tagFirst = new LeadingEmoji(true);
+    assert.equal(tagFirst.feed('[exc'), '', '标签没写完');
+    assert.equal(tagFirst.feed('ited]'), '', '只有标签,表情可能在下一块');
+    assert.equal(tagFirst.feed('😆哇,') + tagFirst.feed('你做到啦!') + tagFirst.finish(), '😆[excited]哇,你做到啦!');
+    assert.equal(tagFirst.emotion, 'laughing');
+    assert.equal(feedAll(new LeadingEmoji(true), ['😆[laughing]', '哈哈']), '😆[laughing]哈哈');
+    const later = new LeadingEmoji(false);
+    assert.equal(feedAll(later, ['[sad]😭', '好难过']), '[sad]好难过');
+    assert.equal(later.emotion, 'crying');
+    assert.equal(feedAll(new LeadingEmoji(true), ['[1] 第一步']), '🙂[1] 第一步', '不是标签的方括号不扣');
+  });
 });
 
 describe('正文里的工具调用', () => {
@@ -197,8 +210,8 @@ describe('流式解析', () => {
 describe('提示词', () => {
   test('能力按工具生成,儿童安全按角色加', () => {
     const agent = {
-      id: 'a', name: '童童', system_prompt: '# 角色:{{assistant_name}}', llm_model_id: null, tts_model_id: null, tts_voice_id: null,
-      description: '', role_template: '', safety_level: 'child' as const, max_steps: 6, llm_params_json: '{}', greeting: '', runtime: 'agent' as const,
+      id: 'a', name: '童童', system_prompt: '# 角色:{{assistant_name}}', llm_model_id: null, image_model_id: null, tts_voice_id: null,
+      chat_history_conf: 1, description: '', role_template: '', safety_level: 'child' as const, max_steps: 6, llm_params_json: '{}', greeting: '',
     };
     const tool = { name: 'get_weather', label: '天气', description: '', parameters: {}, run: async () => ({ content: '' }) };
     const prompt = buildSystemPrompt({ agent, tools: [tool], now: new Date('2026-09-17T00:05:00Z'), hasScreen: true });
@@ -208,6 +221,39 @@ describe('提示词', () => {
     assert.match(prompt, /<儿童安全>/u);
     assert.match(prompt, /2026年9月17日 星期四 08:05/u);
     assert.deepEqual(beijingNow(new Date('2026-12-31T16:30:00Z')), { date: '2027年1月1日', weekday: '星期五', time: '00:30' });
+  });
+
+  const plainAgent = {
+    id: 'a', name: '小单', system_prompt: '', llm_model_id: null, image_model_id: null, tts_voice_id: null,
+    chat_history_conf: 1, description: '', role_template: '', safety_level: 'standard' as const, max_steps: 6, llm_params_json: '{}', greeting: '',
+  };
+  const promptFor = (extra: Partial<Parameters<typeof buildSystemPrompt>[0]>) =>
+    buildSystemPrompt({ agent: plainAgent, tools: [], now: new Date('2026-09-17T00:05:00Z'), hasScreen: true, ...extra });
+
+  test('看图:模型支持才列进能做的,否则明说做不到', () => {
+    assert.match(promptFor({ vision: true }), /你能做的:[^\n]*看懂用户发来的图片/u);
+    assert.match(promptFor({ vision: false }), /你做不到的:[^\n]*看图片/u);
+  });
+
+  test('声音表现只在音色允许情感标签时出现;非中文语种与方言另有说话要求', () => {
+    const zh = { language: '中文', dialect: '', controlTags: [], richTags: [] };
+    const plain = promptFor({ voice: zh });
+    assert.doesNotMatch(plain, /<声音表现>/u);
+    assert.doesNotMatch(plain, /<说话语言>/u);
+    assert.match(plain, /括号或方括号里的动作描写/u);
+
+    const tagged = promptFor({ voice: { ...zh, controlTags: [{ tag: 'excited', label: '兴奋' }], richTags: [{ tag: 'laughing', label: '笑出声' }] } });
+    assert.match(tagged, /<声音表现>/u);
+    assert.match(tagged, /情绪标签[^\n]*\[excited\]\(兴奋\)/u);
+    assert.match(tagged, /声音标签[^\n]*\[laughing\]\(笑出声\)/u);
+    assert.match(tagged, /方括号标签除外/u);
+    const onlyRich = promptFor({ voice: { ...zh, richTags: [{ tag: 'giggles', label: '咯咯笑' }] } });
+    assert.doesNotMatch(onlyRich, /情绪标签,放在/u);
+
+    assert.match(promptFor({ voice: { ...zh, language: '英语' } }), /<说话语言>\n你的声音说英语。[^\n]*所有回复都用英语/u);
+    const sichuan = promptFor({ voice: { ...zh, dialect: '四川话' } });
+    assert.match(sichuan, /带四川话的味道/u);
+    assert.doesNotMatch(sichuan, /所有回复都用/u);
   });
 });
 
@@ -242,7 +288,7 @@ describe('多步循环', () => {
     seed(conn);
     run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_DS', 'LLM', 'DeepSeek', 'openai', ?)",
       JSON.stringify({ type: 'openai', base_url: 'https://api.deepseek.com', model_name: 'deepseek-chat', api_key: 'sk' }));
-    run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS', runtime = 'agent', max_steps = 3 WHERE id = ?", DEFAULT_AGENT_ID);
+    run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS', max_steps = 3 WHERE id = ?", DEFAULT_AGENT_ID);
     bridge = new FakeBridge();
     texts = [];
     deviceMessages = [];
@@ -278,6 +324,77 @@ describe('多步循环', () => {
     assert.deepEqual(records.map((r) => r.chat_type), [1, 3, 2]);
     assert.equal(records[2]!.content, '🙂我看看天气哦。北京晴,二十六度。');
     assert.ok(records.every((r) => r.agent_id === DEFAULT_AGENT_ID));
+  });
+
+  const withVoice = (emotionTags: string[], extra = '') => {
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Qwen', 'TTS', '千问', 'qwen_audio_tts', ?)",
+      JSON.stringify({ type: 'qwen_audio_tts', api_key: 'sk', model_name: 'qwen-audio-3.0-tts-flash' }));
+    run(conn, `INSERT INTO voices (id, tts_model_id, name, voice, kind, status, emotion_tags${extra ? ', dialect' : ''})
+               VALUES ('v_kid', 'TTS_Qwen', '泡泡', 'longpaopao_v3.6', 'system', 'ok', ?${extra ? ', ?' : ''})`,
+    JSON.stringify(emotionTags), ...(extra ? [extra] : []));
+    run(conn, "UPDATE agents SET tts_voice_id = 'v_kid' WHERE id = ?", DEFAULT_AGENT_ID);
+  };
+
+  test('情感标签:照原样发给引擎,对话记录里去掉;下一轮的上下文保留原文', async () => {
+    withVoice(['excited', 'laughing'], '四川话');
+    const { fetchImpl, calls } = fakeLlm([{ text: ['[excited]😆哇,', '你做到啦![laughing]'] }, { text: ['🙂嗯嗯。'] }]);
+    const base = {
+      agent: loadAgent(deps(fetchImpl), DEFAULT_AGENT_ID)!, device: device(), engineMessages: [], conversationKey: `device:${MAC}`,
+      record: { mac: MAC, sessionId: 'sess-1' }, signal: new AbortController().signal, sink,
+    };
+    await runTurn(deps(fetchImpl), { ...base, query: '我拼好积木了' });
+    assert.deepEqual(texts, ['😆[excited]哇,', '你做到啦![laughing]']);
+    const system = calls[0]!.body.messages[0]!.content!;
+    assert.match(system, /<声音表现>[\s\S]*\[excited\]\(兴奋\)/u);
+    assert.match(system, /带四川话的味道/u);
+    const reply = one<{ content: string }>(conn, 'SELECT content FROM chat_messages WHERE chat_type = 2')!;
+    assert.equal(reply.content, '😆哇,你做到啦!');
+
+    await runTurn(deps(fetchImpl), { ...base, query: '厉害吧' });
+    const previous = calls[1]!.body.messages.filter((m) => m.role === 'assistant').at(-1)!;
+    assert.match(String(previous.content), /\[excited\].*\[laughing\]/u);
+  });
+
+  test('音色不允许标签时提示词里没有声音表现', async () => {
+    withVoice([]);
+    const { fetchImpl, calls } = fakeLlm([{ text: ['🙂好的。'] }]);
+    await runTurn(deps(fetchImpl), {
+      agent: loadAgent(deps(fetchImpl), DEFAULT_AGENT_ID)!, device: device(), query: '你好', engineMessages: [],
+      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink,
+    });
+    assert.doesNotMatch(calls[0]!.body.messages[0]!.content!, /<声音表现>/u);
+  });
+
+  test('对话记录关掉(chat_history_conf=0)时一条也不写', async () => {
+    run(conn, 'UPDATE agents SET chat_history_conf = 0 WHERE id = ?', DEFAULT_AGENT_ID);
+    const { fetchImpl } = fakeLlm([{ calls: [{ name: 'get_weather', arguments: {} }] }, { text: ['🙂晴天。'] }]);
+    await runTurn(deps(fetchImpl), {
+      agent: loadAgent(deps(fetchImpl), DEFAULT_AGENT_ID)!, device: device(), query: '天气', engineMessages: [],
+      conversationKey: `device:${MAC}`, record: { mac: MAC, sessionId: 'sess-1' }, signal: new AbortController().signal, sink,
+    });
+    assert.equal(all(conn, 'SELECT 1 FROM chat_messages').length, 0);
+  });
+
+  test('看图:支持看图的模型收到图片分片;不支持时只附一句说明', async () => {
+    const image = 'data:image/png;base64,iVBORw0KGgo=';
+    const ask = async () => {
+      const { fetchImpl, calls } = fakeLlm([{ text: ['🙂是一只猫。'] }]);
+      conversations.reset(`device:${MAC}`);
+      await runTurn(deps(fetchImpl), {
+        agent: loadAgent(deps(fetchImpl), DEFAULT_AGENT_ID)!, device: device(), query: '这是什么', images: [image], engineMessages: [],
+        conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink,
+      });
+      return calls[0]!.body.messages;
+    };
+    run(conn, "UPDATE models SET config_json = json_set(config_json, '$.vision', json('true')) WHERE id = 'LLM_DS'");
+    let messages = await ask();
+    assert.deepEqual(messages.at(-1)!.content, [{ type: 'text', text: '这是什么' }, { type: 'image_url', image_url: { url: image } }]);
+    assert.match(messages[0]!.content!, /你能做的:[^\n]*看懂用户发来的图片/u);
+
+    run(conn, "UPDATE models SET config_json = json_set(config_json, '$.vision', json('false')) WHERE id = 'LLM_DS'");
+    messages = await ask();
+    assert.equal(messages.at(-1)!.content, '这是什么\n[系统提示] 用户发了 1 张图片,但你现在用的对话模型看不了图。');
+    assert.match(messages[0]!.content!, /你做不到的:[^\n]*看图片/u);
   });
 
   test('下一轮带上上一轮的工具往来(跨重连延续)', async () => {
@@ -375,7 +492,7 @@ describe('对话接口与配置下发', () => {
     secret = one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', SECRET_KEY)!.value;
     run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_DS', 'LLM', 'DeepSeek', 'openai', ?)",
       JSON.stringify({ type: 'openai', base_url: 'https://api.deepseek.com', model_name: 'deepseek-chat', api_key: 'sk' }));
-    run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS', runtime = 'agent' WHERE id = ?", DEFAULT_AGENT_ID);
+    run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS' WHERE id = ?", DEFAULT_AGENT_ID);
     run(conn, 'INSERT INTO devices (mac, agent_id, secret_hash) VALUES (?, ?, ?)', MAC, DEFAULT_AGENT_ID, hashClientId(CLIENT_ID));
     const { fetchImpl } = fakeLlm([{ text: ['🙂你好呀。'] }]);
     app = createApp(conn, { agent: { fetch: fetchImpl, bridge: new FakeBridge(), log: () => {} } });
@@ -414,7 +531,7 @@ describe('对话接口与配置下发', () => {
     assert.match(text, /"t":"done"/u);
   });
 
-  test('agent-models:大脑在控制塔的智能体换成 xiaodan_agent,关掉引擎侧工具、记忆与记录', async () => {
+  test('agent-models:大脑一律在控制塔,换成 xiaodan_agent,关掉引擎侧工具、记忆与记录', async () => {
     run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'get_weather', '{}') ON CONFLICT DO NOTHING", DEFAULT_AGENT_ID);
     const response = await app.request('http://localhost/xiaozhi/config/agent-models', {
       method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
@@ -433,14 +550,15 @@ describe('对话接口与配置下发', () => {
     assert.equal(data['chat_history_conf'], 0);
   });
 
-  test('runtime=engine 时下发保持旧样子', async () => {
-    run(conn, "UPDATE agents SET runtime = 'engine' WHERE id = ?", DEFAULT_AGENT_ID);
-    const response = await app.request('http://localhost/xiaozhi/config/agent-models', {
-      method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ macAddress: MAC, clientId: CLIENT_ID, selectedModule: {} }),
+  test('网页试聊:图片只收 png / jpeg / webp 的 data URL,最多 3 张', async () => {
+    const tryChat = (images: string[]) => app.request('http://localhost/api/agent-runtime/try', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent_id: DEFAULT_AGENT_ID, message: '看看', conversation_id: 'c-img', images }),
     });
-    const data = ((await response.json()) as { data: Record<string, any> }).data;
-    assert.equal(data['selected_module'].LLM, 'LLM_DS');
+    assert.equal((await tryChat(['https://evil.example/a.png'])).status, 400);
+    assert.equal((await tryChat(['data:image/svg+xml;base64,PHN2Zz4='])).status, 400);
+    assert.equal((await tryChat(Array(4).fill('data:image/png;base64,AA=='))).status, 400);
+    assert.equal((await tryChat(['data:image/jpeg;base64,/9j/'])).status, 200);
   });
 
   test('网页试聊:回传工具步骤与汇总', async () => {

@@ -9,15 +9,17 @@ export interface AgentRow {
   name: string;
   system_prompt: string;
   llm_model_id: string | null;
-  tts_model_id: string | null;
+  image_model_id: string | null;
+  /** 音色决定合成模型、音量语速、方言语气与允许的情感标签 */
   tts_voice_id: string | null;
+  /** 0 不记对话记录,1 记 */
+  chat_history_conf: number;
   description: string;
   role_template: string;
   safety_level: 'standard' | 'child';
   max_steps: number;
   llm_params_json: string;
   greeting: string;
-  runtime: 'engine' | 'agent';
 }
 
 /** 这一轮对应的设备。网页试聊时可能没有设备(mac 为 null)。 */
@@ -82,6 +84,8 @@ export interface ToolResult {
   endTurn?: boolean;
   /** 为 true 时下一次请求模型放宽输出长度(例如要把整篇故事讲出来) */
   longAnswer?: boolean;
+  /** 工具拿到的图片(data: 或 https 地址);对话模型支持看图时交给它看 */
+  images?: string[];
   ok?: boolean;
 }
 

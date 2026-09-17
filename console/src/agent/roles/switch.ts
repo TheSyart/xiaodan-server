@@ -16,18 +16,18 @@ export interface RoleOption {
   greeting: string;
 }
 
-/** 这台设备能切到的角色(不含当前角色)。设了白名单只在白名单里挑,否则是所有由控制塔驱动的角色。 */
+/** 这台设备能切到的角色(不含当前角色)。设了白名单只在白名单里挑,否则是全部角色。 */
 export function switchableRoles(conn: Db, mac: string, currentAgentId: string): RoleOption[] {
   const allowlisted = all<RoleOption>(
     conn,
     `SELECT a.id, a.name, a.description, a.greeting FROM device_roles r JOIN agents a ON a.id = r.agent_id
-     WHERE r.mac = ? AND a.runtime = 'agent' ORDER BY a.is_default DESC, a.created_at`,
+     WHERE r.mac = ? ORDER BY a.is_default DESC, a.created_at`,
     mac,
   );
   const hasAllowlist = !!one(conn, 'SELECT 1 FROM device_roles WHERE mac = ?', mac);
   const rows = hasAllowlist
     ? allowlisted
-    : all<RoleOption>(conn, "SELECT id, name, description, greeting FROM agents WHERE runtime = 'agent' ORDER BY is_default DESC, created_at");
+    : all<RoleOption>(conn, 'SELECT id, name, description, greeting FROM agents ORDER BY is_default DESC, created_at');
   return rows.filter((row) => row.id !== currentAgentId);
 }
 
@@ -42,8 +42,11 @@ export function matchRole(roles: readonly RoleOption[], spoken: string): { role:
   return partial.length === 1 ? { role: partial[0]!, candidates: partial } : { role: null, candidates: partial.length ? partial : exact };
 }
 
-/** 引擎在连接建立时就定下来的那些配置:两个角色这里有任何不同,都要重连才生效。 */
-const ENGINE_FIELDS = ['runtime', 'vad_model_id', 'asr_model_id', 'tts_model_id', 'tts_voice_id', 'tts_language', 'tts_params_json'] as const;
+/**
+ * 引擎在连接建立时就定下来的那些配置:两个角色这里有任何不同,都要重连才生效。
+ * 合成模型与说话设置都跟着音色走,音色 id 相同就是同一个声音。
+ */
+const ENGINE_FIELDS = ['vad_model_id', 'asr_model_id', 'tts_voice_id'] as const;
 
 export function needsReconnect(conn: Db, fromId: string, toId: string): boolean {
   const columns = ENGINE_FIELDS.join(', ');

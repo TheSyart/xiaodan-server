@@ -14,10 +14,12 @@ import { forget, listMemory, MAX_FACTS_PER_DEVICE, memoryPrompt, privacyReason, 
 import { applyTemplate, ROLE_TEMPLATES, templateById } from '../src/agent/roles/templates.ts';
 import { greetAfterSwitch, matchRole, needsReconnect, queueGreeting, switchableRoles, takeGreeting } from '../src/agent/roles/switch.ts';
 import { seedBuiltinSkills } from '../src/agent/skills/builtin.ts';
+import { syncSystemVoices } from '../src/voice/store.ts';
 import type { AgentDeps, DeviceContext, TurnSink } from '../src/agent/types.ts';
 
 let conn: Db;
 const MAC = '4c:11:ae:31:7a:30';
+const BASE_VOICE = 'TTS_QWEN__longanhuan_v3.6';
 
 class FakeBridge extends Bridge {
   announces: { mac: string; body: any }[] = [];
@@ -69,8 +71,9 @@ beforeEach(() => {
   seed(conn);
   run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_DS', 'LLM', 'DeepSeek', 'openai', ?)",
     JSON.stringify({ type: 'openai', base_url: 'https://api.deepseek.com/v1', model_name: 'deepseek-chat', api_key: 'sk-ds' }));
-  run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_QWEN', 'TTS', '千问合成', 'qwen_audio_tts', '{}')");
-  run(conn, "UPDATE agents SET llm_model_id = 'LLM_DS', tts_model_id = 'TTS_QWEN', runtime = 'agent' WHERE id = ?", DEFAULT_AGENT_ID);
+  run(conn, "INSERT INTO models (id, model_type, name, provider, config_json, is_default) VALUES ('TTS_QWEN', 'TTS', '千问合成', 'qwen_audio_tts', '{\"model_name\":\"qwen-audio-3.0-tts-flash\"}', 1)");
+  syncSystemVoices(conn);
+  run(conn, 'UPDATE agents SET llm_model_id = ?, tts_voice_id = ? WHERE id = ?', 'LLM_DS', BASE_VOICE, DEFAULT_AGENT_ID);
   run(conn, 'DELETE FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID);
   run(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', MAC, DEFAULT_AGENT_ID);
   conversations.reset(`device:${MAC}`);
@@ -85,33 +88,38 @@ describe('角色模板', () => {
     const agent = one<Record<string, unknown>>(conn, 'SELECT * FROM agents WHERE id = ?', result.id)!;
     assert.equal(agent['name'], '童童');
     assert.equal(agent['safety_level'], 'child');
-    assert.equal(agent['runtime'], 'agent');
     assert.equal(agent['llm_model_id'], 'LLM_DS');
-    assert.equal(agent['tts_model_id'], 'TTS_QWEN');
     assert.equal(agent['role_template'], 'tongtong');
-    assert.deepEqual(JSON.parse(String(agent['tts_params_json'])), { rate: 0.95 });
-    const voice = one<{ voice: string; status: string }>(conn, 'SELECT voice, status FROM voices WHERE id = ?', String(agent['tts_voice_id']))!;
-    assert.deepEqual({ ...voice }, { voice: 'longpaopao_v3.6', status: 'ok' }, '还没导入的系统音色顺手导入');
+    const voice = one<{ voice: string; status: string; rate: number; tone_tags: string; parent_id: string | null; name: string }>(conn,
+      'SELECT voice, status, rate, tone_tags, parent_id, name FROM voices WHERE id = ?', String(agent['tts_voice_id']))!;
+    assert.deepEqual({ ...voice }, {
+      voice: 'longpaopao_v3.6', status: 'ok', rate: 0.95, tone_tags: '["gentle","story"]', parent_id: 'TTS_QWEN__longpaopao_v3.6', name: '龙泡泡·童童',
+    }, '模板的说话设置和系统音色的默认设置不同:建一个变体');
     const plugins = all<{ plugin_code: string }>(conn, 'SELECT plugin_code FROM agent_plugins WHERE agent_id = ?', result.id).map((r) => r.plugin_code).sort();
     assert.deepEqual(plugins, ['get_weather', 'image', 'memory', 'music', 'reminders', 'roles', 'set_volume', 'show_calendar', 'stories', 'vocab']);
     assert.deepEqual(result.skills.sort(), ['bedtime-story', 'word-coach']);
     assert.deepEqual(result.missing, []);
 
-    // 再建一次:同一个音色不重复导入
+    // 再建一次:设置一样的变体复用,不重复建
     const again = applyTemplate(conn, templateById('tongtong')!, { name: '童童二号' });
-    assert.equal(one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM voices WHERE voice = 'longpaopao_v3.6'")!.n, 1);
+    assert.equal(one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM voices WHERE voice = 'longpaopao_v3.6'")!.n, 2, '原音色与一个变体');
+    assert.equal(one<{ tts_voice_id: string }>(conn, 'SELECT tts_voice_id FROM agents WHERE id = ?', again.id)!.tts_voice_id, agent['tts_voice_id']);
+    // 不带说话设置的模板直接用系统音色
+    const news = applyTemplate(conn, templateById('ai-news')!);
+    assert.equal(one<{ tts_voice_id: string }>(conn, 'SELECT tts_voice_id FROM agents WHERE id = ?', news.id)!.tts_voice_id, 'TTS_QWEN__longanyuanfei');
     assert.equal(one<{ name: string }>(conn, 'SELECT name FROM agents WHERE id = ?', again.id)!.name, '童童二号');
   });
 
-  test('缺的东西如实列出:非千问合成没有音色,没配的 MCP、没导入的技能', () => {
-    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_EDGE', 'TTS', 'Edge', 'edge', '{}')");
+  test('缺的东西如实列出:没有千问合成就没有音色,没配的 MCP、没导入的技能', () => {
+    run(conn, "UPDATE models SET enabled = 0 WHERE id = 'TTS_QWEN'");
     run(conn, 'DELETE FROM skills');
-    const result = applyTemplate(conn, templateById('ai-news')!, { tts_model_id: 'TTS_EDGE' });
+    const result = applyTemplate(conn, templateById('ai-news')!);
     assert.equal(result.voice, null);
     assert.ok(result.missing.some((m) => m.includes('音色')));
     assert.ok(result.missing.some((m) => m.includes('aihot')));
     assert.ok(result.missing.some((m) => m.includes('ai-news-brief')));
 
+    run(conn, "UPDATE models SET enabled = 1 WHERE id = 'TTS_QWEN'");
     run(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('aihot', 'AIHOT', 'https://aihot.example/api/mcp')");
     const linked = applyTemplate(conn, templateById('ai-news')!);
     assert.deepEqual(linked.mcp_servers, ['AIHOT'], '名字匹配上就关联');
@@ -149,9 +157,9 @@ describe('角色模板', () => {
 describe('切换角色', () => {
   function addRole(name: string, extra: Record<string, unknown> = {}): string {
     const id = `agent_${name}`;
-    run(conn, `INSERT INTO agents (id, name, system_prompt, vad_model_id, llm_model_id, tts_model_id, runtime, greeting, tts_voice_id)
-               VALUES (?, ?, '', 'VAD_SileroVAD', 'LLM_DS', 'TTS_QWEN', ?, ?, ?)`,
-      id, name, extra['runtime'] ?? 'agent', extra['greeting'] ?? '', extra['tts_voice_id'] ?? null);
+    run(conn, `INSERT INTO agents (id, name, system_prompt, vad_model_id, llm_model_id, greeting, tts_voice_id)
+               VALUES (?, ?, '', 'VAD_SileroVAD', 'LLM_DS', ?, ?)`,
+      id, name, extra['greeting'] ?? '', extra['tts_voice_id'] ?? BASE_VOICE);
     return id;
   }
 
@@ -169,11 +177,10 @@ describe('切换角色', () => {
     assert.equal(matchRole([...roles, { id: 'e', name: '英语外教', description: '', greeting: '' }], '英语').candidates.length, 2);
   });
 
-  test('可切换的角色:默认所有控制塔角色,设了白名单只在里面挑', () => {
+  test('可切换的角色:默认所有角色,设了白名单只在里面挑', () => {
     const tong = addRole('童童');
-    addRole('旧路径', { runtime: 'engine' });
     const teacher = addRole('英语老师');
-    assert.deepEqual(switchableRoles(conn, MAC, DEFAULT_AGENT_ID).map((r) => r.id), [tong, teacher], '引擎旧路径的角色不在内');
+    assert.deepEqual(switchableRoles(conn, MAC, DEFAULT_AGENT_ID).map((r) => r.id), [tong, teacher]);
     run(conn, 'INSERT INTO device_roles (mac, agent_id) VALUES (?, ?)', MAC, teacher);
     assert.deepEqual(switchableRoles(conn, MAC, DEFAULT_AGENT_ID).map((r) => r.id), [teacher]);
   });

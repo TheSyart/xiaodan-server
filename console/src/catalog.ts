@@ -6,12 +6,18 @@
 // 让两边悄悄漂移 —— 改了 Python 忘了改库,表现是运行时"不支持的 XXX 类型"。
 // 所以这里把它写成代码常量,跟着仓库一起版本化。
 //
-// 服务端的加载规则(已在容器里核对):
-//   ASR / TTS / VAD  →  core/providers/<类型小写>/<provider>.py
-//   LLM / Memory / Intent → core/providers/<类型小写>/<provider>/<provider>.py
-// 名字写错不会在控制台报错,只会在设备连上来时炸,所以改动这里要对着服务端核。
+// 模型类型:
+//   VAD    本地语音活动检测,引擎内部用,只有一种,页面不展示
+//   ASR    语音识别,千问(百炼)
+//   TTS    语音合成,千问(百炼);音色与说话设置在音色页
+//   LLM    对话模型,OpenAI 兼容接口;「支持看图」开关决定智能体有没有视觉能力
+//   Image  文生图,千问(百炼);只在控制塔里用(画画工具),不下发给引擎
+// 工具能不能用、记不记忆,都由每个智能体自己勾选,不再是模型类型。
+//
+// 服务端的加载规则(已在容器里核对):ASR / TTS / VAD → core/providers/<类型小写>/<provider>.py。
+// 对话模型不下发给引擎:引擎的 LLM 固定是转发到控制塔的 xiaodan_agent。
 
-export type FieldType = 'string' | 'password' | 'number' | 'boolean' | 'text';
+export type FieldType = 'string' | 'password' | 'number' | 'boolean' | 'text' | 'select';
 
 export interface ProviderField {
   key: string;
@@ -21,6 +27,8 @@ export interface ProviderField {
   default?: string | number | boolean;
   required?: boolean;
   hint?: string;
+  /** type 为 select 时的可选项 */
+  options?: { value: string; label: string }[];
 }
 
 export interface ProviderDef {
@@ -32,9 +40,12 @@ export interface ProviderDef {
   note?: string;
 }
 
-export type ModelType = 'VAD' | 'ASR' | 'LLM' | 'VLLM' | 'TTS' | 'Memory' | 'Intent';
+export type ModelType = 'VAD' | 'ASR' | 'LLM' | 'TTS' | 'Image';
 
-export const MODEL_TYPES: ModelType[] = ['VAD', 'ASR', 'LLM', 'VLLM', 'TTS', 'Memory', 'Intent'];
+export const MODEL_TYPES: ModelType[] = ['VAD', 'ASR', 'LLM', 'TTS', 'Image'];
+
+/** 模型页上展示、可以增删改的类型 */
+export const EDITABLE_MODEL_TYPES: ModelType[] = ['LLM', 'ASR', 'TTS', 'Image'];
 
 const OUTPUT_DIR: ProviderField = {
   key: 'output_dir',
@@ -42,6 +53,21 @@ const OUTPUT_DIR: ProviderField = {
   type: 'string',
   default: 'tmp/',
 };
+
+const BAILIAN_KEY: ProviderField[] = [
+  { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
+  { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
+  { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
+];
+
+/** 文生图模型:同步的直接出图,异步的(万相)要轮询任务 */
+export const IMAGE_MODELS: { value: string; label: string; async: boolean }[] = [
+  { value: 'qwen-image-3.0-pro', label: 'qwen-image-3.0-pro(千问图像 3.0,推荐)', async: false },
+  { value: 'qwen-image-2.0', label: 'qwen-image-2.0', async: false },
+  { value: 'z-image-turbo', label: 'z-image-turbo(快、便宜)', async: false },
+  { value: 'wan2.7-image', label: 'wan2.7-image(万相)', async: true },
+  { value: 'wan2.7-image-pro', label: 'wan2.7-image-pro(万相专业版)', async: true },
+];
 
 export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
   VAD: [
@@ -65,9 +91,7 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
         '松手后整段音频一次识别,走百炼同步接口,单段 5 分钟以内。业务空间 ID 在百炼控制台「业务空间」里;' +
         '填了就走业务空间专属域名,不填走 dashscope.aliyuncs.com。热词每行一个,可写「词|权重」,权重 1-5。',
       fields: [
-        { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
-        { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
-        { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
+        ...BAILIAN_KEY,
         { key: 'model_name', label: '识别模型', type: 'string', default: 'qwen-audio-3.0-asr-flash' },
         { key: 'vocabulary', label: '热词', type: 'text', default: '小单|5' },
         { key: 'language_hints', label: '语种提示', type: 'string', hint: '逗号分隔,如 zh,en;留空自动识别' },
@@ -75,80 +99,24 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
         OUTPUT_DIR,
       ],
     },
-    {
-      provider: 'gateway_chat',
-      label: '网关识别(chat 接口)',
-      note:
-        '把音频当作 input_audio 内容块经 chat/completions 发给模型网关。' +
-        '适用于只代理 chat 接口、没有 /v1/audio/transcriptions 的自建网关。',
-      fields: [
-        { key: 'base_url', label: '网关地址', type: 'string', required: true },
-        { key: 'model_name', label: '识别模型', type: 'string', required: true },
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
-        { key: 'timeout', label: '超时(秒)', type: 'number', default: 30 },
-        OUTPUT_DIR,
-      ],
-    },
-    {
-      provider: 'openai',
-      label: 'OpenAI 兼容转写接口',
-      note: '需要对方提供 /v1/audio/transcriptions。自建网关多数不提供,请先确认。',
-      fields: [
-        { key: 'base_url', label: '转写端点', type: 'string', required: true },
-        { key: 'model_name', label: '模型', type: 'string', default: 'whisper-1' },
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
-        OUTPUT_DIR,
-      ],
-    },
-    // 不提供 FunASR 本地识别:引擎镜像为了从 10.5GB 瘦身到约 1.9GB 去掉了它的依赖,
-    // 选了也只会在设备连上来时报"不支持的 ASR 类型"。
   ],
 
   LLM: [
     {
       provider: 'openai',
-      label: 'OpenAI 兼容接口',
+      label: 'OpenAI 兼容接口(DeepSeek、百炼、Ollama……)',
       note:
         'max_tokens 要给足。推理型模型会先把额度花在隐藏推理 token 上,给小了会收到空回复,' +
-        '现象与链路故障几乎一样,很容易误判。',
+        '现象与链路故障几乎一样,很容易误判。模型本身能看图(比如 qwen-vl、qwen3.5-plus)才打开「支持看图」。',
       fields: [
         { key: 'base_url', label: '接口地址', type: 'string', required: true },
         { key: 'model_name', label: '模型', type: 'string', required: true },
         { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
+        { key: 'vision', label: '支持看图', type: 'boolean', default: false, hint: '打开后智能体可以看懂用户发来的图片;模型不支持时不要打开' },
         { key: 'temperature', label: '温度', type: 'number', default: 0.8 },
         { key: 'max_tokens', label: '最大输出 token', type: 'number', default: 1200 },
         { key: 'top_p', label: 'top_p', type: 'number', default: 1 },
         { key: 'frequency_penalty', label: '重复惩罚', type: 'number', default: 0 },
-      ],
-    },
-    {
-      provider: 'ollama',
-      label: 'Ollama(本地)',
-      fields: [
-        { key: 'base_url', label: '地址', type: 'string', default: 'http://localhost:11434' },
-        { key: 'model_name', label: '模型', type: 'string', required: true },
-      ],
-    },
-    {
-      provider: 'gemini',
-      label: 'Google Gemini',
-      fields: [
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
-        { key: 'model_name', label: '模型', type: 'string', default: 'gemini-2.0-flash' },
-        { key: 'http_proxy', label: 'HTTP 代理', type: 'string' },
-      ],
-    },
-  ],
-
-  VLLM: [
-    {
-      provider: 'openai',
-      label: 'OpenAI 兼容视觉接口',
-      note: '仅在设备带摄像头时才会被调用。本硬件没有,可留空不配。',
-      fields: [
-        { key: 'base_url', label: '接口地址', type: 'string', required: true },
-        { key: 'model_name', label: '模型', type: 'string', required: true },
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
       ],
     },
   ],
@@ -158,90 +126,47 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
       provider: 'qwen_audio_tts',
       label: '千问语音合成(百炼 Qwen-Audio 3.0)',
       note:
-        '每句话一个流式合成任务,边合成边播。音色在「音色」页管理:系统音色、声音设计、声音复刻都挂在这个模型下,' +
-        '复刻与设计出的音色只能用于这里填的合成模型。语速、音调、音量与语气指令按智能体单独设置。',
+        '每句话一个流式合成任务,边合成边播。这一套的系统音色会自动出现在「音色」页;音量、语速、方言、语气也在音色页按音色设置。' +
+        'flash 与 plus 的音色不能混用,复刻与设计出的音色只能用于创建时的合成模型。',
       fields: [
-        { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
-        { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
-        { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
-        { key: 'model_name', label: '合成模型', type: 'string', default: 'qwen-audio-3.0-tts-flash' },
-        { key: 'voice', label: '默认音色', type: 'string', default: 'longanhuan_v3.6' },
+        ...BAILIAN_KEY,
+        {
+          key: 'model_name', label: '合成模型', type: 'select', default: 'qwen-audio-3.0-tts-flash',
+          options: [
+            { value: 'qwen-audio-3.0-tts-flash', label: 'qwen-audio-3.0-tts-flash(快,12 个系统音色)' },
+            { value: 'qwen-audio-3.0-tts-plus', label: 'qwen-audio-3.0-tts-plus(旗舰,2 个系统音色)' },
+          ],
+        },
         OUTPUT_DIR,
       ],
     },
+  ],
+
+  Image: [
     {
-      provider: 'gateway_omni_tts',
-      label: '网关合成(Omni chat 接口)',
+      provider: 'qwen_image',
+      label: '千问文生图(百炼)',
       note:
-        '用 Qwen-Omni 在 chat 里直接输出音频,适用于没有 /v1/audio/speech 的自建网关。' +
-        '返回的是裸 PCM16,provider 会自己补 24000Hz 的 WAV 头。',
+        '「画画」工具用它出图:原图存进画廊,设备屏幕显示 128×128 的像素画。可以直接用语音模型那把百炼 API Key 与业务空间。' +
+        '万相模型是异步任务,出图要多等几秒。',
       fields: [
-        { key: 'base_url', label: '网关地址', type: 'string', required: true },
-        { key: 'model_name', label: '合成模型', type: 'string', required: true },
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
-        { key: 'voice', label: '默认音色', type: 'string', default: 'Ethan' },
-        { key: 'audio_format', label: '音频格式', type: 'string', default: 'wav' },
-        { key: 'timeout', label: '超时(秒)', type: 'number', default: 60 },
-        OUTPUT_DIR,
+        ...BAILIAN_KEY,
+        {
+          key: 'model_name', label: '文生图模型', type: 'select', default: 'qwen-image-3.0-pro',
+          options: IMAGE_MODELS.map((model) => ({ value: model.value, label: model.label })),
+        },
+        {
+          key: 'size', label: '图片尺寸', type: 'select', default: '1024*1024',
+          options: [
+            { value: '1024*1024', label: '1024 × 1024(推荐)' },
+            { value: '768*768', label: '768 × 768' },
+            { value: '1280*1280', label: '1280 × 1280' },
+          ],
+          hint: '设备上只显示 128 × 128,尺寸越大越慢越贵',
+        },
+        { key: 'prompt_extend', label: '让百炼改写提示词', type: 'boolean', default: false, hint: '画面更丰富,但多花几秒' },
+        { key: 'negative_prompt', label: '不要出现的内容', type: 'text', hint: '例如:文字,水印,恐怖' },
       ],
-    },
-    {
-      provider: 'edge',
-      label: 'EdgeTTS(免费)',
-      note: '不需要密钥。个别音色会报 NoAudioReceived,换一个即可。',
-      fields: [
-        { key: 'voice', label: '默认音色', type: 'string', default: 'zh-CN-XiaoxiaoNeural' },
-        { key: 'format', label: '音频格式', type: 'string', default: 'mp3' },
-        { key: 'volume', label: '音量(-100~100)', type: 'number', default: 50 },
-        { key: 'rate', label: '语速(-100~100)', type: 'number', default: 0 },
-        { key: 'pitch', label: '音调(-100~100)', type: 'number', default: 0 },
-        OUTPUT_DIR,
-      ],
-    },
-    {
-      provider: 'openai',
-      label: 'OpenAI 兼容合成接口',
-      note: '需要对方提供 /v1/audio/speech。',
-      fields: [
-        { key: 'api_url', label: '合成端点', type: 'string', required: true },
-        { key: 'model', label: '模型', type: 'string', default: 'tts-1' },
-        { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
-        { key: 'voice', label: '默认音色', type: 'string', default: 'alloy' },
-        { key: 'response_format', label: '返回格式', type: 'string', default: 'wav' },
-        OUTPUT_DIR,
-      ],
-    },
-  ],
-
-  Memory: [
-    { provider: 'nomem', label: '不记忆', fields: [] },
-    {
-      provider: 'mem_local_short',
-      label: '本地短期记忆',
-      note: '用一个 LLM 把历史压成摘要存在服务端。填的是模型配置的 id,例如 LLM_XiaodanGateway。',
-      fields: [{ key: 'llm', label: '用于摘要的模型 id', type: 'string', required: true }],
-    },
-    { provider: 'mem_report_only', label: '仅上报不记忆', fields: [] },
-  ],
-
-  Intent: [
-    {
-      provider: 'nointent',
-      label: '不启用工具',
-      note: '设备只能闲聊。插件开关在这个模式下不会下发。',
-      fields: [],
-    },
-    {
-      provider: 'function_call',
-      label: '函数调用(推荐)',
-      note: '由模型自行决定何时调工具,要求所选 LLM 支持 function calling。',
-      fields: [],
-    },
-    {
-      provider: 'intent_llm',
-      label: '独立意图模型',
-      note: '每轮先用一个小模型判断意图,再决定是否调工具。多一次往返,延迟更高。',
-      fields: [{ key: 'llm', label: '用于意图识别的模型 id', type: 'string', required: true }],
     },
   ],
 };
@@ -254,23 +179,16 @@ export interface PluginDef {
   fields: ProviderField[];
   /** 不需要任何密钥即可工作 */
   keyless: boolean;
-  /**
-   * 哪种大脑能用:engine 只在旧路径(引擎按函数调用跑)下生效;agent 只在控制塔运行时下生效;
-   * both 两边都能用(引擎里的插件,控制塔经设备桥调用)。
-   */
-  runtime: 'engine' | 'agent' | 'both';
   /** 智能体页分组显示用 */
-  group?: string;
+  group: string;
 }
 
 export const PLUGINS: PluginDef[] = [
-  // 前三个是本仓库自写的插件(server/plugins/,构建时覆盖进引擎镜像),会在小单设备屏幕上显示对应画面;其余是上游自带的。
-  // 上游的 handle_exit_intent(识别告别)与 get_lunar(查农历)在引擎里永远开启(plugin_executor.py 的
-  // necessary_functions),勾不勾都一样,所以不列出来。从前列过的 get_time 其实不对应任何函数,也已移除;
-  // 库里残留的这类行不会再下发(见 manager-api.ts)。
+  // 前三个是本仓库自写的引擎插件(server/plugins/,构建时覆盖进引擎镜像),控制塔经设备桥调用,会在设备屏幕上显示画面;
+  // 其余在控制塔里实现(console/src/agent/)。
   {
     code: 'show_calendar',
-    runtime: 'both',
+    group: '生活',
     label: '日期与日历',
     description: '回答"今天几号""星期几""农历几号",并在设备屏幕上显示当月日历。用服务器时间,不联网。',
     keyless: true,
@@ -280,7 +198,7 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'get_weather',
-    runtime: 'both',
+    group: '生活',
     label: '天气',
     description: '查实时天气与明天预报,并在设备屏幕上显示天气画面。没说城市时按设备 IP 所在城市查。数据来自 Open-Meteo,出错时改用 wttr.in,都不需要密钥。',
     keyless: true,
@@ -291,19 +209,17 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'set_volume',
-    runtime: 'both',
+    group: '生活',
     label: '语音调音量',
     description: '听懂"大声点""音量调到一半",直接调节设备音量。需要小单固件,原版小智固件会回答"请用按键调"。',
     keyless: true,
     fields: [],
   },
-  // ---- 控制塔智能体专用的工具(console/src/agent/),引擎旧路径下不生效 ----
   {
     code: 'search',
     label: '联网搜索',
     description: '查新闻、赛事、股价、刚发生的事等实时信息。搜索服务在「工具与服务」页配置,默认可用 DeepSeek 官方联网搜索。',
     keyless: false,
-    runtime: 'agent',
     group: '信息',
     fields: [],
   },
@@ -312,7 +228,6 @@ export const PLUGINS: PluginDef[] = [
     label: '定时提醒',
     description: '"八点提醒我喝水""每天七点叫我起床"。到点设备响提示音并播报,屏幕显示提醒卡片;设备不在线时下次连上补报。',
     keyless: true,
-    runtime: 'agent',
     group: '生活',
     fields: [],
   },
@@ -321,7 +236,6 @@ export const PLUGINS: PluginDef[] = [
     label: '讲故事',
     description: '播放故事库里的有声故事(原创故事,音频由千问合成);故事库里没有的就现编一个讲。内容在「内容库」页管理。',
     keyless: true,
-    runtime: 'agent',
     group: '陪伴',
     fields: [],
   },
@@ -330,7 +244,6 @@ export const PLUGINS: PluginDef[] = [
     label: '放音乐',
     description: '播放曲库里的音乐(许可核实过的古典与童谣录音,也可以自己上传)。播放中按设备上的说话键即可停止。',
     keyless: true,
-    runtime: 'agent',
     group: '陪伴',
     fields: [],
   },
@@ -339,16 +252,14 @@ export const PLUGINS: PluginDef[] = [
     label: '学单词',
     description: '陪小朋友学英语单词:取词、屏幕单词卡、小测验、按记忆曲线安排复习。配合技能 word-coach 使用效果最好。',
     keyless: true,
-    runtime: 'agent',
     group: '学习',
     fields: [{ key: 'book', label: '单词书 id', type: 'string', hint: '留空用默认单词书(starter)' }],
   },
   {
     code: 'image',
     label: '画画',
-    description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。画图服务在「工具与服务」页配置。',
+    description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。文生图模型在「模型」页配置,也可以在智能体里单独选。',
     keyless: false,
-    runtime: 'agent',
     group: '创作',
     fields: [],
   },
@@ -357,7 +268,6 @@ export const PLUGINS: PluginDef[] = [
     label: '长期记忆',
     description: '记住用户主动说起的名字、年龄、喜好、生日等,换了角色、过了几天也记得。在设备页可以查看和删除。住址、电话、学校这类隐私不记。',
     keyless: true,
-    runtime: 'agent',
     group: '陪伴',
     fields: [],
   },
@@ -366,75 +276,8 @@ export const PLUGINS: PluginDef[] = [
     label: '切换角色',
     description: '"换童童来陪我""切换到英语老师"。能切到哪些角色在设备页设置;新角色的声音不同时,设备会重连一下,再用新声音打招呼。',
     keyless: true,
-    runtime: 'agent',
     group: '角色',
     fields: [],
-  },
-  // ---- 以下是上游引擎自带的插件,只在引擎旧路径下生效 ----
-  {
-    code: 'change_role',
-    runtime: 'engine',
-    label: '切换人设',
-    description: '让用户用一句话临时改变说话风格。',
-    keyless: true,
-    fields: [],
-  },
-  {
-    code: 'web_search',
-    runtime: 'engine',
-    label: '联网搜索',
-    description: '让模型能查它训练数据之外的信息。需要搜索服务的密钥。',
-    keyless: false,
-    fields: [
-      { key: 'provider', label: '搜索源', type: 'string', default: 'tavily', hint: 'metaso 或 tavily' },
-      { key: 'api_key', label: '搜索服务密钥', type: 'password', required: true },
-      { key: 'max_results', label: '返回条数', type: 'number', default: 3 },
-    ],
-  },
-  {
-    code: 'get_news_from_newsnow',
-    runtime: 'engine',
-    label: '新闻聚合',
-    description: '从 newsnow 拉取热点。公共接口,不需要密钥。',
-    keyless: true,
-    fields: [
-      { key: 'url', label: '接口地址', type: 'string', default: 'https://newsnow.busiyi.world/api/s?id=' },
-      { key: 'news_sources', label: '新闻源', type: 'string', default: '澎湃新闻;百度热搜;财联社' },
-    ],
-  },
-  {
-    code: 'get_news_from_chinanews',
-    runtime: 'engine',
-    label: '中新网新闻',
-    description: '读取中新网的 RSS。不需要密钥。',
-    keyless: true,
-    fields: [
-      {
-        key: 'default_rss_url',
-        label: '默认 RSS 源',
-        type: 'string',
-        default: 'https://www.chinanews.com.cn/rss/society.xml',
-      },
-    ],
-  },
-  {
-    code: 'play_music',
-    runtime: 'engine',
-    label: '播放本地音乐',
-    description: '播放服务端 music 目录里的文件。设备扬声器很小,效果有限。',
-    keyless: true,
-    fields: [{ key: 'music_dir', label: '音乐目录', type: 'string', default: './music' }],
-  },
-  {
-    code: 'hass_state',
-    runtime: 'engine',
-    label: 'HomeAssistant 设备控制',
-    description: '通过 HomeAssistant 开关家里的灯与电器。需要 HA 地址与长期令牌。',
-    keyless: false,
-    fields: [
-      { key: 'base_url', label: 'HA 地址', type: 'string', required: true },
-      { key: 'api_key', label: 'HA 长期访问令牌', type: 'password', required: true },
-    ],
   },
 ];
 

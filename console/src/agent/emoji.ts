@@ -16,13 +16,17 @@ const ALIASES: Readonly<Record<string, string>> = {
 };
 
 const PICTOGRAPH = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*)/u;
+/** 句首的百炼情感标签([excited] 这种),模型可能写在表情前面,也可能写在后面 */
+const LEADING_TAGS = /^(?:\s*\[[a-z][a-z ]{0,30}\])+/u;
 
-/** 取开头的表情(若有),返回 [表情, 余下的文字]。 */
+/** 取开头的表情(若有),返回 [表情, 余下的文字]。句首的情感标签留在余下的文字开头。 */
 export function splitLeadingEmoji(text: string): [string | null, string] {
-  const trimmed = text.replace(/^\s+/u, '');
-  const match = PICTOGRAPH.exec(trimmed);
-  if (!match) return [null, trimmed];
-  return [match[1]!, trimmed.slice(match[1]!.length)];
+  let rest = text.replace(/^\s+/u, '');
+  const before = LEADING_TAGS.exec(rest)?.[0] ?? '';
+  rest = rest.slice(before.length).replace(/^\s+/u, '');
+  const match = PICTOGRAPH.exec(rest);
+  if (!match) return [null, before.trim() + rest];
+  return [match[1]!, before.trim() + rest.slice(match[1]!.length)];
 }
 
 export function normalizeEmoji(emoji: string | null): string {
@@ -64,8 +68,11 @@ export class LeadingEmoji {
     if (this.decided) return stripEmoji(chunk);
     this.pending += chunk;
     if (!/\S/u.test(this.pending)) return '';
+    // 开头的情感标签还没写完([exci…),或者目前只有标签、表情可能在下一块:先扣住。太长就不等了
+    const afterTags = this.pending.replace(LEADING_TAGS, '').replace(/^\s+/u, '');
+    if (this.pending.length < 64 && (/^\s*\[[a-z ]{0,31}$/u.test(afterTags || this.pending) || (!afterTags && LEADING_TAGS.test(this.pending)))) return '';
     // 表情可能被切在两个分块之间(如 ZWJ 序列),凑够几个字符再判断
-    if (this.pending.trim().length < 3 && /^\s*\p{Extended_Pictographic}/u.test(this.pending)) return '';
+    if (afterTags.trim().length < 3 && /^\s*\p{Extended_Pictographic}/u.test(afterTags)) return '';
     return this.decide();
   }
 

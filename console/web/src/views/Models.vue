@@ -49,15 +49,12 @@ async function load() {
 onMounted(load);
 
 const TYPE_META: Record<string, { label: string; hint: string; icon: IconName; tone: string }> = {
-  LLM: { label: '对话模型', hint: '决定它怎么思考和回话。要用工具,需选支持函数调用的模型。', icon: 'bot', tone: 'tone-sky' },
-  TTS: { label: '语音合成', hint: '把回复念出来。音色挂在语音合成模型下面。', icon: 'volume', tone: 'tone-violet' },
-  ASR: { label: '语音识别', hint: '把用户说的话转成文字。', icon: 'mic', tone: 'tone-grass' },
-  Intent: { label: '工具调用', hint: '决定模型能不能调用天气、日历等工具。', icon: 'zap', tone: 'tone-sun' },
-  VAD: { label: '语音活动检测', hint: '判断用户什么时候说完了。', icon: 'wave', tone: 'tone-muted' },
-  Memory: { label: '记忆', hint: '要不要记住之前聊过什么。', icon: 'sparkles', tone: 'tone-muted' },
-  VLLM: { label: '视觉模型', hint: '这块硬件没有摄像头,可以不配。', icon: 'eye', tone: 'tone-muted' },
+  LLM: { label: '对话模型', hint: '决定它怎么思考和回话,要支持工具调用(function calling)。模型能看图时打开「支持看图」,智能体就有了视觉能力。', icon: 'bot', tone: 'tone-sky' },
+  ASR: { label: '语音识别', hint: '把用户说的话转成文字。千问(百炼)。', icon: 'mic', tone: 'tone-grass' },
+  TTS: { label: '语音合成', hint: '把回复念出来。千问(百炼);这一套的系统音色自动出现在「音色」页,说话方式在那里调。', icon: 'volume', tone: 'tone-violet' },
+  Image: { label: '文生图', hint: '「画画」工具用它出图。千问(百炼);可以直接用语音模型那把 API Key。', icon: 'sparkles', tone: 'tone-sun' },
 };
-const TYPE_ORDER = ['LLM', 'TTS', 'ASR', 'Intent', 'VAD', 'Memory', 'VLLM'];
+const TYPE_ORDER = ['LLM', 'ASR', 'TTS', 'Image'];
 const meta = (type: string) => TYPE_META[type] ?? { label: type, hint: '', icon: 'layers' as IconName, tone: 'tone-muted' };
 const types = computed(() => {
   const rank = (type: string) => (TYPE_ORDER.includes(type) ? TYPE_ORDER.indexOf(type) : TYPE_ORDER.length);
@@ -68,16 +65,40 @@ const providersOf = (type: string): ProviderDef[] => catalog.value?.providers[ty
 const providerLabel = (type: string, provider: string) =>
   providersOf(type).find((item) => item.provider === provider)?.label ?? provider;
 const modelsOf = (type: string) => models.value.filter((m) => m.model_type === type);
+const supported = (model: Model) => providersOf(model.model_type).some((p) => p.provider === model.provider);
+const configOf = (model: Model): Record<string, unknown> => {
+  try {
+    return JSON.parse(model.config_json) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+};
+const hasVision = (model: Model) => configOf(model)['vision'] === true;
 const currentProvider = computed<ProviderDef | undefined>(() =>
   draft.value ? providersOf(draft.value.model_type).find((p) => p.provider === draft.value!.provider) : undefined,
 );
+
+/** 已经填过的百炼密钥:新建千问模型时直接带上,不用再抄一遍 */
+function bailianKey(): Record<string, string> {
+  const source = models.value.find((m) => ['qwen_audio_tts', 'qwen_audio_asr', 'qwen_image'].includes(m.provider) && configOf(m)['api_key']);
+  if (!source) return {};
+  const config = configOf(source);
+  return Object.fromEntries(['api_key', 'workspace_id', 'base_url']
+    .filter((key) => typeof config[key] === 'string' && config[key])
+    .map((key) => [key, String(config[key])]));
+}
+const prefilled = ref(false);
 
 function openCreate(type: string) {
   const provider = providersOf(type)[0];
   const config: Record<string, string> = {};
   for (const field of provider?.fields ?? []) config[field.key] = String(field.default ?? '');
+  const key = type === 'LLM' ? {} : bailianKey();
+  Object.assign(config, key);
+  prefilled.value = Object.keys(key).length > 0;
+  const suggested = ({ LLM: 'LLM_DeepSeek', ASR: 'ASR_Qwen', TTS: 'TTS_Qwen', Image: 'Image_Qwen' } as Record<string, string>)[type] ?? `${type}_`;
   draft.value = {
-    id: `${type}_`, model_type: type, name: '', provider: provider?.provider ?? '',
+    id: models.value.some((m) => m.id === suggested) ? `${type}_` : suggested, model_type: type, name: '', provider: provider?.provider ?? '',
     config, remark: '', enabled: true, creating: true,
   };
   revealed.value = {};
@@ -98,6 +119,7 @@ function openEdit(model: Model) {
     id: model.id, model_type: model.model_type, name: model.name, provider: model.provider,
     config, remark: model.remark, enabled: model.enabled === 1, creating: false,
   };
+  prefilled.value = false;
   revealed.value = {};
   draftError.value = '';
 }
@@ -129,7 +151,7 @@ async function save() {
   for (const field of fields) {
     const raw = d.config[field.key] ?? '';
     if (raw === '') continue;
-    config[field.key] = field.type === 'number' && Number.isFinite(Number(raw)) ? Number(raw) : raw;
+    config[field.key] = field.type === 'number' && Number.isFinite(Number(raw)) ? Number(raw) : field.type === 'boolean' ? raw === 'true' : raw;
   }
   const payload = {
     id: d.id, model_type: d.model_type, name: d.name.trim() || d.id,
@@ -156,6 +178,20 @@ async function setDefault(model: Model) {
     await load();
   } catch (e) {
     toastError(e);
+  }
+}
+
+const testing = ref('');
+const testResult = ref<Record<string, { text: string; preview?: string }>>({});
+async function testImage(model: Model) {
+  testing.value = model.id;
+  try {
+    const result = await api.post<{ ms: number; preview: string }>('/images/test', { model_id: model.id });
+    testResult.value = { ...testResult.value, [model.id]: { text: `可用 · ${(result.ms / 1000).toFixed(1)} 秒`, preview: result.preview } };
+  } catch (e) {
+    testResult.value = { ...testResult.value, [model.id]: { text: `失败:${(e as Error).message}` } };
+  } finally {
+    testing.value = '';
   }
 }
 
@@ -216,14 +252,24 @@ async function remove(model: Model) {
               {{ model.name }}
               <span v-if="model.is_default" class="tag sky">默认</span>
               <span v-if="model.enabled === 0" class="tag">已停用</span>
+              <span v-if="!supported(model)" class="tag danger" title="现在只支持千问(百炼)的语音与文生图">已不支持</span>
+              <span v-if="type === 'LLM' && hasVision(model)" class="tag violet">支持看图</span>
             </div>
-            <div class="cell-sub"><span class="chip-mono">{{ model.id }}</span> · {{ providerLabel(type, model.provider) }}</div>
+            <div class="cell-sub">
+              <span class="chip-mono">{{ model.id }}</span> · {{ providerLabel(type, model.provider) }}
+              <template v-if="configOf(model)['model_name']"> · {{ configOf(model)['model_name'] }}</template>
+              <template v-if="testResult[model.id]"> · {{ testResult[model.id]!.text }}</template>
+            </div>
+            <img v-if="testResult[model.id]?.preview" :src="testResult[model.id]!.preview" alt="设备上的像素画预览" style="width: 128px; height: 128px; image-rendering: pixelated; border-radius: 8px; margin-top: 8px" />
           </div>
           <div class="row" style="gap: 2px">
-            <button v-if="!model.is_default" class="btn btn-ghost btn-sm" type="button" @click="setDefault(model)">
+            <button v-if="type === 'Image' && supported(model)" class="btn btn-ghost btn-sm" type="button" :aria-busy="testing === model.id" @click="testImage(model)">
+              <AppIcon name="zap" :size="14" /><span>画一张试试</span>
+            </button>
+            <button v-if="!model.is_default && supported(model)" class="btn btn-ghost btn-sm" type="button" @click="setDefault(model)">
               <AppIcon name="star" :size="14" /><span>设为默认</span>
             </button>
-            <button class="btn btn-ghost btn-sm" type="button" @click="openEdit(model)">
+            <button v-if="supported(model)" class="btn btn-ghost btn-sm" type="button" @click="openEdit(model)">
               <AppIcon name="pencil" :size="14" /><span>编辑</span>
             </button>
             <button class="btn btn-ghost btn-sm danger" type="button" @click="remove(model)">
@@ -236,7 +282,10 @@ async function remove(model: Model) {
 
     <div class="callout info">
       <AppIcon name="info" :size="18" />
-      <div class="callout-body">音色(系统音色、声音设计、声音复刻)在 <RouterLink to="/voices">音色</RouterLink> 页管理。</div>
+      <div class="callout-body">
+        音色(系统音色、复刻、设计)与说话方式(音量、语速、方言、语气)在 <RouterLink to="/voices">音色</RouterLink> 页管理。
+        工具、记忆、切换角色这些能力在 <RouterLink to="/agents">智能体</RouterLink> 里按角色勾选。
+      </div>
     </div>
   </template>
 
@@ -252,7 +301,7 @@ async function remove(model: Model) {
         <label class="field">
           <span class="field-label">标识<span class="req">*</span></span>
           <input v-model="draft.id" class="input mono" type="text" :disabled="!draft.creating" />
-          <span class="field-hint">会原样出现在引擎日志里,建议写成 {{ draft.model_type }}_XxxGateway 这样。</span>
+          <span class="field-hint">创建后不能改,会出现在引擎日志里。</span>
         </label>
         <label class="field">
           <span class="field-label">显示名称</span>
@@ -267,6 +316,9 @@ async function remove(model: Model) {
       </div>
       <div v-if="currentProvider?.note" class="callout info" style="margin: 0">
         <AppIcon name="info" :size="18" /><div class="callout-body">{{ currentProvider.note }}</div>
+      </div>
+      <div v-if="prefilled" class="callout ok" style="margin: 0">
+        <AppIcon name="check" :size="18" /><div class="callout-body">已带上语音模型那把百炼 API Key 与业务空间,不用再填。</div>
       </div>
       <div v-if="currentProvider?.fields.length" class="form-grid">
         <label v-for="field in currentProvider.fields" :key="field.key" class="field">
@@ -287,6 +339,13 @@ async function remove(model: Model) {
             v-else-if="field.type === 'text'" v-model="draft.config[field.key]" class="textarea" rows="3"
             :placeholder="String(field.default ?? '')"
           ></textarea>
+          <select v-else-if="field.type === 'select'" v-model="draft.config[field.key]" class="select">
+            <option v-for="option in field.options ?? []" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+          <SwitchToggle
+            v-else-if="field.type === 'boolean'" :model-value="draft.config[field.key] === 'true'"
+            @update:model-value="draft.config[field.key] = $event ? 'true' : 'false'"
+          />
           <input
             v-else v-model="draft.config[field.key]" class="input" :type="field.type === 'number' ? 'number' : 'text'"
             :placeholder="String(field.default ?? '')"

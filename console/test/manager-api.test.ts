@@ -57,15 +57,12 @@ function agentModels(mac: string, selectedModule: Record<string, string> = {}, c
   });
 }
 
-/** 配齐一套可用的模型与智能体,模拟真实部署。 */
-function seedGateway(): void {
+/** 配齐一套可用的模型与智能体,模拟真实部署:识别与合成走千问,对话模型是 OpenAI 兼容接口。 */
+function seedQwen(): void {
   const models: [string, string, string, Record<string, unknown>][] = [
-    ['ASR_Gateway', 'ASR', 'gateway_chat',
-      { type: 'gateway_chat', base_url: 'https://gw.example/v1', model_name: 'asr-x', api_key: 'k-asr' }],
-    ['LLM_Gateway', 'LLM', 'openai',
-      { type: 'openai', base_url: 'https://gw.example/v1', model_name: 'llm-x', api_key: 'k-llm', max_tokens: 1200 }],
-    ['TTS_Gateway', 'TTS', 'gateway_omni_tts',
-      { type: 'gateway_omni_tts', base_url: 'https://gw.example/v1', model_name: 'tts-x', api_key: 'k-tts', voice: 'Ethan' }],
+    ['ASR_Qwen', 'ASR', 'qwen_audio_asr', { type: 'qwen_audio_asr', api_key: 'k-asr', workspace_id: 'ws' }],
+    ['LLM_DS', 'LLM', 'openai', { type: 'openai', base_url: 'https://api.deepseek.com', model_name: 'deepseek-chat', api_key: 'k-llm' }],
+    ['TTS_Qwen', 'TTS', 'qwen_audio_tts', { type: 'qwen_audio_tts', api_key: 'k-tts', workspace_id: 'ws', model_name: 'qwen-audio-3.0-tts-flash' }],
   ];
   for (const [id, type, provider, config] of models) {
     run(conn,
@@ -73,12 +70,10 @@ function seedGateway(): void {
        VALUES (?, ?, ?, ?, ?, 1, 1)`,
       id, type, id, provider, JSON.stringify(config));
   }
-  run(conn, 'INSERT INTO voices (id, tts_model_id, name, voice, languages) VALUES (?,?,?,?,?)',
-    'voice_ethan', 'TTS_Gateway', 'Ethan', 'Ethan', '中文、粤语');
   run(conn,
-    `UPDATE agents SET asr_model_id = 'ASR_Gateway', llm_model_id = 'LLM_Gateway',
-                       tts_model_id = 'TTS_Gateway', tts_voice_id = 'voice_ethan'
-     WHERE id = ?`, DEFAULT_AGENT_ID);
+    `INSERT INTO voices (id, tts_model_id, name, voice, languages, language, dialect, volume, rate, pitch, tone_tags, tone_text, emotion_tags)
+     VALUES ('voice_kid', 'TTS_Qwen', '泡泡·童童', 'longpaopao_v3.6', '中文、英语', '中文', '四川话', 70, 0.9, 1, '["gentle"]', '带点笑意', '["excited","laughing"]')`);
+  run(conn, "UPDATE agents SET asr_model_id = 'ASR_Qwen', llm_model_id = 'LLM_DS', tts_voice_id = 'voice_kid' WHERE id = ?", DEFAULT_AGENT_ID);
 }
 
 /** 模拟一台已经用绑定码绑好的设备:库里存的是它密钥的哈希。 */
@@ -167,7 +162,7 @@ describe('server-base:服务端启动时拉的基础配置', () => {
   });
 
   test('不下发带密钥的 LLM/TTS —— 那些要按设备区分', async () => {
-    seedGateway();
+    seedQwen();
     const { json } = await call('/config/server-base');
     const data = json.data as Record<string, unknown>;
     assert.equal(data['LLM'], undefined);
@@ -264,60 +259,76 @@ describe('agent-models:设备身份', () => {
 });
 
 describe('agent-models:下发的配置', () => {
-  test('已绑定设备拿到完整的模块配置', async () => {
-    seedGateway();
+  test('已绑定设备拿到完整的模块配置;大脑一律在控制塔', async () => {
+    seedQwen();
     bindDevice('aa:bb:cc:dd:ee:10');
     const { json } = await agentModels('aa:bb:cc:dd:ee:10');
     assert.equal(json.code, 0);
     const data = json.data as Record<string, any>;
 
     // 每个类型都是 { 模型id: 配置 } —— 服务端用 selected_module 的值去这里取。
-    assert.equal(data['LLM']['LLM_Gateway']['api_key'], 'k-llm');
-    assert.equal(data['ASR']['ASR_Gateway']['type'], 'gateway_chat');
-    assert.equal(data['TTS']['TTS_Gateway']['type'], 'gateway_omni_tts');
-    assert.equal(data['selected_module']['LLM'], 'LLM_Gateway');
-    assert.equal(data['selected_module']['ASR'], 'ASR_Gateway');
-    assert.equal(data['selected_module']['TTS'], 'TTS_Gateway');
+    assert.equal(data['ASR']['ASR_Qwen']['type'], 'qwen_audio_asr');
+    assert.equal(data['TTS']['TTS_Qwen']['type'], 'qwen_audio_tts');
+    assert.equal(data['selected_module']['ASR'], 'ASR_Qwen');
+    assert.equal(data['selected_module']['TTS'], 'TTS_Qwen');
+    assert.equal(data['selected_module']['VAD'], 'VAD_SileroVAD');
+    // 对话模型的密钥不下发给引擎:引擎的 LLM 是转发到控制塔的 xiaodan_agent
+    assert.deepEqual(Object.keys(data['LLM']), ['LLM_XiaodanAgent']);
+    assert.equal(data['selected_module']['LLM'], 'LLM_XiaodanAgent');
+    assert.equal(data['selected_module']['Intent'], 'Intent_nointent');
+    assert.equal(data['VLLM'], undefined, '视觉模型类型已经没有了');
+    assert.equal(data['plugins'], undefined, '工具在控制塔里跑,不下发给引擎');
   });
 
-  test('智能体选的音色写进 TTS 配置的 private_voice', async () => {
-    // 服务端的 TTS provider 一律优先读 private_voice,读不到才回落 voice。
-    seedGateway();
+  test('音色自带的说话设置合进千问合成配置', async () => {
+    seedQwen();
     bindDevice('aa:bb:cc:dd:ee:11');
     const { json } = await agentModels('aa:bb:cc:dd:ee:11');
-    const tts = (json.data as any)['TTS']['TTS_Gateway'];
-    assert.equal(tts['private_voice'], 'Ethan');
-    assert.equal(tts['language'], '中文', '语言取音色支持列表的第一个');
+    const tts = (json.data as any)['TTS']['TTS_Qwen'];
+    assert.equal(tts['private_voice'], 'longpaopao_v3.6');
+    assert.equal(tts['volume'], 70);
+    assert.equal(tts['rate'], 0.9);
+    assert.equal(tts['pitch'], 1);
+    assert.equal(tts['instruction'], '请用四川话表达,语气温柔,带点笑意', '方言、固定语气与补充说明合成语气指令');
+    assert.deepEqual(tts['inline_tags'], ['excited', 'laughing']);
+    assert.equal(tts['language'], undefined, '合成没有语种参数,不再下发');
+  });
+
+  test('音色用不了时退到默认千问合成模型的默认音色', async () => {
+    seedQwen();
+    bindDevice('aa:bb:cc:dd:ee:1b');
+    run(conn, "UPDATE voices SET status = 'pending' WHERE id = 'voice_kid'");
+    let tts = (await agentModels('aa:bb:cc:dd:ee:1b')).json.data as any;
+    assert.equal(tts['TTS']['TTS_Qwen']['private_voice'], 'longanhuan_v3.6', '审核中的音色不下发');
+    assert.equal(tts['TTS']['TTS_Qwen']['instruction'], undefined);
+
+    // plus 模型的音色不能拿去给 flash 合成
+    run(conn, "UPDATE voices SET status = 'ok', voice = 'longanlingxin' WHERE id = 'voice_kid'");
+    tts = (await agentModels('aa:bb:cc:dd:ee:1b')).json.data as any;
+    assert.equal(tts['TTS']['TTS_Qwen']['private_voice'], 'longanhuan_v3.6');
   });
 
   test('服务端已实例化同一个 VAD/ASR 时不重复下发', async () => {
     // VAD 要加载模型文件,重载代价高。上游用同样的省略策略,服务端那边
     // 的 check_vad_update 也是靠"键在不在"判断要不要重建。
-    seedGateway();
+    seedQwen();
     bindDevice('aa:bb:cc:dd:ee:12');
-    const { json } = await agentModels('aa:bb:cc:dd:ee:12', { VAD: 'VAD_SileroVAD', ASR: 'ASR_Gateway' });
+    const { json } = await agentModels('aa:bb:cc:dd:ee:12', { VAD: 'VAD_SileroVAD', ASR: 'ASR_Qwen' });
     const data = json.data as Record<string, unknown>;
     assert.equal(data['VAD'], undefined, '相同的 VAD 应被省略');
     assert.equal(data['ASR'], undefined, '相同的 ASR 应被省略');
     assert.equal((data['selected_module'] as any)['VAD'], undefined, '省略的类型也不应出现在 selected_module');
-    assert.ok(data['LLM'], '其余类型照常下发');
+    assert.ok(data['TTS'], '其余类型照常下发');
   });
 
-  test('服务端持有的是别的模型时照常下发', async () => {
-    seedGateway();
+  test('服务端持有的是别的模型时照常下发;智能体没选识别模型时用默认的', async () => {
+    seedQwen();
+    run(conn, 'UPDATE agents SET asr_model_id = NULL WHERE id = ?', DEFAULT_AGENT_ID);
     bindDevice('aa:bb:cc:dd:ee:13');
     const { json } = await agentModels('aa:bb:cc:dd:ee:13', { VAD: 'VAD_SomethingElse', ASR: 'ASR_SomethingElse' });
     const data = json.data as Record<string, any>;
     assert.ok(data['VAD'], '不同的 VAD 必须下发');
-    assert.ok(data['ASR'], '不同的 ASR 必须下发');
-  });
-
-  test('人设里的 {{assistant_name}} 被替换成智能体名', async () => {
-    run(conn, 'UPDATE agents SET system_prompt = ?, name = ? WHERE id = ?',
-      '你叫{{assistant_name}},是一个助手。', '小单', DEFAULT_AGENT_ID);
-    bindDevice('aa:bb:cc:dd:ee:14');
-    const { json } = await agentModels('aa:bb:cc:dd:ee:14');
-    assert.equal((json.data as any)['prompt'], '你叫小单,是一个助手。');
+    assert.ok(data['ASR']['ASR_Qwen'], '没选时用默认识别模型');
   });
 
   test('chat_history_conf 是数字,device_max_output_size 是字符串', async () => {
@@ -327,91 +338,8 @@ describe('agent-models:下发的配置', () => {
     bindDevice('aa:bb:cc:dd:ee:15');
     const { json } = await agentModels('aa:bb:cc:dd:ee:15');
     const data = json.data as Record<string, unknown>;
-    assert.equal(typeof data['chat_history_conf'], 'number');
+    assert.equal(data['chat_history_conf'], 0, '对话记录由控制塔自己写,引擎不再上报');
     assert.equal(typeof data['device_max_output_size'], 'string');
-  });
-
-  test('nointent 模式下不下发插件', async () => {
-    // 服务端会把 plugins 的键展开成可调函数列表。在 nointent 模式下送过去,
-    // 它会注册出一堆根本调不动的工具。新库的默认智能体勾着插件,这里显式切到 nointent。
-    run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_nointent', DEFAULT_AGENT_ID);
-    bindDevice('aa:bb:cc:dd:ee:16');
-    assert.ok(one(conn, 'SELECT 1 FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID), '前提:智能体勾选了插件');
-    const { json } = await agentModels('aa:bb:cc:dd:ee:16');
-    assert.equal((json.data as any)['plugins'], undefined);
-  });
-
-  test('function_call 模式下插件值是 JSON 字符串而不是对象', async () => {
-    // 服务端拿到后会自己 json.loads 一次(connection.py 的
-    // `plugin_from_server[plugin] = json.loads(config_str)`)。
-    // 如果这里直接给对象,那句会抛 TypeError,插件全部加载失败。
-    bindDevice('aa:bb:cc:dd:ee:17');
-    run(conn, 'DELETE FROM agent_plugins WHERE agent_id = ?', DEFAULT_AGENT_ID);
-    run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
-      DEFAULT_AGENT_ID, 'get_weather', '{"default_location":"广州","hold_s":"30"}');
-
-    const { json } = await agentModels('aa:bb:cc:dd:ee:17');
-    const plugins = (json.data as any)['plugins'];
-    assert.ok(plugins, '应下发 plugins');
-    assert.equal(typeof plugins['get_weather'], 'string', '值必须是字符串');
-    assert.deepEqual(JSON.parse(plugins['get_weather']), { default_location: '广州', hold_s: '30' });
-  });
-
-  test('新库的默认智能体开启函数调用,并带三个会在屏幕上显示画面的插件', async () => {
-    // 不需要参数的插件也要下发 "{}":服务端用 plugins 的键决定开启哪些函数
-    // (connection.py 的 `functions = plugin_from_server.keys()`),漏掉键就等于没勾。
-    bindDevice('aa:bb:cc:dd:ee:19');
-    const { json } = await agentModels('aa:bb:cc:dd:ee:19');
-    const data = json.data as any;
-    assert.equal(data['selected_module']['Intent'], 'Intent_function_call');
-    assert.equal(data['Intent']['Intent_function_call']['type'], 'function_call');
-    assert.deepEqual(data['plugins'], { show_calendar: '{}', get_weather: '{}', set_volume: '{}' });
-  });
-
-  test('目录里已移除的旧插件行不下发', async () => {
-    // 早先的目录有个 get_time,它并不对应引擎里的任何函数,生产库里可能还留着这一行。
-    bindDevice('aa:bb:cc:dd:ee:1a');
-    run(conn, 'INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?,?,?)',
-      DEFAULT_AGENT_ID, 'get_time', '{}');
-    const { json } = await agentModels('aa:bb:cc:dd:ee:1a');
-    const plugins = (json.data as any)['plugins'];
-    assert.equal(plugins['get_time'], undefined);
-    assert.equal(plugins['show_calendar'], '{}');
-  });
-
-  test('Intent 的 functions 由分号串拆成数组', async () => {
-    run(conn,
-      `INSERT INTO models (id, model_type, name, provider, config_json, is_default, enabled)
-       VALUES ('Intent_fc2', 'Intent', 'fc', 'function_call', ?, 0, 1)`,
-      JSON.stringify({ type: 'function_call', functions: 'get_time;get_weather;web_search' }));
-    run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_fc2', DEFAULT_AGENT_ID);
-    bindDevice('aa:bb:cc:dd:ee:18');
-
-    const { json } = await agentModels('aa:bb:cc:dd:ee:18');
-    const intent = (json.data as any)['Intent']['Intent_fc2'];
-    assert.deepEqual(intent['functions'], ['get_time', 'get_weather', 'web_search']);
-  });
-
-  test('意图模型挂的辅助 LLM 会一并下发,且不覆盖主 LLM', async () => {
-    // 服务端按 id 去 config["LLM"] 里找这个辅助模型。找不到就静默回落到主 LLM,
-    // 行为不对却不报错 —— 正是这种问题最难查。
-    seedGateway();
-    run(conn,
-      `INSERT INTO models (id, model_type, name, provider, config_json, is_default, enabled)
-       VALUES ('LLM_Small', 'LLM', '小模型', 'openai', ?, 0, 1)`,
-      JSON.stringify({ type: 'openai', base_url: 'https://gw.example/v1', model_name: 'small', api_key: 'k-small' }));
-    run(conn,
-      `INSERT INTO models (id, model_type, name, provider, config_json, is_default, enabled)
-       VALUES ('Intent_llm', 'Intent', '意图', 'intent_llm', ?, 0, 1)`,
-      JSON.stringify({ type: 'intent_llm', llm: 'LLM_Small' }));
-    run(conn, 'UPDATE agents SET intent_model_id = ? WHERE id = ?', 'Intent_llm', DEFAULT_AGENT_ID);
-    bindDevice('aa:bb:cc:dd:ee:19');
-
-    const { json } = await agentModels('aa:bb:cc:dd:ee:19');
-    const llm = (json.data as any)['LLM'];
-    assert.ok(llm['LLM_Small'], '辅助模型必须在 LLM 段里');
-    assert.ok(llm['LLM_Gateway'], '主模型不能被覆盖掉');
-    assert.equal((json.data as any)['selected_module']['LLM'], 'LLM_Gateway', '选中的仍是主模型');
   });
 
   test('缺少 macAddress 时不崩,返回 10041', async () => {

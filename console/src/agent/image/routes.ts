@@ -6,6 +6,8 @@ import { Hono } from 'hono';
 import { all, one, run } from '../../db.ts';
 import type { AgentDeps } from '../types.ts';
 import { imageMessages, type Color } from './pixel.ts';
+import { generateQwenImage } from './providers.ts';
+import { imageModel, pixelateInWorker } from './run.ts';
 
 interface ImageRow {
   id: number;
@@ -43,6 +45,22 @@ export function imageRoutes(deps: AgentDeps): Hono {
   });
 
   app.get('/:id/pixel', (c) => file(c.req.param('id'), '.pixel.png', 'image/png'));
+
+  /** 测试一个文生图模型:画一张小图并像素化,返回耗时与像素预览(模型页用) */
+  app.post('/test', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { model_id?: unknown };
+    const modelId = typeof body.model_id === 'string' ? body.model_id : '';
+    const model = modelId ? imageModel(deps, modelId) : undefined;
+    if (!model || model.id !== modelId) return c.json({ error: '文生图模型不存在或已停用' }, 404);
+    try {
+      const started = Date.now();
+      const outcome = await generateQwenImage(deps.fetch, model.config, '一只可爱的小猫坐在草地上,卡通风格,画面简洁');
+      const art = await pixelateInWorker(outcome.bytes);
+      return c.json({ ok: true, ms: Date.now() - started, bytes: outcome.bytes.length, preview: `data:image/png;base64,${art.preview.toString('base64')}` });
+    } catch (error) {
+      return c.json({ error: (error as Error).message }, 502);
+    }
+  });
 
   /** 重新发到一台在线设备的屏幕上 */
   app.post('/:id/send', async (c) => {

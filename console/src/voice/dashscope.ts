@@ -57,9 +57,9 @@ export function targetModel(config: DashscopeConfig): string {
   return text(config.model_name) || DEFAULT_TTS_MODEL;
 }
 
-function headers(config: DashscopeConfig, extra: Record<string, string> = {}): Record<string, string> {
+export function dashscopeHeaders(config: DashscopeConfig, extra: Record<string, string> = {}): Record<string, string> {
   const apiKey = text(config.api_key);
-  if (!apiKey) throw new DashscopeError('这个语音合成模型还没有填百炼 API Key', 400);
+  if (!apiKey) throw new DashscopeError('这个模型还没有填百炼 API Key', 400);
   const result: Record<string, string> = { Authorization: `Bearer ${apiKey}`, ...extra };
   const workspace = text(config.workspace_id);
   if (workspace && !text(config.base_url)) result['X-DashScope-WorkSpace'] = workspace;
@@ -92,7 +92,7 @@ async function post(
   try {
     response = await fetchImpl(url, {
       method: 'POST',
-      headers: headers(config, { 'Content-Type': 'application/json', ...extraHeaders }),
+      headers: dashscopeHeaders(config, { 'Content-Type': 'application/json', ...extraHeaders }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -223,7 +223,7 @@ export interface DesignResult {
 /** 声音设计:用一段文字描述生成音色,同时返回一段试听。 */
 export async function designVoice(
   fetchImpl: FetchLike, config: DashscopeConfig,
-  options: { prompt: string; previewText: string; prefix?: string; language?: 'zh' | 'en' },
+  options: { prompt: string; previewText: string; prefix?: string; language?: string },
 ): Promise<DesignResult> {
   const data = await enrollment(
     fetchImpl, config,
@@ -248,7 +248,7 @@ export async function designVoice(
 /** 声音复刻:样本必须是百炼能访问的地址(公网 https 或临时上传得到的 oss://)。 */
 export async function cloneVoice(
   fetchImpl: FetchLike, config: DashscopeConfig,
-  options: { url: string; prefix?: string; language?: 'zh' | 'en' },
+  options: { url: string; prefix?: string; language?: string },
 ): Promise<string> {
   const oss = options.url.startsWith('oss://');
   const data = await enrollment(
@@ -288,7 +288,7 @@ export async function uploadTemporary(
   const url = `${httpBase(config)}/api/v1/uploads?action=getPolicy&model=${encodeURIComponent(options.model)}`;
   try {
     response = await fetchImpl(url, {
-      headers: headers(config, { 'Content-Type': 'application/json' }),
+      headers: dashscopeHeaders(config, { 'Content-Type': 'application/json' }),
       signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {

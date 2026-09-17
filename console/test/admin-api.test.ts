@@ -120,18 +120,18 @@ describe('模型', () => {
     // 命令行从旧配置导入的模型常带目录里没有的键(如 pcm_sample_rate)。
     // 表单只提交目录字段,整体覆盖会把它们悄悄抹掉,合成就会用错采样率。
     run(conn,
-      `INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Keep', 'TTS', '合成', 'gateway_omni_tts', ?)`,
-      JSON.stringify({ type: 'gateway_omni_tts', base_url: 'https://old/v1', api_key: 'k-old', voice: 'Ethan', pcm_sample_rate: 24000 }));
+      `INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Keep', 'TTS', '合成', 'qwen_audio_tts', ?)`,
+      JSON.stringify({ type: 'qwen_audio_tts', base_url: 'https://old', api_key: 'k-old', workspace_id: 'ws-old', recv_timeout: 20 }));
     const response = await api('PUT', '/models/TTS_Keep', {
-      model_type: 'TTS', name: '合成', provider: 'gateway_omni_tts',
-      config: { base_url: 'https://new/v1', api_key: 'k-new', model_name: 'omni' },
+      model_type: 'TTS', name: '合成', provider: 'qwen_audio_tts',
+      config: { base_url: 'https://new', api_key: 'k-new', model_name: 'qwen-audio-3.0-tts-flash' },
     });
     assert.equal(response.status, 200);
     const config = JSON.parse(one<{ config_json: string }>(conn, "SELECT config_json FROM models WHERE id = 'TTS_Keep'")!.config_json);
-    assert.equal(config.pcm_sample_rate, 24000, '目录之外的键要保留');
-    assert.equal(config.base_url, 'https://new/v1', '目录字段按提交值更新');
-    assert.equal(config.voice, undefined, '目录字段没有提交就是清除');
-    assert.equal(config.type, 'gateway_omni_tts');
+    assert.equal(config.recv_timeout, 20, '目录之外的键要保留');
+    assert.equal(config.base_url, 'https://new', '目录字段按提交值更新');
+    assert.equal(config.workspace_id, undefined, '目录字段没有提交就是清除');
+    assert.equal(config.type, 'qwen_audio_tts');
   });
 
   test('目录里没有引擎镜像已经去掉的本地识别', async () => {
@@ -149,6 +149,60 @@ describe('模型', () => {
     const response = await api('DELETE', '/models/VAD_SileroVAD');
     assert.equal(response.status, 409);
   });
+
+  test('模型页只有四类:对话、识别、合成、文生图;语音全走千问,工具调用与视觉不再是模型', async () => {
+    const catalog = await json(await api('GET', '/catalog'));
+    assert.deepEqual(catalog.modelTypes, ['LLM', 'ASR', 'TTS', 'Image']);
+    assert.deepEqual(Object.fromEntries(catalog.modelTypes.map((type: string) => [type, catalog.providers[type].map((p: any) => p.provider)])), {
+      LLM: ['openai'], ASR: ['qwen_audio_asr'], TTS: ['qwen_audio_tts'], Image: ['qwen_image'],
+    });
+    assert.equal(catalog.providers.LLM[0].fields.find((f: any) => f.key === 'vision').type, 'boolean');
+    assert.equal(catalog.providers.TTS[0].fields.some((f: any) => f.key === 'voice'), false, '音色在音色页选,不在模型上');
+    assert.deepEqual(catalog.providers.TTS[0].fields.find((f: any) => f.key === 'model_name').options.map((o: any) => o.value),
+      ['qwen-audio-3.0-tts-flash', 'qwen-audio-3.0-tts-plus']);
+    assert.ok(catalog.voice.dialects.includes('四川话'));
+    assert.ok(catalog.plugins.every((p: any) => typeof p.group === 'string' && !('runtime' in p)));
+  });
+
+  test('下拉只收列出的值,开关存成布尔', async () => {
+    let response = await api('POST', '/models', {
+      id: 'Image_Bad', model_type: 'Image', name: 'x', provider: 'qwen_image', config: { api_key: 'k', model_name: 'dall-e-3' },
+    });
+    assert.equal(response.status, 400);
+    assert.match((await json(response)).error, /不能选 dall-e-3/u);
+
+    response = await api('POST', '/models', {
+      id: 'Image_Qwen', model_type: 'Image', name: '文生图', provider: 'qwen_image',
+      config: { api_key: 'k', model_name: 'wan2.7-image', size: '1280*1280', prompt_extend: 'true' },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(JSON.parse(one<{ config_json: string }>(conn, "SELECT config_json FROM models WHERE id = 'Image_Qwen'")!.config_json), {
+      api_key: 'k', model_name: 'wan2.7-image', size: '1280*1280', prompt_extend: true, type: 'qwen_image',
+    });
+    await api('POST', '/models', { id: 'LLM_V', model_type: 'LLM', name: 'v', provider: 'openai', config: { vision: 1 } });
+    assert.equal(JSON.parse(one<{ config_json: string }>(conn, "SELECT config_json FROM models WHERE id = 'LLM_V'")!.config_json).vision, true);
+    assert.equal((await api('POST', '/models', { id: 'Memory_x', model_type: 'Memory', name: 'x', provider: 'nomem', config: {} })).status, 400);
+  });
+
+  test('加了千问合成就补齐系统音色、给没音色的智能体绑默认音色;有人在用时不许在 flash 与 plus 之间切换', async () => {
+    const tts = (modelName: string) => ({ model_type: 'TTS', name: '千问合成', provider: 'qwen_audio_tts', config: { api_key: 'k', model_name: modelName } });
+    assert.equal((await api('POST', '/models', { id: 'TTS_Q', ...tts('qwen-audio-3.0-tts-flash') })).status, 200);
+    assert.equal(one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM voices WHERE tts_model_id = 'TTS_Q'")!.n, 12);
+    assert.equal(one<{ tts_voice_id: string }>(conn, 'SELECT tts_voice_id FROM agents WHERE id = ?', DEFAULT_AGENT_ID)?.tts_voice_id,
+      'TTS_Q__longanhuan_v3.6');
+
+    let response = await api('PUT', '/models/TTS_Q', tts('qwen-audio-3.0-tts-plus'));
+    assert.equal(response.status, 409);
+    assert.match((await json(response)).error, /flash 与 plus 的音色不能混用/u);
+    assert.equal((await api('PUT', '/models/TTS_Q', tts('qwen-audio-3.0-tts-flash'))).status, 200, '同一套里改别的字段照常');
+    assert.equal((await api('DELETE', '/models/TTS_Q')).status, 409, '智能体选的音色属于它,就算在用');
+
+    run(conn, 'UPDATE agents SET tts_voice_id = NULL');
+    run(conn, "DELETE FROM voices WHERE tts_model_id = 'TTS_Q'");
+    assert.equal((await api('PUT', '/models/TTS_Q', tts('qwen-audio-3.0-tts-plus'))).status, 200);
+    assert.deepEqual(conn.prepare("SELECT voice FROM voices WHERE tts_model_id = 'TTS_Q' ORDER BY voice").all().map((row: any) => row.voice),
+      ['longanlingxin', 'longanlufeng']);
+  });
 });
 
 describe('智能体', () => {
@@ -162,6 +216,30 @@ describe('智能体', () => {
     run(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', 'aa:bb:cc:dd:ee:01', created.id);
     const response = await api('DELETE', `/agents/${created.id}`);
     assert.equal(response.status, 409);
+  });
+
+  test('音色 id 带点也能保存;引用的模型类型与音色都要对得上', async () => {
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('TTS_Qwen', 'TTS', 'q', 'qwen_audio_tts', '{}')");
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('LLM_A', 'LLM', 'a', 'openai', '{}')");
+    run(conn, "INSERT INTO models (id, model_type, name, provider, config_json) VALUES ('Image_Q', 'Image', 'i', 'qwen_image', '{}')");
+    run(conn, "INSERT INTO voices (id, tts_model_id, name, voice) VALUES ('TTS_Qwen__longpaopao_v3.6', 'TTS_Qwen', '龙泡泡', 'longpaopao_v3.6')");
+    const put = (patch: Record<string, unknown>) => api('PUT', `/agents/${DEFAULT_AGENT_ID}`, { name: '小单', ...patch });
+
+    let response = await put({ tts_voice_id: 'TTS_Qwen__longpaopao_v3.6', llm_model_id: 'LLM_A', image_model_id: 'Image_Q', chat_history_conf: 0 });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.deepEqual({ ...one(conn, 'SELECT tts_voice_id, image_model_id, chat_history_conf FROM agents WHERE id = ?', DEFAULT_AGENT_ID) },
+      { tts_voice_id: 'TTS_Qwen__longpaopao_v3.6', image_model_id: 'Image_Q', chat_history_conf: 0 });
+
+    response = await put({ image_model_id: 'LLM_A' });
+    assert.equal(response.status, 400);
+    assert.match((await json(response)).error, /文生图模型不存在/u);
+    assert.equal((await put({ tts_voice_id: 'nope' })).status, 400);
+    assert.equal((await put({ chat_history_conf: 2 })).status, 400, '只分记与不记');
+
+    // 新建的智能体没选音色时用默认音色
+    const created = await json(await api('POST', '/agents', { name: '新角色' }));
+    assert.deepEqual({ ...one(conn, 'SELECT tts_voice_id, vad_model_id FROM agents WHERE id = ?', created.id) },
+      { tts_voice_id: 'TTS_Qwen__longanhuan_v3.6', vad_model_id: 'VAD_SileroVAD' });
   });
 
   test('插件整体覆盖,且拒绝未知插件', async () => {
