@@ -112,12 +112,32 @@ const pick = (value: unknown, ...path: string[]): unknown => {
   return current;
 };
 
+/**
+ * 百炼返回的结果文件地址(音频、图片)。合成结果放在 OSS 结果桶里,给的是
+ * http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/...:阿里云域名的 http 地址换成 https 再取(签名与协议无关);
+ * 其余只接受 https,防止被诱导去访问内网。不合规时返回 null。
+ */
+export function resultFileUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol === 'https:') return parsed.toString();
+  if (parsed.protocol === 'http:' && parsed.hostname.endsWith('.aliyuncs.com') && !parsed.port) {
+    parsed.protocol = 'https:';
+    return parsed.toString();
+  }
+  return null;
+}
+
 async function download(fetchImpl: FetchLike, url: string): Promise<Buffer> {
-  // 只取百炼给的 https 地址,防止被诱导去访问内网
-  if (!/^https:\/\//u.test(url)) throw new DashscopeError('百炼返回的音频地址不是 https', 502);
+  const safe = resultFileUrl(url);
+  if (!safe) throw new DashscopeError('百炼返回的音频地址不是 https', 502);
   let response: Response;
   try {
-    response = await fetchImpl(url, { signal: AbortSignal.timeout(20_000) });
+    response = await fetchImpl(safe, { signal: AbortSignal.timeout(20_000) });
   } catch (error) {
     throw new DashscopeError(`下载合成音频失败:${(error as Error).message}`, 502);
   }

@@ -78,14 +78,36 @@ const currentProvider = computed<ProviderDef | undefined>(() =>
   draft.value ? providersOf(draft.value.model_type).find((p) => p.provider === draft.value!.provider) : undefined,
 );
 
-/** 已经填过的百炼密钥:新建千问模型时直接带上,不用再抄一遍 */
-function bailianKey(): Record<string, string> {
-  const source = models.value.find((m) => ['qwen_audio_tts', 'qwen_audio_asr', 'qwen_image'].includes(m.provider) && configOf(m)['api_key']);
+const BAILIAN_HOST = /(^|\.)dashscope(-intl)?\.aliyuncs\.com$|\.maas\.aliyuncs\.com$/u;
+const originOf = (value: unknown): string => {
+  try {
+    const url = new URL(String(value ?? ''));
+    return BAILIAN_HOST.test(url.hostname) ? url.origin : '';
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * 已经填过的百炼密钥与业务空间:新建模型时直接带上,不用再抄一遍。
+ * 千问语音与文生图走原生接口,对话模型走同一个业务空间的兼容模式(/compatible-mode/v1)。
+ */
+function bailianKey(type: string): Record<string, string> {
+  const qwen = models.value.find((m) => ['qwen_audio_tts', 'qwen_audio_asr', 'qwen_image'].includes(m.provider) && configOf(m)['api_key']);
+  const llm = models.value.find((m) => m.model_type === 'LLM' && configOf(m)['api_key'] && originOf(configOf(m)['base_url']));
+  const source = qwen ?? llm;
   if (!source) return {};
   const config = configOf(source);
-  return Object.fromEntries(['api_key', 'workspace_id', 'base_url']
-    .filter((key) => typeof config[key] === 'string' && config[key])
-    .map((key) => [key, String(config[key])]));
+  const workspace = typeof config['workspace_id'] === 'string' ? config['workspace_id'] : '';
+  const origin = originOf(config['base_url']) || (workspace ? `https://${workspace}.cn-beijing.maas.aliyuncs.com` : '');
+  if (type === 'LLM') {
+    return origin ? { api_key: String(config['api_key']), base_url: `${origin}/compatible-mode/v1` } : {};
+  }
+  const key: Record<string, string> = { api_key: String(config['api_key']) };
+  if (workspace) key['workspace_id'] = workspace;
+  if (source === qwen && typeof config['base_url'] === 'string' && config['base_url']) key['base_url'] = config['base_url'];
+  else if (source === llm && origin) key['base_url'] = `${origin}/api/v1`;
+  return key;
 }
 const prefilled = ref(false);
 
@@ -93,7 +115,7 @@ function openCreate(type: string) {
   const provider = providersOf(type)[0];
   const config: Record<string, string> = {};
   for (const field of provider?.fields ?? []) config[field.key] = String(field.default ?? '');
-  const key = type === 'LLM' ? {} : bailianKey();
+  const key = bailianKey(type);
   Object.assign(config, key);
   prefilled.value = Object.keys(key).length > 0;
   const suggested = ({ LLM: 'LLM_DeepSeek', ASR: 'ASR_Qwen', TTS: 'TTS_Qwen', Image: 'Image_Qwen' } as Record<string, string>)[type] ?? `${type}_`;
@@ -318,7 +340,7 @@ async function remove(model: Model) {
         <AppIcon name="info" :size="18" /><div class="callout-body">{{ currentProvider.note }}</div>
       </div>
       <div v-if="prefilled" class="callout ok" style="margin: 0">
-        <AppIcon name="check" :size="18" /><div class="callout-body">已带上语音模型那把百炼 API Key 与业务空间,不用再填。</div>
+        <AppIcon name="check" :size="18" /><div class="callout-body">已带上已有模型的百炼 API Key 与业务空间地址,不用再填。</div>
       </div>
       <div v-if="currentProvider?.fields.length" class="form-grid">
         <label v-for="field in currentProvider.fields" :key="field.key" class="field">

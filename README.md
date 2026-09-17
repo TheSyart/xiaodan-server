@@ -248,6 +248,12 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 Speech recognition, speech synthesis and text-to-image all use Alibaba Cloud Model Studio (Qwen) directly, without the model gateway;
 the Models page only offers Qwen for these three types.
 
+Every model can use the same workspace address `https://<workspace>.cn-beijing.maas.aliyuncs.com/api/v1` and the same API key.
+Recognition, synthesis and text-to-image use the native API; chat models use the same workspace's compatible mode, and an address
+entered as `/api/v1` or as the bare host is rewritten to `/compatible-mode/v1`. A new model is prefilled with the key and address of
+an existing one. Synthesis and image results sit in an OSS result bucket and Model Studio returns http URLs; the console upgrades
+http URLs on `*.aliyuncs.com` to https and refuses every other http URL.
+
 - Recognition `qwen_audio_asr`: after the button is released the whole clip is wrapped as WAV and sent to the synchronous
   `qwen-audio-3.0-asr-flash` endpoint, with optional hot words.
 - Synthesis `qwen_audio_tts`: `qwen-audio-3.0-tts-flash` or `qwen-audio-3.0-tts-plus` (their system voices differ and cannot be mixed,

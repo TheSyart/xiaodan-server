@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { openMemoryDb, one, run, type Db } from '../src/db.ts';
 import { DEFAULT_AGENT_ID, seed } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
-import { clampInstruction, httpBase, mapVoiceStatus, voicePrefix } from '../src/voice/dashscope.ts';
+import { clampInstruction, httpBase, mapVoiceStatus, resultFileUrl, voicePrefix } from '../src/voice/dashscope.ts';
 import {
   composeInstruction, DEFAULT_PROFILE, filterInlineTags, instructionUnits, readProfile, stripInlineTags, ttsOverrides, validateProfile,
   type VoiceProfile,
@@ -106,6 +106,18 @@ describe('纯函数', () => {
     assert.equal(sampleUrl('https://a.example/xiaozhi/ota/', 'tok', 'wav'), 'https://a.example/xiaozhi/ota/voice-sample/tok.wav');
     assert.equal(sampleUrl('https://a.example/xiaozhi/ota', 'tok', 'wav'), 'https://a.example/xiaozhi/ota/voice-sample/tok.wav');
     assert.equal(sampleUrl('http://a.example/xiaozhi/ota/', 'tok', 'wav'), null, '百炼只该拿到 https 链接');
+  });
+
+  test('结果文件地址:阿里云 OSS 的 http 地址改走 https,别的 http 与内网地址拒绝', () => {
+    assert.equal(resultFileUrl('http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/a.wav?Expires=1&Signature=x'),
+      'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/a.wav?Expires=1&Signature=x');
+    assert.equal(resultFileUrl('https://cdn.example/a.wav'), 'https://cdn.example/a.wav');
+    assert.equal(resultFileUrl('http://127.0.0.1/a.wav'), null);
+    assert.equal(resultFileUrl('http://console:8002/a.wav'), null);
+    assert.equal(resultFileUrl('http://aliyuncs.com.evil.example/a.wav'), null);
+    assert.equal(resultFileUrl('http://x.aliyuncs.com:8080/a.wav'), null);
+    assert.equal(resultFileUrl('file:///etc/passwd'), null);
+    assert.equal(resultFileUrl('not a url'), null);
   });
 
   test('语气指令:方言(仅中文)→ 固定语气 → 补充说明 → 额外要求,按 100 单位截断', () => {
@@ -251,9 +263,12 @@ describe('说话设置', () => {
 describe('试听', () => {
   const synthHandler = (call: Call) => {
     if (call.url.endsWith('/api/v1/services/audio/tts/SpeechSynthesizer')) {
-      return jsonResponse({ output: { audio: { url: 'https://oss.example/a.wav' } } });
+      // 百炼真实返回的是 OSS 结果桶的 http 地址,data 为空串
+      return jsonResponse({ output: { audio: { data: '', url: 'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.wav?Signature=s' } } });
     }
-    if (call.url === 'https://oss.example/a.wav') return new Response(WAV, { headers: { 'content-type': 'audio/wav' } });
+    if (call.url === 'https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.wav?Signature=s') {
+      return new Response(WAV, { headers: { 'content-type': 'audio/wav' } });
+    }
     return jsonResponse({}, 404);
   };
   const synthInput = () => (calls.find((call) => call.url.endsWith('/SpeechSynthesizer'))!.body as { model: string; input: Record<string, unknown> });

@@ -195,6 +195,11 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 
 语音识别、语音合成与文生图全部走百炼(千问),不经模型网关;模型页的这三类只能选千问。
 
+配置时各模型都可以填同一个业务空间地址 `https://<业务空间>.cn-beijing.maas.aliyuncs.com/api/v1` 与同一把 API Key:
+识别、合成、文生图走原生接口;对话模型走同一业务空间的兼容模式,地址填成 `/api/v1` 或只填域名时自动换成 `/compatible-mode/v1`。
+新增模型时会带入已有模型的 Key 与地址。合成与文生图的结果文件在 OSS 结果桶里,百炼给的是 http 地址,
+控制塔只对 `*.aliyuncs.com` 的 http 地址改走 https 下载,其余 http 地址一律不取。
+
 - 识别 `qwen_audio_asr`:松手后整段音频包成 WAV,走同步接口 `qwen-audio-3.0-asr-flash`,可配热词。
 - 合成 `qwen_audio_tts`:`qwen-audio-3.0-tts-flash` 或 `qwen-audio-3.0-tts-plus`(两套系统音色不同、不能混用;有智能体在用时不许切换),
   CosyVoice 协议的 WebSocket,**每句话一个任务**,收到的 PCM 边到边编码。

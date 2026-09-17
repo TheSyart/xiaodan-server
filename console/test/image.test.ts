@@ -123,6 +123,15 @@ describe('服务商', () => {
     });
   });
 
+  test('结果图是 OSS 的 http 地址时改走 https 下载;别的 http 地址不取', async () => {
+    const ossUrl = 'dashscope-result-bj.oss-cn-beijing.aliyuncs.com/i.png?Signature=s';
+    const oss = fetchFor((url) => (url === `https://${ossUrl}` ? new Response(png) : json(done(`http://${ossUrl}`))));
+    assert.ok((await generateQwenImage(oss.fetchImpl, { api_key: 'sk' }, '小猫')).bytes.equals(png));
+    const internal = fetchFor(() => json(done('http://192.168.1.10/i.png')));
+    await assert.rejects(generateQwenImage(internal.fetchImpl, { api_key: 'sk' }, '小猫'), /不是 https/u);
+    assert.equal(internal.calls.length, 1, '内网地址一次也不请求');
+  });
+
   test('默认模型与尺寸;没填密钥如实报错', async () => {
     const { fetchImpl, calls } = fetchFor(() => json(done('https://img.example/b.png')));
     await generateQwenImage(fetchImpl, { api_key: 'sk' }, '小狗');

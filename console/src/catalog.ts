@@ -57,7 +57,7 @@ const OUTPUT_DIR: ProviderField = {
 const BAILIAN_KEY: ProviderField[] = [
   { key: 'api_key', label: '百炼 API Key', type: 'password', required: true },
   { key: 'workspace_id', label: '业务空间 ID', type: 'string', hint: '推荐填写;与接口地址二选一' },
-  { key: 'base_url', label: '接口地址', type: 'string', hint: '留空按业务空间自动拼,例如 https://dashscope.aliyuncs.com' },
+  { key: 'base_url', label: '接口地址', type: 'string', hint: '可以直接填业务空间地址 https://<业务空间>.cn-beijing.maas.aliyuncs.com/api/v1;留空按业务空间 ID 自动拼' },
 ];
 
 /** 文生图模型:同步的直接出图,异步的(万相)要轮询任务 */
@@ -109,8 +109,11 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
         'max_tokens 要给足。推理型模型会先把额度花在隐藏推理 token 上,给小了会收到空回复,' +
         '现象与链路故障几乎一样,很容易误判。模型本身能看图(比如 qwen-vl、qwen3.5-plus)才打开「支持看图」。',
       fields: [
-        { key: 'base_url', label: '接口地址', type: 'string', required: true },
-        { key: 'model_name', label: '模型', type: 'string', required: true },
+        {
+          key: 'base_url', label: '接口地址', type: 'string', required: true,
+          hint: '百炼填业务空间地址 https://<业务空间>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1;填成 /api/v1 也会自动换成兼容模式',
+        },
+        { key: 'model_name', label: '模型', type: 'string', required: true, hint: '百炼里的模型名,例如 qwen3.6-plus、deepseek-v4-flash' },
         { key: 'api_key', label: 'API 密钥', type: 'password', required: true },
         { key: 'vision', label: '支持看图', type: 'boolean', default: false, hint: '打开后智能体可以看懂用户发来的图片;模型不支持时不要打开' },
         { key: 'temperature', label: '温度', type: 'number', default: 0.8 },

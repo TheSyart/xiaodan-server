@@ -9,7 +9,7 @@
 // 两种结果都在 output.choices[0].message.content[].image,地址 24 小时有效,拿到就下载。
 
 import type { FetchLike } from '../../voice/dashscope.ts';
-import { DashscopeError, dashscopeHeaders, httpBase } from '../../voice/dashscope.ts';
+import { DashscopeError, dashscopeHeaders, httpBase, resultFileUrl } from '../../voice/dashscope.ts';
 import { IMAGE_MODELS } from '../../catalog.ts';
 
 export class ImageError extends Error {}
@@ -58,10 +58,11 @@ async function postJson(fetchImpl: FetchLike, url: string, headers: Record<strin
 }
 
 async function download(fetchImpl: FetchLike, url: string, signal?: AbortSignal): Promise<Buffer> {
-  if (!/^https:\/\//u.test(url)) throw new ImageError('百炼返回的图片地址不是 https');
+  const safe = resultFileUrl(url);
+  if (!safe) throw new ImageError('百炼返回的图片地址不是 https');
   const signals = [AbortSignal.timeout(30_000)];
   if (signal) signals.push(signal);
-  const response = await fetchImpl(url, { signal: AbortSignal.any(signals) });
+  const response = await fetchImpl(safe, { signal: AbortSignal.any(signals) });
   if (!response.ok) throw new ImageError(`下载图片失败:HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) throw new ImageError('图片为空或过大');

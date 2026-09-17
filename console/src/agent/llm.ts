@@ -63,7 +63,22 @@ const num = (value: unknown) => {
 export function chatUrl(config: LlmConfig): string {
   const base = (text(config.base_url) || text(config.url)).replace(/\/+$/u, '');
   if (!base) throw new LlmError('对话模型没有配置接口地址');
-  return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+  return base.endsWith('/chat/completions') ? base : `${bailianCompatible(base)}/chat/completions`;
+}
+
+/**
+ * 百炼的对话模型只在兼容模式下说 OpenAI 协议。业务空间地址常被原样填成
+ * https://<业务空间>.cn-beijing.maas.aliyuncs.com/api/v1(语音与文生图用的原生地址),或者只填了域名:换成 /compatible-mode/v1。
+ */
+export function bailianCompatible(base: string): string {
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    return base;
+  }
+  const bailian = /(^|\.)dashscope(-intl)?\.aliyuncs\.com$|\.maas\.aliyuncs\.com$/u.test(url.hostname);
+  return bailian && /^\/*(api\/v1\/*)?$/u.test(url.pathname) ? `${url.origin}/compatible-mode/v1` : base;
 }
 
 export interface ChatRequest {

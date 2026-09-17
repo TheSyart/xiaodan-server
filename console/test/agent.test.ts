@@ -11,7 +11,7 @@ import { hashClientId } from '../src/identity.ts';
 import { agentToken, verifyAgentToken } from '../src/agent/token.ts';
 import { LeadingEmoji, normalizeEmoji } from '../src/agent/emoji.ts';
 import { parseCallText, parseDsmlBlock, parseTagBlock, ToolTextFilter } from '../src/agent/tool-text.ts';
-import { streamChat } from '../src/agent/llm.ts';
+import { chatUrl, streamChat } from '../src/agent/llm.ts';
 import { conversations, runTurn } from '../src/agent/loop.ts';
 import { loadAgent } from '../src/agent/routes.ts';
 import { buildSystemPrompt, beijingNow } from '../src/agent/prompt.ts';
@@ -188,6 +188,20 @@ describe('正文里的工具调用', () => {
   test('像 a < b 这样的文字不会被长期扣住', () => {
     const filter = new ToolTextFilter(null);
     assert.equal(filter.feed('三 < 五,').text + filter.feed('所以对').text + filter.finish().text, '三 < 五,所以对');
+  });
+});
+
+describe('对话接口地址', () => {
+  test('百炼业务空间的原生地址或裸域名换成兼容模式,其余原样', () => {
+    const ws = 'https://llm-abc123.cn-beijing.maas.aliyuncs.com';
+    assert.equal(chatUrl({ base_url: `${ws}/api/v1` }), `${ws}/compatible-mode/v1/chat/completions`);
+    assert.equal(chatUrl({ base_url: `${ws}/api/v1/` }), `${ws}/compatible-mode/v1/chat/completions`);
+    assert.equal(chatUrl({ base_url: ws }), `${ws}/compatible-mode/v1/chat/completions`);
+    assert.equal(chatUrl({ base_url: `${ws}/compatible-mode/v1` }), `${ws}/compatible-mode/v1/chat/completions`);
+    assert.equal(chatUrl({ base_url: 'https://dashscope.aliyuncs.com/api/v1' }), 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+    assert.equal(chatUrl({ base_url: 'https://api.deepseek.com' }), 'https://api.deepseek.com/chat/completions');
+    assert.equal(chatUrl({ base_url: 'https://model.example/v1/chat/completions' }), 'https://model.example/v1/chat/completions');
+    assert.equal(chatUrl({ base_url: 'https://evil.aliyuncs.com.example/api/v1' }), 'https://evil.aliyuncs.com.example/api/v1/chat/completions');
   });
 });
 
