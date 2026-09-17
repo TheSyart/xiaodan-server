@@ -122,6 +122,11 @@ class LLMProvider(LLMProviderBase):
         turn_id = getattr(conn, "sentence_id", None) if conn is not None else None
         messages = self._messages(dialogue)
         query = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        closed = None
+        if conn is not None:
+            from core import xiaodan_bridge
+
+            closed = xiaodan_bridge.DECKS.pop_exit(getattr(conn, "device_id", None))
         body = {
             "v": 1,
             "session_id": session_id,
@@ -132,6 +137,9 @@ class LLMProvider(LLMProviderBase):
             "query": query,
             "messages": messages,
         }
+        if closed:
+            # 设备上的单词卡组已经关掉了:控制塔告诉模型,免得它还让小朋友翻卡片
+            body["device_state"] = {"deck_closed": closed}
         headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "text/event-stream"}
         spoken = False
         done = False

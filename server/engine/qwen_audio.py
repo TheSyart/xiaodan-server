@@ -384,6 +384,20 @@ SUBTITLE_BYTES = 150
 CUE_MARK = "\x1e"
 CUE_PARAGRAPH = "\x1f"
 
+
+class ScreenText(str):
+    """发给设备的字幕文字(借 SentenceType.FIRST 进音频队列)。report 是写进对话记录的文字:
+    一句话切成几条字幕时只有第一条带整句,后续几条、故事进度片段与保活都为 None,不单独记一条。
+    上游音频线程每遇到一个 FIRST 就把上一段记一条对话记录,不区分这些,所以由 QwenAudioTTS 的音频线程按它判断。
+    """
+
+    report = None
+
+    def __new__(cls, text, report=None):
+        obj = super().__new__(cls, text)
+        obj.report = report
+        return obj
+
 _SENTENCE_BREAK = "。！？!?；;…"
 _SOFT_BREAK = "，,、：: "
 # 这些字符不该出现在一条字幕的开头,跟前一条走

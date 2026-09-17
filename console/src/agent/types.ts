@@ -99,6 +99,11 @@ export interface ToolResult {
   longAnswer?: boolean;
   /** 工具拿到的图片(data: 或 https 地址);对话模型支持看图时交给它看 */
   images?: string[];
+  /**
+   * 工具在设备上打开了要小朋友自己操作的画面(比如「单词卡片」)。小朋友要先关掉它才能再说话,
+   * 所以下一轮开始时告诉模型它已经关掉了,免得模型还让小朋友去翻看。
+   */
+  screen?: string;
   ok?: boolean;
 }
 

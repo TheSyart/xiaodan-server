@@ -38,7 +38,9 @@
       output_dir: tmp/
 """
 
+import asyncio
 import os
+import queue
 import threading
 import time
 import uuid
@@ -205,7 +207,7 @@ class TTSProvider(TTSProviderBase):
             shown = qa.strip_tags(original_text if segment == text else segment).strip()
             parts = qa.subtitle_parts(shown) or [shown]
             offsets = qa.part_offsets_ms(parts, self._speech_rate)
-            self.tts_audio_queue.put((SentenceType.FIRST, None, parts[0], sentence_id))
+            self.tts_audio_queue.put((SentenceType.FIRST, None, qa.ScreenText(parts[0], report=shown), sentence_id))
             state = {"next": 1, "pcm": 0}
             for attempt in (1, 2):
                 produced = []
@@ -216,7 +218,7 @@ class TTSProvider(TTSProviderBase):
                     state["pcm"] += len(chunk)
                     elapsed_ms = state["pcm"] / 2 / sample_rate * 1000.0
                     while state["next"] < len(parts) and offsets[state["next"]] <= elapsed_ms:
-                        self.tts_audio_queue.put((SentenceType.FIRST, None, parts[state["next"]], sentence_id))
+                        self.tts_audio_queue.put((SentenceType.FIRST, None, qa.ScreenText(parts[state["next"]]), sentence_id))
                         state["next"] += 1
 
                 try:
@@ -233,7 +235,7 @@ class TTSProvider(TTSProviderBase):
                     logger.bind(tag=TAG).warning(f"语音合成失败,重试一次: {type(e).__name__}: {e}")
             # 语速估快了:还没发的字幕跟在这段音频后面补上
             while state["next"] < len(parts):
-                self.tts_audio_queue.put((SentenceType.FIRST, None, parts[state["next"]], sentence_id))
+                self.tts_audio_queue.put((SentenceType.FIRST, None, qa.ScreenText(parts[state["next"]]), sentence_id))
                 state["next"] += 1
             if state["pcm"]:
                 self._speech_rate.update(qa.display_units(shown), state["pcm"] / 2 / sample_rate * 1000.0)
@@ -289,6 +291,64 @@ class TTSProvider(TTSProviderBase):
             return current_text
         return None
 
+    def _audio_play_priority_thread(self):
+        """与上游基类(c7b126c)相同,只改对话记录:qa.ScreenText 的 report 为 None 的字幕照发,但不切断、不单记一条,
+        带 report 的按整句记。上游每遇到一个 FIRST 就记一条,一句长话会被记成好几条,故事进度片段与保活也会被记下来。"""
+        from core.handle.reportHandle import enqueue_tts_report
+        from core.handle.sendAudioHandle import sendAudioMessage
+        from core.utils.output_counter import add_device_output
+
+        enqueue_text = None
+        enqueue_audio = []
+        while not self.conn.stop_event.is_set():
+            text = None
+            try:
+                try:
+                    item = self.tts_audio_queue.get(timeout=0.1)
+                    if len(item) == 4:
+                        sentence_type, audio_datas, text, sentence_id = item
+                    else:
+                        sentence_type, audio_datas, text = item
+                        sentence_id = None
+                except queue.Empty:
+                    if self.conn.stop_event.is_set():
+                        break
+                    continue
+
+                if self.conn.client_abort:
+                    enqueue_text, enqueue_audio = None, []
+                    continue
+
+                screen_only = isinstance(text, qa.ScreenText) and text.report is None
+                report_text = text.report if isinstance(text, qa.ScreenText) else text
+                if sentence_type is not SentenceType.MIDDLE and not screen_only:
+                    if self.report_on_last:
+                        if report_text:
+                            enqueue_text = report_text
+                        if sentence_type == SentenceType.LAST:
+                            enqueue_tts_report(self.conn, enqueue_text, enqueue_audio)
+                            enqueue_audio = []
+                            enqueue_text = None
+                    else:
+                        if enqueue_text is not None:
+                            enqueue_tts_report(self.conn, enqueue_text, enqueue_audio)
+                        enqueue_audio = []
+                        enqueue_text = report_text
+
+                if isinstance(audio_datas, bytes):
+                    enqueue_audio.append(audio_datas)
+
+                future = asyncio.run_coroutine_threadsafe(
+                    sendAudioMessage(self.conn, sentence_type, audio_datas, text, sentence_id),
+                    self.conn.loop,
+                )
+                future.result()
+
+                if self.conn.max_output_size > 0 and report_text and not screen_only:
+                    add_device_output(self.conn.headers.get("device-id"), len(report_text))
+            except Exception as e:
+                logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
+
     def _process_remaining_text_stream(self, opus_handler=None):
         full_text = "".join(self.tts_text_buff)
         remaining_text = full_text[self.processed_chars:]
@@ -311,7 +371,8 @@ class TTSProvider(TTSProviderBase):
         cues = self.xd_media_cues.pop(tts_file, None)
 
         def put(text):
-            self.tts_audio_queue.put((SentenceType.FIRST, None, text, sentence_id))
+            # 进度片段、保活与标题都只是给设备看的,不写进对话记录
+            self.tts_audio_queue.put((SentenceType.FIRST, None, qa.ScreenText(text), sentence_id))
 
         if xbc.xiaodan_level(getattr(self.conn, "features", None)) >= 3:
             # 新固件:故事按帧数插正文进度片段;音乐和没有片段时只发保活标记(不改动卡片上的字)

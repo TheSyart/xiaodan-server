@@ -488,6 +488,26 @@ describe('多步循环', () => {
     assert.equal(calls.length, 0);
     assert.deepEqual(texts, []);
   });
+
+  test('单词卡片关掉之后:下一轮告诉模型,只说一次', async () => {
+    const { fetchImpl, calls } = fakeLlm([{ text: ['🙂好呀。'] }, { text: ['🙂嗯。'] }, { text: ['🙂嗯。'] }]);
+    const base = {
+      agent: loadAgent(deps(fetchImpl), DEFAULT_AGENT_ID)!, device: device({ xiaodan: 3 }), engineMessages: [],
+      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink,
+    };
+    // 上一轮工具打开了卡组(ToolResult.screen)
+    conversations.get(`device:${MAC}`, DEFAULT_AGENT_ID).openScreen = '单词卡片';
+    await runTurn(deps(fetchImpl), { ...base, query: '我们做个测验吧', deviceState: { deckClosed: { why: 'user' } } });
+    const first = String(calls[0]!.body.messages.at(-1)!.content);
+    assert.match(first, /^我们做个测验吧\n\[系统提示\] 刚才在设备上打开的单词卡片已经关掉了\(小朋友长按确定键关掉了\)/u);
+    await runTurn(deps(fetchImpl), { ...base, query: '好' });
+    assert.equal(calls[1]!.body.messages.at(-1)!.content, '好', '只提示一次');
+    // 控制塔重启过(内存里没有记录):靠引擎报来的 deck_exit
+    await runTurn(deps(fetchImpl), { ...base, query: '再来', deviceState: { deckClosed: { why: 'idle' } } });
+    assert.match(String(calls[2]!.body.messages.at(-1)!.content), /单词卡片已经关掉了\(两分钟没人操作,自动关掉了\)/u);
+    const record = one<{ content: string }>(conn, "SELECT content FROM chat_messages WHERE chat_type = 1 ORDER BY id DESC LIMIT 1");
+    assert.ok(!record || !/系统提示/u.test(record.content), '对话记录里不带系统提示');
+  });
 });
 
 // ---------------------------------------------------------------- 接口与配置下发

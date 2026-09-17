@@ -260,6 +260,48 @@ assert len(firsts) >= 2 and firsts[0][0] == 0, firsts
 assert "".join(text for _, text in firsts) == long_text, firsts
 assert all(len(text.encode("utf-8")) <= 160 for _, text in firsts), firsts
 assert 0 < firsts[1][0] < len(items) - 1, f"后几条字幕应插在音频帧之间: {firsts}"
+assert firsts[0][1].report == long_text and all(text.report is None for _, text in firsts[1:]), "只有第一条带整句去记录"
+
+# 7b. 音频线程:字幕的后续几条、故事进度片段与保活照发给设备,但对话记录按整句只记一条
+import core.handle.reportHandle as report_handle
+import core.handle.sendAudioHandle as send_handle
+from core.utils import qwen_audio as qa_mod
+
+reported, sent = [], []
+real_report, real_send = report_handle.enqueue_tts_report, send_handle.sendAudioMessage
+
+
+async def fake_send(conn_, sentence_type, audios, text, sentence_id=None):
+    sent.append((sentence_type, text))
+
+
+report_handle.enqueue_tts_report = lambda conn_, text, audio: reported.append((text, len(audio)))
+send_handle.sendAudioMessage = fake_send
+loop = asyncio.new_event_loop()
+loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+loop_thread.start()
+tts, conn = new_tts()
+conn.loop = loop
+conn.max_output_size = 0
+conn.headers = {}
+for item in items:
+    tts.tts_audio_queue.put(item)
+tts.tts_audio_queue.put((SentenceType.FIRST, None, qa_mod.ScreenText("\x1e从前"), "s1"))
+tts.tts_audio_queue.put((SentenceType.FIRST, None, "下一句。", "s1"))
+tts.tts_audio_queue.put((SentenceType.LAST, [], None, "s1"))
+worker = threading.Thread(target=tts._audio_play_priority_thread, daemon=True)
+worker.start()
+deadline = time.monotonic() + 5
+while not tts.tts_audio_queue.empty() and time.monotonic() < deadline:
+    time.sleep(0.02)
+time.sleep(0.2)
+conn.stop_event.set()
+worker.join(2)
+loop.call_soon_threadsafe(loop.stop)
+report_handle.enqueue_tts_report, send_handle.sendAudioMessage = real_report, real_send
+assert len(sent) == len(items) + 3, (len(sent), len(items))
+assert [text for text, _ in reported] == [long_text, "下一句。"], reported
+assert reported[0][1] == sum(1 for item in items if isinstance(item[1], bytes)), "整句的音频都算在第一条记录里"
 
 asyncio.run(tts.close())
 server.shutdown()

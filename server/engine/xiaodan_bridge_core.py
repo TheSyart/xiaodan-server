@@ -100,10 +100,10 @@ def busy_reason(conn, now=None):
         return "turn"
     if getattr(conn, "_xd_asr_busy", False):
         return "recognizing"
+    # 只看最近有没有收到上行音频。不看 asr_audio:手动拾音模式下 listen stop 之后才到的最后几帧会留在里面,
+    # 直到下一次 listen start 才清,拿它判断会让设备空闲时一直被当成在听(单词卡组点「读」永远读不了)
     last_in = getattr(conn, "_xd_last_audio_in", 0) or 0
     if last_in and now - last_in < 1.5:
-        return "listening"
-    if getattr(conn, "asr_audio", None):
         return "listening"
     tts = getattr(conn, "tts", None)
     queued = 0
@@ -243,11 +243,13 @@ def validate_cues(value):
 
 
 class DeckStore:
-    """单词卡组要读的文字,按 (MAC, 卡组 id) 存在引擎里:设备只回报第几个词,不必把整句读音文字存在设备上。"""
+    """单词卡组要读的文字,按 (MAC, 卡组 id) 存在引擎里:设备只回报第几个词,不必把整句读音文字存在设备上。
+    另外记下每台设备最近一次退出卡组的原因,下一轮对话告诉模型卡片已经关掉了。"""
 
     def __init__(self, ttl_s=30 * 60, max_decks=64, clock=time.monotonic):
         self._lock = threading.Lock()
         self._decks = {}
+        self._exits = {}
         self.ttl_s = ttl_s
         self.max_decks = max_decks
         self._clock = clock
@@ -289,6 +291,26 @@ class DeckStore:
                 return None
             deck["at"] = now
             return deck["say"][index]
+
+    def note_exit(self, mac, deck_id, why):
+        mac = normalize_mac(mac)
+        if not mac:
+            return
+        with self._lock:
+            self._exits[mac] = {"id": deck_id if isinstance(deck_id, int) else 0,
+                                "why": why[:16] if isinstance(why, str) else "", "at": self._clock()}
+            if len(self._exits) > self.max_decks:
+                oldest = min(self._exits, key=lambda k: self._exits[k]["at"])
+                del self._exits[oldest]
+
+    def pop_exit(self, mac):
+        """取走这台设备最近一次退出卡组的记录({"id","why"}),过期或没有返回 None。"""
+        mac = normalize_mac(mac)
+        with self._lock:
+            record = self._exits.pop(mac, None) if mac else None
+        if record is None or self._clock() - record["at"] > self.ttl_s:
+            return None
+        return {"id": record["id"], "why": record["why"]}
 
     def drop(self, mac, deck_id=None):
         mac = normalize_mac(mac)

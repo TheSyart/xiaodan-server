@@ -158,6 +158,7 @@ CONSOLE_TOOLS.set(VOCAB_PLUGIN, (ctx, params) => {
         content: `单词卡已经显示在设备上(${picks.length} 个):\n${picks.map((p, i) => `${i + 1}. ${describe(p.word)}`).join('\n')}\n` +
           '用一句话告诉小朋友:按上键、下键翻看单词,按一下确定键听读音,长按确定键结束。不要逐个讲解这些词。' +
           '小朋友结束卡片再来说话时,问问要不要做个小测验,考完每个词用 vocab_answer 记录。',
+        screen: '单词卡片',
       };
     },
   };

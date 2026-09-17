@@ -221,6 +221,7 @@ async def handle_device_message(conn, msg):
         return
     if cmd == "deck_exit":
         DECKS.drop(mac, command["id"] or None)
+        DECKS.note_exit(mac, command["id"], command["why"])
         logger.bind(tag=TAG).info(f"{mac} 退出单词卡组 {command['id']} {command['why']}")
         return
     if cmd == "img":

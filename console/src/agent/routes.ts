@@ -104,6 +104,9 @@ const turnSchema = z.object({
   features: z.record(z.string(), z.unknown()).nullish(),
   query: z.string().max(4000).default(''),
   messages: z.array(z.object({ role: z.string().max(16), content: z.string().max(20_000) })).max(200).default([]),
+  device_state: z.object({
+    deck_closed: z.object({ id: z.number().int().optional(), why: z.string().max(16).default('') }).nullish(),
+  }).nullish(),
 });
 
 export function agentRoutes(deps: AgentDeps): Hono {
@@ -148,6 +151,7 @@ export function agentRoutes(deps: AgentDeps): Hono {
         device: context,
         query,
         engineMessages: body.messages,
+        ...(body.device_state?.deck_closed ? { deviceState: { deckClosed: { why: body.device_state.deck_closed.why } } } : {}),
         conversationKey: `device:${mac}`,
         record: body.session_id ? { mac, sessionId: body.session_id } : null,
         signal,

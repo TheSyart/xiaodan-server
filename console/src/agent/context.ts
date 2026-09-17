@@ -19,6 +19,8 @@ export interface Conversation {
   turns: StoredTurn[];
   /** 本段对话里已经读过正文的技能 */
   loadedSkills: Set<string>;
+  /** 上一轮工具在设备上打开、还没告诉模型已经关掉的画面(ToolResult.screen) */
+  openScreen?: string;
   lastAt: number;
 }
 

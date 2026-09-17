@@ -31,6 +31,8 @@ export interface TurnInput {
   /** 用户随这句话发的图片(网页试聊);对话模型支持看图时才交给它 */
   images?: readonly string[];
   engineMessages: readonly { role: string; content: string }[];
+  /** 引擎报来的设备状态:单词卡组是怎么关掉的(设备发了 deck_exit) */
+  deviceState?: { deckClosed?: { why: string } };
   conversationKey: string;
   /** 写对话记录用;网页试聊不记 */
   record: { mac: string; sessionId: string } | null;
@@ -131,6 +133,20 @@ export function hintMessage(device: DeviceContext, tool: AgentTool): Record<stri
   return message;
 }
 
+const SCREEN_CLOSED_WHY: Record<string, string> = {
+  user: '小朋友长按确定键关掉了',
+  idle: '两分钟没人操作,自动关掉了',
+  card: '换成了别的画面',
+  nomem: '设备内存不够,只显示了第一个词',
+  reconnect: '设备重新联网时关掉了',
+};
+
+/** 上一轮在设备上打开的画面已经关掉:随这一轮的用户消息告诉模型 */
+export function screenClosedNote(screen: string, why?: string): string {
+  const reason = why && SCREEN_CLOSED_WHY[why] ? `(${SCREEN_CLOSED_WHY[why]})` : '';
+  return `[系统提示] 刚才在设备上打开的${screen}已经关掉了${reason},屏幕上现在没有它。不要再说它还在屏幕上,也不要再让用户去翻看或按键。`;
+}
+
 const FALLBACK_NO_MODEL = '😔我还没有配置对话模型,请在控制塔的智能体页面选一个对话模型。';
 const FALLBACK_ERROR = '😔我这边连不上大脑了,稍后再试试吧。';
 const FALLBACK_EMPTY = '🤔我刚刚走神了,你再说一次好吗?';
@@ -180,11 +196,16 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
     voice: voiceHints(deps, agent),
   });
 
+  // 上一轮打开的卡组之类的画面:小朋友能再说话,说明它已经关掉了(控制塔重启过就靠引擎报来的 deck_exit)
+  const closedScreen = conversation.openScreen ?? (input.deviceState?.deckClosed ? '单词卡片' : undefined);
+  conversation.openScreen = undefined;
+  const queryText = closedScreen ? `${input.query}\n${screenClosedNote(closedScreen, input.deviceState?.deckClosed?.why)}` : input.query;
+
   // 用户发了图:模型能看图就连图一起给;不能就如实告诉它,让它跟用户说看不了
   const images = input.images ?? [];
   const userMessage: ChatMessage = images.length && vision
-    ? { role: 'user', content: [{ type: 'text', text: input.query }, ...images.map((url): ContentPart => ({ type: 'image_url', image_url: { url } }))] }
-    : { role: 'user', content: images.length ? `${input.query}\n[系统提示] 用户发了 ${images.length} 张图片,但你现在用的对话模型看不了图。` : input.query };
+    ? { role: 'user', content: [{ type: 'text', text: queryText }, ...images.map((url): ContentPart => ({ type: 'image_url', image_url: { url } }))] }
+    : { role: 'user', content: images.length ? `${queryText}\n[系统提示] 用户发了 ${images.length} 张图片,但你现在用的对话模型看不了图。` : queryText };
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
     ...historyMessages(conversation, input.engineMessages),
@@ -302,6 +323,7 @@ export async function runTurn(deps: AgentDeps, input: TurnInput): Promise<TurnSu
         ]));
         if (result.endTurn) endTurn = true;
         if (result.longAnswer) longAnswer = true;
+        if (result.screen && result.ok !== false) conversation.openScreen = result.screen;
       }
       // 工具拿到的图片(比如 MCP 返回的截图):能看图的模型接着看。只放进这一轮的请求,不存进上下文(太大)
       if (vision && toolImages.length) {

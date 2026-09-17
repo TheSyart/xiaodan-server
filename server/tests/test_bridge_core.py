@@ -96,7 +96,8 @@ class BusyTest(unittest.TestCase):
     def test_reasons(self):
         self.assertEqual(core.busy_reason(self.idle(_xd_turn_active=True)), "turn")
         self.assertEqual(core.busy_reason(self.idle(_xd_asr_busy=True)), "recognizing")
-        self.assertEqual(core.busy_reason(self.idle(asr_audio=[b"x"])), "listening")
+        # 手动拾音:listen stop 之后才到的几帧会留在 asr_audio 里,不能当成还在听
+        self.assertEqual(core.busy_reason(self.idle(asr_audio=[b"x"])), "")
         now = time.monotonic()
         self.assertEqual(core.busy_reason(self.idle(_xd_last_audio_in=now - 0.5), now=now), "listening")
         self.assertEqual(core.busy_reason(self.idle(_xd_last_audio_in=now - 5), now=now), "")
@@ -220,6 +221,21 @@ class DeckStoreTest(unittest.TestCase):
         self.assertEqual(len(store), 2)
         store.drop(self.MAC)
         self.assertEqual(len(store), 0)
+
+    def test_exit_notes(self):
+        now = [0.0]
+        store = core.DeckStore(ttl_s=10, clock=lambda: now[0])
+        self.assertIsNone(store.pop_exit(self.MAC))
+        store.note_exit("4c-11-ae-31-7a-30", 7, "user")
+        self.assertEqual(store.pop_exit(self.MAC), {"id": 7, "why": "user"})
+        self.assertIsNone(store.pop_exit(self.MAC), "取走一次就没了")
+        store.note_exit(self.MAC, "x", 5)
+        self.assertEqual(store.pop_exit(self.MAC), {"id": 0, "why": ""})
+        store.note_exit(self.MAC, 7, "idle")
+        now[0] = 11
+        self.assertIsNone(store.pop_exit(self.MAC), "过期不报")
+        store.note_exit("nope", 7, "user")
+        self.assertIsNone(store.pop_exit("nope"))
 
 
 class DeviceCommandTest(unittest.TestCase):
