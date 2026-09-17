@@ -174,7 +174,15 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 - **MCP**: a minimal Streamable HTTP client written here (initialize → paginated tools/list → tools/call, JSON and SSE responses,
   re-initialising expired sessions), remote https servers only; add and test servers on the MCP page, enable them per role on the
   Agents page with per-tool allowlists. Tools are named `mcp_<server>__<tool>` and results are handed to the model as external data.
-  Server URLs often carry personal tokens, so lists only show the origin and path, and no token is committed to the repository.
+  Server URLs may carry tokens, so lists only show the origin and path.
+  - **Built in: AIHOT (AI热点资讯)**. `https://aihot.news/api/mcp` is anonymous and read-only (no token) and offers 5 tools: latest
+    news, search, hot topics, story timelines and the daily report. On first start the console adds it and enables it for every
+    existing agent. After that it never re-adds it or changes its links, so deleting or unticking it sticks. The 小单 and AI资讯官
+    templates link it automatically. Personal non-commercial use is free; external commercial products need AIHOT's written consent.
+  - **Paste JSON import**: the MCP page accepts the `{"mcpServers": {...}}` config used by Claude, Cursor and Codex, several servers at
+    once. The entry's name becomes the server id, each imported server is tested straight away, and it can be enabled for every
+    agent. Local command (stdio) servers and the legacy SSE transport are skipped with a reason, and an endpoint that already
+    exists is not added twice.
 - **Skills**: Agent Skills-compatible `SKILL.md` (paste, or upload .md or .zip; scripts are never executed). The prompt lists only names
   and descriptions; `load_skill` reads the body when needed (kept for the rest of the conversation) and `read_skill_file` reads attached files.
   Built in: `bedtime-story`, `word-coach`, `ai-news-brief`.

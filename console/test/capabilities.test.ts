@@ -15,6 +15,8 @@ import { collectTools, skillCatalog } from '../src/agent/registry.ts';
 import { deepseekSearch, formatResults, parseAnthropicSearch } from '../src/agent/search/providers.ts';
 import { callTool, contentToText, listTools, resetMcpSession, type McpServer } from '../src/agent/mcp/client.ts';
 import { mcpToolName } from '../src/agent/mcp/tools.ts';
+import { BUILTIN_MCP_SERVERS, parseMcpConfig, seedBuiltinMcp } from '../src/agent/mcp/builtin.ts';
+import { buildSystemPrompt } from '../src/agent/prompt.ts';
 import { packageFromZip, parseSkillMarkdown } from '../src/agent/skills/parse.ts';
 import { nextOccurrence, parseBeijing, formatBeijing, speakBeijing } from '../src/agent/reminders/time.ts';
 import { catchUp, reminderCard, scanOnce } from '../src/agent/reminders/scheduler.ts';
@@ -266,6 +268,66 @@ describe('MCP', () => {
     const result = await exposed[0]!.run(ctx, { q: 'AI' });
     assert.match(result.content, /外部服务「AIHOT」/u);
     assert.match(result.content, /aihot_search/u);
+  });
+
+  test('内置 AIHOT:第一次启动写入并给所有智能体启用,之后删了、手动加过都不再动', () => {
+    run(conn, "INSERT INTO agents (id, name, system_prompt) VALUES ('agent_tong', '童童', '')");
+    assert.deepEqual(seedBuiltinMcp(conn), ['aihot']);
+    const row = one<{ url: string; name: string }>(conn, "SELECT url, name FROM mcp_servers WHERE id = 'aihot'")!;
+    assert.equal(row.url, 'https://aihot.news/api/mcp', '公开的匿名只读地址,不带任何令牌');
+    assert.equal(row.name, BUILTIN_MCP_SERVERS[0]!.name);
+    assert.deepEqual(all<{ agent_id: string }>(conn, "SELECT agent_id FROM agent_mcp_servers WHERE server_id = 'aihot' ORDER BY agent_id").map((r) => r.agent_id),
+      ['agent_tong', DEFAULT_AGENT_ID].sort());
+    assert.deepEqual(seedBuiltinMcp(conn), [], '只写一次');
+    run(conn, "DELETE FROM mcp_servers WHERE id = 'aihot'");
+    assert.deepEqual(seedBuiltinMcp(conn), [], '用户删掉了就不再加回来');
+
+    run(conn, "DELETE FROM settings WHERE key LIKE 'mcp.builtin.%'");
+    run(conn, "INSERT INTO mcp_servers (id, name, url) VALUES ('mcp_mine', '我的 AIHOT', 'https://aihot.news/api/mcp/?aihot_actor=abc')");
+    assert.deepEqual(seedBuiltinMcp(conn), [], '已经手动加过同一个接口');
+    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM mcp_servers')!.n, 1);
+  });
+
+  test('粘贴 JSON 导入:通用 mcpServers 配置,跳过本地命令与旧 SSE,重复的不再加', async () => {
+    const plan = parseMcpConfig({
+      mcpServers: {
+        aihot: { type: 'http', url: 'https://aihot.example/api/mcp' },
+        fs: { command: 'npx', args: ['server-filesystem'] },
+        old: { type: 'sse', url: 'https://old.example/sse' },
+        withKey: { type: 'streamable-http', url: 'https://k.example/mcp', headers: { Authorization: 'Bearer x' } },
+      },
+    });
+    assert.deepEqual(plan.servers.map((s) => s.key), ['aihot', 'withKey']);
+    assert.deepEqual(plan.servers[1]!.headers, { Authorization: 'Bearer x' });
+    assert.deepEqual(plan.skipped.map((s) => s.name), ['fs', 'old']);
+    assert.deepEqual(parseMcpConfig({ aihot: { url: 'https://a.example/mcp' } }).servers.map((s) => s.key), ['aihot'], '省掉外层 mcpServers 也行');
+
+    resetMcpSession({ ...server, id: 'aihot' });
+    const mcp = fakeMcp();
+    const { fetchImpl } = router([[/aihot\.example/u, mcp.handler]]);
+    const app = createApp(conn, { agent: { fetch: fetchImpl, bridge: new FakeBridge(), log: () => {} } });
+    const importConfig = async (config: unknown, all = true) => (await app.request('http://localhost/api/mcp-servers/import', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config, enable_for_all_agents: all }),
+    })).json() as Promise<{ created: { id: string; tools: number | null; error: string | null }[]; skipped: { name: string; reason: string }[] }>;
+
+    const text = JSON.stringify({ mcpServers: { aihot: { type: 'http', url: 'https://aihot.example/api/mcp' }, local: { command: 'node' }, plain: { url: 'http://evil.example/mcp' } } });
+    const first = await importConfig(text);
+    assert.deepEqual(first.created.map((c) => [c.id, c.tools, c.error]), [['aihot', 2, null]], '配置里的名字当 id,导入后立刻测连接');
+    assert.deepEqual(first.skipped.map((s) => s.name).sort(), ['local', 'plain']);
+    assert.ok(one(conn, "SELECT 1 FROM agent_mcp_servers WHERE agent_id = ? AND server_id = 'aihot'", DEFAULT_AGENT_ID), '给所有智能体启用');
+    const again = await importConfig({ mcpServers: { aihot2: { url: 'https://aihot.example/api/mcp/' } } });
+    assert.equal(again.created.length, 0);
+    assert.match(again.skipped[0]!.reason, /已经有了/u);
+  });
+
+  test('接了 MCP 但没开联网搜索:提示词不再说查不了实时信息', () => {
+    const agent = loadAgent(baseDeps(async () => new Response('')), DEFAULT_AGENT_ID)!;
+    const tool = { name: 'mcp_aihot__aihot_get_daily', label: 'AI热点资讯', description: '日报', parameters: {}, run: async () => ({ content: '' }) };
+    const withMcp = buildSystemPrompt({ agent, tools: [tool], now: new Date(), hasScreen: true });
+    assert.match(withMcp, /用外部服务查资料\(AI热点资讯\)/u);
+    assert.doesNotMatch(withMcp, /联网查新闻、股价、赛事等实时信息/u);
+    const without = buildSystemPrompt({ agent, tools: [], now: new Date(), hasScreen: true });
+    assert.match(without, /联网查新闻、股价、赛事等实时信息/u);
   });
 });
 

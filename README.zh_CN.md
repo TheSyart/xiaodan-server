@@ -137,7 +137,12 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
   (deepseek-ai/deepseek-harness 的默认搜索就是这么做的),每个查询一次 Messages 请求,偶尔不触发搜索时重试一次;可沿用对话模型的密钥。另有博查、Tavily。
 - **MCP**:自写的最小 Streamable HTTP 客户端(initialize → tools/list 分页 → tools/call,JSON 与 SSE 响应、会话过期重连),
   只接远程 https 服务器;在「MCP」页添加与测试,在智能体页按角色勾选、可逐个工具放行。工具名 `mcp_<服务器>__<工具>`,结果作为外部资料交给模型。
-  地址里常带个人令牌,列表只显示域名与路径,令牌不进仓库。
+  地址里如果带令牌,列表只显示域名与路径。
+  - **内置 AIHOT「AI热点资讯」**:`https://aihot.news/api/mcp` 匿名只读、不需要令牌,5 个工具(最新资讯、搜索、热点榜、事件时间线、日报)。
+    控制塔第一次启动时写入,并给当时已有的智能体都启用;之后不再改动,删掉或取消勾选都不会被加回来。小单与 AI资讯官 模板自动关联。
+    个人非商业使用免费,面向外部的商业产品须先取得 AIHOT 书面授权。
+  - **粘贴 JSON 导入**:MCP 页可以直接粘贴 Claude、Cursor、Codex 通用的 `{"mcpServers": {...}}` 配置,一次导入多个。
+    配置里的名字当服务器 id,导入后立刻测试连接,可选给所有智能体启用。本地命令型(stdio)与旧的 SSE 传输跳过并说明原因,已有的接口不重复添加。
 - **技能**:兼容 Agent Skills 的 `SKILL.md`(粘贴、上传 .md 或 .zip,不执行脚本);提示词里只列名字与描述,
   需要时 `load_skill` 读正文(本段对话之后自动带上)、`read_skill_file` 读附带文件。内置 `bedtime-story`、`word-coach`、`ai-news-brief`。
 - **定时提醒**(`create_reminder`/`list_reminders`/`cancel_reminder`,插件代号 `reminders`):控制塔每 5 秒扫到期提醒,经设备桥播报

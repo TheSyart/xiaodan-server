@@ -10,6 +10,7 @@ import { startReminderScheduler } from './agent/reminders/scheduler.ts';
 import { seedMedia } from './agent/media/seed.ts';
 import { startStorySynthesis } from './agent/media/synth.ts';
 import { startRoleGreetings } from './agent/roles/switch.ts';
+import { seedBuiltinMcp } from './agent/mcp/builtin.ts';
 import { authMode, isInitialized } from './auth.ts';
 import { getSetting } from './settings.ts';
 
@@ -31,6 +32,9 @@ function main(): void {
       if (seeded.stories || seeded.music || seeded.words) {
         console.log(`[小单控制台] 内容库新增 故事 ${seeded.stories} 个、曲目 ${seeded.music} 首、单词 ${seeded.words} 个`);
       }
+      // 内置的 MCP 服务器(AIHOT,匿名只读):第一次启动时写入并给已有智能体启用,之后不再改动
+      const mcp = seedBuiltinMcp(conn);
+      if (mcp.length) console.log(`[小单控制台] 已内置 MCP 服务器:${mcp.join('、')}`);
       startReminderScheduler(deps);
       startStorySynthesis(deps);
       startRoleGreetings(deps);

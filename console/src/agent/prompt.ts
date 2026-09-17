@@ -60,7 +60,12 @@ export function buildSystemPrompt(input: PromptInput): string {
     else cannot.push(family.cannot);
   }
   const mcp = tools.filter((tool) => tool.name.startsWith('mcp_'));
-  if (mcp.length) can.push(`用外部服务查资料(${[...new Set(mcp.map((tool) => tool.label))].join('、')})`);
+  if (mcp.length) {
+    can.push(`用外部服务查资料(${[...new Set(mcp.map((tool) => tool.label))].join('、')})`);
+    // 没开联网搜索但接了 MCP 时,「查不了实时信息」与外部服务能查的资讯互相矛盾:改成只说通用搜索做不到
+    const index = cannot.indexOf('联网查新闻、股价、赛事等实时信息');
+    if (index >= 0) cannot[index] = '通用的联网搜索(上面外部服务能查到的除外)';
+  }
   cannot.push('发消息、打电话、控制灯和电器等智能家居');
 
   const { date, weekday, time } = beijingNow(now);

@@ -98,6 +98,57 @@ async function save() {
   }
 }
 
+// ---- 粘贴 JSON 导入 ----
+
+const IMPORT_EXAMPLE = `{
+  "mcpServers": {
+    "aihot": {
+      "type": "http",
+      "url": "https://aihot.news/api/mcp"
+    }
+  }
+}`;
+const importOpen = ref(false);
+const importText = ref('');
+const importForAll = ref(true);
+const importing = ref(false);
+
+function openImport() {
+  importText.value = '';
+  importForAll.value = true;
+  importOpen.value = true;
+}
+
+async function runImport() {
+  if (importing.value) return;
+  let config: unknown;
+  try {
+    config = JSON.parse(importText.value || IMPORT_EXAMPLE);
+  } catch {
+    toast('不是合法的 JSON,检查一下括号和引号。', 'warn');
+    return;
+  }
+  importing.value = true;
+  try {
+    const result = await api.post<{
+      created: { id: string; name: string; tools: number | null; error: string | null }[];
+      skipped: { name: string; reason: string }[];
+    }>('/mcp-servers/import', { config, enable_for_all_agents: importForAll.value });
+    importOpen.value = false;
+    for (const item of result.created) {
+      if (item.error) toast(`「${item.name}」已添加,但连接失败:${item.error}`, 'error');
+      else toast(`「${item.name}」已添加,${item.tools} 个工具${importForAll.value ? ',已给所有智能体启用' : ''}`);
+    }
+    for (const item of result.skipped) toast(`跳过「${item.name}」:${item.reason}`, 'warn');
+    if (!result.created.length && !result.skipped.length) toast('配置里没有找到服务器。', 'warn');
+    await load();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    importing.value = false;
+  }
+}
+
 const testing = ref('');
 async function test(server: McpServerView) {
   testing.value = server.id;
@@ -132,15 +183,31 @@ async function remove(server: McpServerView) {
 <template>
   <PageHeader title="MCP" description="给智能体接外部工具(Model Context Protocol)。添加远程 MCP 服务器后,在「智能体」页按角色勾选启用。">
     <template #actions>
+      <button class="btn" type="button" @click="openImport"><AppIcon name="copy" :size="16" /><span>粘贴 JSON 导入</span></button>
       <button class="btn btn-primary" type="button" @click="openCreate"><AppIcon name="plus" :size="16" /><span>添加服务器</span></button>
     </template>
   </PageHeader>
+
+  <ModalDialog :open="importOpen" wide title="粘贴 JSON 导入" @close="importOpen = false">
+    <form id="mcp-import" class="stack" @submit.prevent="runImport">
+      <p class="field-hint" style="margin: 0">
+        直接粘贴 Claude、Cursor、Codex 等客户端通用的 <code>mcpServers</code> 配置,可以一次导入多个。只收远程 HTTP 地址;
+        本地命令型(command)的服务器会跳过。留空直接导入,就是下面这个示例(AIHOT,匿名只读,不需要令牌)。
+      </p>
+      <textarea v-model="importText" class="textarea mono" rows="10" spellcheck="false" :placeholder="IMPORT_EXAMPLE" aria-label="MCP JSON 配置"></textarea>
+      <SwitchToggle v-model="importForAll" label="导入后给所有智能体启用" />
+    </form>
+    <template #footer>
+      <button class="btn" type="button" @click="importOpen = false">取消</button>
+      <button class="btn btn-primary" type="submit" form="mcp-import" :aria-busy="importing"><AppIcon name="check" :size="16" /><span>导入并测试连接</span></button>
+    </template>
+  </ModalDialog>
 
   <div class="callout info">
     <AppIcon name="info" :size="18" />
     <div class="callout-body">
       只支持远程 Streamable HTTP 地址(https)。工具返回的内容会作为外部资料交给模型,并提醒它不要执行其中的指令。
-      地址里常带个人令牌(例如 AIHOT 的 aihot_actor),列表里只显示域名与路径。
+      内置了 AIHOT 的「AI热点资讯」(匿名只读,个人非商业使用免费)。地址里如果带令牌,列表里只显示域名与路径。
     </div>
   </div>
 
@@ -151,7 +218,8 @@ async function remove(server: McpServerView) {
 
   <template v-else>
     <div v-if="servers.length === 0" class="card">
-      <EmptyState title="还没有 MCP 服务器" description="例如 AIHOT(AI 资讯):地址形如 https://aihot.news/api/mcp?aihot_actor=你的标识。">
+      <EmptyState title="还没有 MCP 服务器" description="点「粘贴 JSON 导入」,留空直接导入就能接上 AIHOT(AI 热点资讯)。">
+        <button class="btn" type="button" @click="openImport"><AppIcon name="copy" :size="16" /><span>粘贴 JSON 导入</span></button>
         <button class="btn btn-primary" type="button" @click="openCreate"><AppIcon name="plus" :size="16" /><span>添加服务器</span></button>
       </EmptyState>
     </div>

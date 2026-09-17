@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { all, one, run, tx } from '../../db.ts';
 import type { AgentDeps } from '../types.ts';
+import { findSameEndpoint, parseMcpConfig, serverIdFor } from './builtin.ts';
 import { resetMcpSession } from './client.ts';
 import { agentServerRows, mcpToolName, serverTools, toServer, type McpServerRow } from './tools.ts';
 
@@ -27,7 +28,7 @@ function maskHeaders(json: string): Record<string, string> {
   }
 }
 
-/** 地址里常带 token 之类的参数(比如 aihot 的 actor):列表里只露出域名与路径,编辑时才返回完整地址 */
+/** 地址里可能带 token 之类的参数:列表里只露出域名与路径,编辑时才返回完整地址 */
 function maskUrl(value: string): string {
   try {
     const url = new URL(value);
@@ -81,6 +82,55 @@ export function mcpRoutes(deps: AgentDeps): Hono {
     run(conn, 'INSERT INTO mcp_servers (id, name, url, headers_json, enabled, timeout_ms) VALUES (?, ?, ?, ?, ?, ?)',
       id, d.name, d.url, JSON.stringify(d.headers ?? {}), d.enabled ? 1 : 0, d.timeout_ms);
     return c.json({ ok: true, id });
+  });
+
+  /**
+   * 粘贴客户端通用的 JSON 配置导入({"mcpServers": {...}})。同一个接口已经有了就跳过;
+   * 导入后立刻测一次连接,enable_for_all_agents 为真时给所有智能体启用。
+   */
+  app.post('/import', async (c) => {
+    const parsed = z.object({ config: z.unknown(), enable_for_all_agents: z.boolean().default(false) })
+      .safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: '参数不正确' }, 400);
+    let config = parsed.data.config;
+    if (typeof config === 'string') {
+      try {
+        config = JSON.parse(config) as unknown;
+      } catch {
+        return c.json({ error: '不是合法的 JSON' }, 400);
+      }
+    }
+    const plan = parseMcpConfig(config);
+    const skipped = [...plan.skipped];
+    const created: { id: string; name: string; tools: number | null; error: string | null }[] = [];
+    for (const server of plan.servers) {
+      const url = serverSchema.shape.url.safeParse(server.url);
+      if (!url.success) {
+        skipped.push({ name: server.name, reason: url.error.issues[0]?.message ?? '地址不正确' });
+        continue;
+      }
+      const same = findSameEndpoint(conn, server.url);
+      if (same) {
+        skipped.push({ name: server.name, reason: `已经有了(「${same.name}」)` });
+        continue;
+      }
+      const id = serverIdFor(conn, server.key);
+      tx(conn, () => {
+        run(conn, 'INSERT INTO mcp_servers (id, name, url, headers_json) VALUES (?, ?, ?, ?)', id, server.name.slice(0, 64), server.url, JSON.stringify(server.headers));
+        if (parsed.data.enable_for_all_agents) {
+          for (const agent of all<{ id: string }>(conn, 'SELECT id FROM agents')) {
+            run(conn, 'INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id, tool_allowlist_json) VALUES (?, ?, NULL)', agent.id, id);
+          }
+        }
+      });
+      const row = one<McpServerRow>(conn, 'SELECT * FROM mcp_servers WHERE id = ?', id)!;
+      try {
+        created.push({ id, name: row.name, tools: (await serverTools(deps, row, true)).length, error: null });
+      } catch (error) {
+        created.push({ id, name: row.name, tools: null, error: (error as Error).message });
+      }
+    }
+    return c.json({ ok: true, created, skipped });
   });
 
   app.put('/:id', async (c) => {

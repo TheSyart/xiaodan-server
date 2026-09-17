@@ -36,7 +36,7 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
   {
     id: 'xiaodan',
     name: '小单',
-    description: '通用助手:聊天、查天气、联网搜索、定提醒、放音乐、画画。',
+    description: '通用助手:聊天、查天气、联网搜索、AI 资讯、定提醒、放音乐、画画。',
     greeting: '你好呀,我是小单,有什么想聊的尽管说。',
     safety_level: 'standard',
     max_steps: 6,
@@ -48,8 +48,9 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
       '用户要办事(查东西、定提醒、放歌、画画)时干脆利落,办完用一两句话说结果。',
     ].join('\n'),
     plugins: [...COMMON_TOOLS, 'search', 'reminders', 'stories', 'music', 'image'],
-    skills: [],
+    skills: ['ai-news-brief'],
     voice: 'longanhuan_v3.6',
+    mcp_hints: ['aihot'],
   },
   {
     id: 'tongtong',
@@ -111,7 +112,7 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
     skills: ['ai-news-brief'],
     voice: 'longanyuanfei',
     mcp_hints: ['aihot'],
-    note: '需要先在 MCP 页添加 aihot 服务器(地址含个人 actor id,不随代码提供),再建这个角色;建好后也可以在角色里补勾。',
+    note: '资讯来自内置的 MCP 服务器「AI热点资讯」(AIHOT,匿名只读)。它被删掉了的话,在 MCP 页粘贴 JSON 导入即可恢复。',
   },
 ];
 
