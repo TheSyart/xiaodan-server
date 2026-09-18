@@ -1,11 +1,13 @@
 // 记忆页的接口(挂在 /api/memory)。
 //
-// 热记忆按设备存,冷记忆(对话档案)在 P1 接上;这里先把设备选择、热记忆增删改、变更回溯与撤销、设置做全。
+// 热记忆按设备存;冷记忆是每段对话的档案,原文仍在 chat_messages 里,按 arc_id 关联。
 // 「哪个角色开着记忆」仍在智能体页改,这里只读地显示,避免两处双写。
 
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { all, one } from '../../db.ts';
+import { arcById, arcMessages, arcStats, deleteArc, listArcs, toView } from './arcs.ts';
+import { summarizeArc } from './archive.ts';
 import { canonicalMac } from '../../identity.ts';
 import type { AgentDeps } from '../types.ts';
 import { MEMORY_PLUGIN } from './tools.ts';
@@ -41,8 +43,7 @@ export function memoryRoutes(deps: AgentDeps): Hono {
     const found = device(c.req.query('mac')) ?? (devices[0] ? device(devices[0].mac) : undefined);
     if (!found) return c.json({ devices, device: null });
     const facts = listMemory(conn, found.mac);
-    const arcs = one<{ n: number; from: string | null; to: string | null }>(conn,
-      'SELECT COUNT(*) AS n, MIN(started_at) AS "from", MAX(ended_at) AS "to" FROM memory_arcs WHERE mac = ?', found.mac);
+    const arcs = arcStats(conn, found.mac);
     const enabledAgents = all<{ id: string; name: string }>(conn,
       `SELECT a.id, a.name FROM agent_plugins p JOIN agents a ON a.id = p.agent_id
        WHERE p.plugin_code = ? ORDER BY a.is_default DESC, a.created_at`, MEMORY_PLUGIN);
@@ -58,9 +59,12 @@ export function memoryRoutes(deps: AgentDeps): Hono {
         sensitive: facts.filter((row) => row.sensitive).length,
         max_facts: MAX_FACTS_PER_DEVICE,
         max_chars: MAX_FACT_CHARS,
-        arcs: arcs?.n ?? 0,
-        arc_from: arcs?.from ?? null,
-        arc_to: arcs?.to ?? null,
+        arcs: arcs.count,
+        arc_from: arcs.from,
+        arc_to: arcs.to,
+        arcs_this_month: arcs.thisMonth,
+        /** 还没整理的原文条数:上线后攒的老对话在这儿 */
+        unarchived: one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM chat_messages WHERE mac = ? AND arc_id IS NULL', found.mac)?.n ?? 0,
       },
       kinds: MEMORY_KINDS,
       agents_with_memory: enabledAgents,
@@ -135,6 +139,45 @@ export function memoryRoutes(deps: AgentDeps): Hono {
     const found = device(c.req.query('mac'));
     if (!found) return c.json({ error: '设备不存在' }, 404);
     for (const row of listMemory(conn, found.mac)) deleteFact(conn, row, 'admin', '在记忆页清空');
+    return c.json({ ok: true });
+  });
+
+  // ---- 冷记忆:对话档案 ----
+
+  app.get('/arcs', (c) => {
+    const found = device(c.req.query('mac'));
+    if (!found) return c.json({ error: '设备不存在' }, 404);
+    const names = new Map(all<{ id: string; name: string }>(conn, 'SELECT id, name FROM agents').map((row) => [row.id, row.name]));
+    const { items, next } = listArcs(conn, {
+      mac: found.mac,
+      ...(c.req.query('q') ? { q: c.req.query('q')! } : {}),
+      ...(c.req.query('before') ? { before: c.req.query('before')! } : {}),
+      ...(c.req.query('limit') ? { limit: Number(c.req.query('limit')) } : {}),
+    });
+    return c.json({
+      items: items.map((row) => ({ ...toView(row), agent_name: row.agent_id ? names.get(row.agent_id) ?? null : null })),
+      next,
+    });
+  });
+
+  app.get('/arcs/:id', (c) => {
+    const arc = arcById(conn, Number(c.req.param('id')));
+    if (!arc) return c.json({ error: '没有这段对话' }, 404);
+    return c.json({ arc: toView(arc), messages: arcMessages(conn, arc.id) });
+  });
+
+  /** 重新整理:没能自动整理好的(模型出错、返回的东西看不懂)在页面上点一下重来 */
+  app.post('/arcs/:id/retry', async (c) => {
+    const arc = arcById(conn, Number(c.req.param('id')));
+    if (!arc) return c.json({ error: '没有这段对话' }, 404);
+    if (arc.status === 'raw_gone') return c.json({ error: '这段对话的原文已经按保留策略清掉了,没法重新整理' }, 409);
+    const status = await summarizeArc(deps, { ...arc, attempts: 0 }, true);
+    return c.json({ ok: true, status, arc: toView(arcById(conn, arc.id)!) });
+  });
+
+  app.delete('/arcs/:id', (c) => {
+    const arc = arcById(conn, Number(c.req.param('id')));
+    if (arc) deleteArc(conn, arc, c.req.query('keep_raw') === '1');
     return c.json({ ok: true });
   });
 

@@ -7,6 +7,7 @@
 import { one } from '../../db.ts';
 import { EXTRA_TOOL_SOURCES, PROMPT_EXTRAS } from '../registry.ts';
 import type { AgentTool, ToolContext } from '../types.ts';
+import { arcById, arcMessages, arcsNote, listArcs } from './arcs.ts';
 import { memorySettings } from './settings.ts';
 import { forget, kindLabel, listMemory, memoryPrompt, remember } from './store.ts';
 
@@ -16,7 +17,19 @@ export function memoryEnabled(ctx: ToolContext): boolean {
   return !!one(ctx.deps.conn, 'SELECT 1 FROM agent_plugins WHERE agent_id = ? AND plugin_code = ?', ctx.agent.id, MEMORY_PLUGIN);
 }
 
-PROMPT_EXTRAS.memory = (ctx) => (ctx.device.mac && memoryEnabled(ctx) ? memoryPrompt(ctx.deps.conn, ctx.device.mac) : undefined);
+PROMPT_EXTRAS.memory = (ctx) => {
+  const mac = ctx.device.mac;
+  if (!mac || !memoryEnabled(ctx)) return undefined;
+  const facts = memoryPrompt(ctx.deps.conn, mac) ?? { facts: '', sensitiveNote: '', arcs: '' };
+  const arcs = arcsNote(ctx.deps.conn, mac);
+  if (!facts.facts && !facts.sensitiveNote && !arcs) return undefined;
+  return { ...facts, arcs };
+};
+
+/** 一条档案在工具结果里的样子 */
+const arcLine = (arc: { id: number; ended_at: string; title: string; summary: string; bullets: string[] }) =>
+  `[#${arc.id}] ${arc.ended_at.slice(0, 10)} ${arc.title}${arc.summary ? ` —— ${arc.summary}` : ''}`
+  + (arc.bullets.length ? `\n    ${arc.bullets.join(';')}` : '');
 
 const NO_DEVICE = '现在没有连着设备(网页试聊),记忆不会保存。照常回应用户即可。';
 
@@ -92,7 +105,78 @@ function memoryTools(ctx: ToolContext): AgentTool[] {
     },
   };
 
-  return [rememberTool, forgetTool, listTool];
+  const recallTool: AgentTool = {
+    name: 'recall_memory',
+    act: 'memory',
+    label: '回想以前聊过的',
+    description:
+      '回想以前聊过的事。用户问「你还记得上次我们聊的那个吗」「我上周说的那件事」,或者你需要以前的细节才能接着聊时调用。'
+      + '给 query 按关键词找,给 since/until 按日期找;拿到某一段的编号后,再用 arc_id 把那一段的原话调出来。'
+      + '这里也能取到平时不带在身边的私密信息(住址、联系方式),只在真的要用时取。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '关键词,比如「恐龙」「幼儿园」' },
+        since: { type: 'string', description: '起始日期 YYYY-MM-DD(可选)' },
+        until: { type: 'string', description: '截止日期 YYYY-MM-DD(可选)' },
+        arc_id: { type: 'integer', description: '要看原话的那一段的编号(可选)' },
+        limit: { type: 'integer', description: '最多返回几段,默认 5' },
+      },
+    },
+    hint: '正在回想',
+    async run(toolCtx, args) {
+      const mac = toolCtx.device.mac;
+      if (!mac) return { ok: true, content: NO_DEVICE };
+      const conn = toolCtx.deps.conn;
+
+      const arcId = Number(args['arc_id']);
+      if (Number.isFinite(arcId) && arcId > 0) {
+        const arc = arcById(conn, arcId);
+        if (!arc || arc.mac !== mac) return { ok: false, content: `没有编号 ${arcId} 的那段对话。` };
+        if (arc.status === 'raw_gone') {
+          return { ok: true, content: `这段对话的原话已经按保留策略清掉了,只剩摘要:${arc.title} —— ${arc.summary}` };
+        }
+        const rows = arcMessages(conn, arc.id, false);
+        let text = '';
+        for (const row of rows) {
+          const line = `${row.chat_type === 1 ? '用户' : '你'}:${row.content}\n`;
+          if (text.length + line.length > 2500) {
+            text = `…(前面省略)…\n${text}`;
+            break;
+          }
+          text += line;
+        }
+        return { ok: true, content: `${arc.ended_at.slice(0, 10)} 那段对话的原话:\n${text.trim() || '(没有内容)'}` };
+      }
+
+      const query = typeof args['query'] === 'string' ? args['query'] : '';
+      const limit = Math.min(Math.max(Number(args['limit']) || 5, 1), 8);
+      const { items } = listArcs(conn, {
+        mac,
+        ...(query ? { q: query } : {}),
+        ...(typeof args['since'] === 'string' && args['since'] ? { since: args['since'] } : {}),
+        ...(typeof args['until'] === 'string' && args['until'] ? { until: `${args['until']} 23:59:59` } : {}),
+        limit,
+      });
+      const ready = items.filter((arc) => arc.title);
+      if (!ready.length) {
+        return { ok: true, content: query ? `以前没有聊到过「${query}」。如实告诉用户想不起来,不要编。` : '还没有整理好的对话。' };
+      }
+      const lines = ready.map((arc) => arcLine({
+        id: arc.id,
+        ended_at: arc.ended_at,
+        title: arc.title,
+        summary: arc.summary,
+        bullets: (JSON.parse(arc.bullets_json || '[]') as string[]).slice(0, 3),
+      }));
+      return {
+        ok: true,
+        content: `以前聊过这些:\n${lines.join('\n')}\n想看某一段的原话就再调一次,带上它的编号。用一两句口语说给用户听,不要念编号。`,
+      };
+    },
+  };
+
+  return [rememberTool, forgetTool, listTool, recallTool];
 }
 
 EXTRA_TOOL_SOURCES.push(memoryTools);

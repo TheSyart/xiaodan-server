@@ -2,7 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
-  api, type ChatMessage, type ChatSession, type MemoryChange, type MemoryFact, type MemoryOverview, type MemorySettings,
+  api, type ChatMessage, type ChatSession, type MemoryArc, type MemoryChange, type MemoryFact, type MemoryOverview,
+  type MemorySettings,
 } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import ChatTranscript from '../components/ChatTranscript.vue';
@@ -30,8 +31,15 @@ const revealed = ref<number[]>([]);
 const revealedChanges = ref<number[]>([]);
 
 const current = ref<ChatSession | null>(null);
+const currentArc = ref<MemoryArc | null>(null);
 const messages = ref<ChatMessage[]>([]);
 const loadingMessages = ref(false);
+
+const arcs = ref<MemoryArc[]>([]);
+const arcNext = ref<string | null>(null);
+const arcQuery = ref('');
+const loadingArcs = ref(false);
+const retrying = ref(0);
 
 const settingsOpen = ref(false);
 const settings = ref<MemorySettings | null>(null);
@@ -51,13 +59,17 @@ async function load() {
       return;
     }
     const query = `?mac=${encodeURIComponent(mac.value)}`;
-    const [factList, changeList, chats] = await Promise.all([
+    const [factList, changeList, arcList, chats] = await Promise.all([
       api.get<{ items: MemoryFact[] }>(`/memory/facts${query}`),
       api.get<{ items: MemoryChange[] }>(`/memory/changes${query}`),
-      api.get<{ items: ChatSession[] }>(`/chats${query}`).catch(() => ({ items: [] })),
+      api.get<{ items: MemoryArc[]; next: string | null }>(`/memory/arcs${query}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`),
+      api.get<{ items: ChatSession[] }>(`/chats${query}&unarchived=1`).catch(() => ({ items: [] })),
     ]);
     facts.value = factList.items;
     changes.value = changeList.items;
+    arcs.value = arcList.items;
+    arcNext.value = arcList.next;
+    // 还没整理成档案的原文:按会话列出来兜底(上线前攒的老对话、正在聊的那一段)
     sessions.value = chats.items;
   } catch (e) {
     loadError.value = (e as Error).message;
@@ -68,6 +80,8 @@ async function load() {
 onMounted(load);
 watch(mac, () => {
   current.value = null;
+  currentArc.value = null;
+  arcQuery.value = '';
   revealed.value = [];
   revealedChanges.value = [];
   void load();
@@ -160,6 +174,93 @@ const changeText = (change: MemoryChange) => {
 const changeWho = (change: MemoryChange) =>
   (change.source === 'admin' ? '在这个页面' : change.source === 'archive' ? '整理对话时' : `${change.agent_name ?? '角色'}聊天时`);
 
+async function searchArcs() {
+  loadingArcs.value = true;
+  try {
+    const result = await api.get<{ items: MemoryArc[]; next: string | null }>(
+      `/memory/arcs?mac=${encodeURIComponent(mac.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
+    );
+    arcs.value = result.items;
+    arcNext.value = result.next;
+  } catch (e) {
+    toastError(e);
+  } finally {
+    loadingArcs.value = false;
+  }
+}
+
+async function moreArcs() {
+  if (!arcNext.value || loadingArcs.value) return;
+  loadingArcs.value = true;
+  try {
+    const result = await api.get<{ items: MemoryArc[]; next: string | null }>(
+      `/memory/arcs?mac=${encodeURIComponent(mac.value)}&before=${encodeURIComponent(arcNext.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
+    );
+    arcs.value = [...arcs.value, ...result.items];
+    arcNext.value = result.next;
+  } catch (e) {
+    toastError(e);
+  } finally {
+    loadingArcs.value = false;
+  }
+}
+
+async function openArc(arc: MemoryArc) {
+  currentArc.value = arc;
+  messages.value = [];
+  loadingMessages.value = true;
+  window.scrollTo({ top: 0 });
+  try {
+    messages.value = (await api.get<{ arc: MemoryArc; messages: ChatMessage[] }>(`/memory/arcs/${arc.id}`)).messages;
+  } catch (e) {
+    toastError(e);
+  } finally {
+    loadingMessages.value = false;
+  }
+}
+
+async function retryArc(arc: MemoryArc) {
+  if (retrying.value) return;
+  retrying.value = arc.id;
+  try {
+    const result = await api.post<{ status: string; arc: MemoryArc }>(`/memory/arcs/${arc.id}/retry`, {});
+    if (currentArc.value?.id === arc.id) currentArc.value = result.arc;
+    toast(result.status === 'ready' ? '整理好了' : '还是没能整理好,过会儿再试试');
+    await load();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    retrying.value = 0;
+  }
+}
+
+async function removeArc(arc: MemoryArc) {
+  if (!(await confirmDialog({
+    title: '删除这段档案?',
+    message: `「${arc.title || '未命名'}」连同这段对话的原文一起删掉,不能恢复。`,
+    confirmText: '删除',
+    danger: true,
+  }))) return;
+  try {
+    await api.del(`/memory/arcs/${arc.id}`);
+    if (currentArc.value?.id === arc.id) currentArc.value = null;
+    toast('已删除');
+    await load();
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+const ARC_STATUS: Record<MemoryArc['status'], string> = {
+  pending: '正在整理', ready: '', failed: '没能整理', skipped: '太短,没整理', raw_gone: '原文已清理',
+};
+
+function arcDuration(seconds: number) {
+  if (seconds < 60) return `${Math.max(1, seconds)} 秒`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`;
+  return `${(seconds / 3600).toFixed(1)} 小时`;
+}
+
 async function openSession(session: ChatSession) {
   current.value = session;
   messages.value = [];
@@ -236,7 +337,32 @@ const deviceName = (item: { alias: string; mac: string }) => item.alias || item.
 </script>
 
 <template>
-  <template v-if="current">
+  <template v-if="currentArc">
+    <PageHeader :title="currentArc.title || '这段对话'" :description="`${formatTime(currentArc.started_at)} · ${arcDuration(currentArc.duration_s)} · ${currentArc.messages} 条消息${currentArc.agent_name ? ` · ${currentArc.agent_name}` : ''}`">
+      <template #actions>
+        <button class="btn" type="button" @click="currentArc = null"><AppIcon name="arrowLeft" :size="16" /><span>返回</span></button>
+        <button class="btn" type="button" :aria-busy="retrying === currentArc.id" @click="retryArc(currentArc)">
+          <AppIcon name="refresh" :size="16" /><span>重新整理</span>
+        </button>
+        <button class="btn btn-danger" type="button" @click="removeArc(currentArc)"><AppIcon name="trash" :size="16" /><span>删除</span></button>
+      </template>
+    </PageHeader>
+    <section v-if="currentArc.summary || currentArc.bullets.length" class="card">
+      <p style="margin: 0 0 8px">{{ currentArc.summary }}</p>
+      <ul v-if="currentArc.bullets.length" style="margin: 0; padding-left: 18px">
+        <li v-for="(bullet, i) in currentArc.bullets" :key="i">{{ bullet }}</li>
+      </ul>
+      <div v-if="currentArc.topics.length" class="chips" style="margin-top: 8px">
+        <span v-for="topic in currentArc.topics" :key="topic" class="tag">{{ topic }}</span>
+      </div>
+    </section>
+    <section class="card">
+      <EmptyState v-if="!currentArc.has_raw" title="原文已按保留策略清理" description="摘要与要点仍然保留。" />
+      <ChatTranscript v-else :messages="messages" :loading="loadingMessages" />
+    </section>
+  </template>
+
+  <template v-else-if="current">
     <PageHeader title="对话详情" :description="`${formatTime(current.started_at)} · ${current.messages} 条消息`">
       <template #actions>
         <button class="btn" type="button" @click="current = null"><AppIcon name="arrowLeft" :size="16" /><span>返回</span></button>
@@ -356,12 +482,65 @@ const deviceName = (item: { alias: string; mac: string }) => item.alias || item.
       <section class="card">
         <div class="card-head">
           <div>
-            <h2><AppIcon name="message" :size="18" />聊过的内容 <span v-if="sessions.length" class="count">{{ sessions.length }}</span></h2>
-            <p>设备上每一轮对话的文字,音频不落盘。整段对话的摘要与要点会在归档功能上线后出现在这里。</p>
+            <h2><AppIcon name="message" :size="18" />对话档案 <span v-if="overview.device.arcs" class="count">{{ overview.device.arcs }}</span></h2>
+            <p>
+              每段对话(中间停超过半小时就算新的一段)会自动整理成一条档案:标题、一句话摘要、几条要点。
+              模型需要时用「回想」把它们找回来。<template v-if="overview.device.arcs_this_month">本月整理了 {{ overview.device.arcs_this_month }} 段。</template>
+            </p>
+          </div>
+          <div class="card-actions">
+            <form @submit.prevent="searchArcs">
+              <input v-model="arcQuery" class="input" type="search" placeholder="搜标题、摘要、关键词" style="height: 32px; width: 200px" />
+            </form>
           </div>
         </div>
-        <EmptyState v-if="sessions.length === 0" title="还没有聊过" description="设备聊过之后这里会自动出现。" />
+        <EmptyState
+          v-if="arcs.length === 0" title="还没有整理好的档案"
+          description="聊完静置十分钟左右,后台会自动整理;下面「还没整理的」里是原文。"
+        />
         <div v-else class="table-wrap">
+          <table class="table">
+            <thead><tr><th>标题</th><th>摘要</th><th>时间</th><th>时长</th><th></th></tr></thead>
+            <tbody>
+              <tr v-for="arc in arcs" :key="arc.id">
+                <td>
+                  <div class="cell-main">{{ arc.title || '未命名' }}</div>
+                  <div v-if="ARC_STATUS[arc.status]" class="cell-sub">{{ ARC_STATUS[arc.status] }}</div>
+                </td>
+                <td class="cell-sub">{{ arc.summary }}</td>
+                <td class="nowrap" :title="formatTime(arc.started_at)">{{ relativeTime(arc.ended_at) }}</td>
+                <td class="nowrap muted">{{ arcDuration(arc.duration_s) }}</td>
+                <td class="actions">
+                  <button
+                    v-if="arc.status === 'failed' || arc.status === 'skipped'" class="btn btn-ghost btn-sm" type="button"
+                    :aria-busy="retrying === arc.id" @click="retryArc(arc)"
+                  >
+                    <AppIcon name="refresh" :size="14" /><span>重新整理</span>
+                  </button>
+                  <button class="btn btn-ghost btn-sm" type="button" @click="openArc(arc)">
+                    <span>查看</span><AppIcon name="chevronRight" :size="14" />
+                  </button>
+                  <button class="btn btn-ghost btn-sm btn-icon danger" type="button" aria-label="删除" title="删除" @click="removeArc(arc)">
+                    <AppIcon name="trash" :size="14" />
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="arcNext" class="row" style="justify-content: center; margin-top: 10px">
+          <button class="btn btn-sm" type="button" :aria-busy="loadingArcs" @click="moreArcs">加载更多</button>
+        </div>
+      </section>
+
+      <section v-if="sessions.length" class="card">
+        <div class="card-head">
+          <div>
+            <h2><AppIcon name="clock" :size="18" />还没整理的 <span class="count">{{ sessions.length }}</span></h2>
+            <p>刚聊完的、以及记忆页上线之前攒下的对话。原文按连接分段,整理成档案后会合并到上面。</p>
+          </div>
+        </div>
+        <div class="table-wrap">
           <table class="table">
             <thead><tr><th>开始</th><th>消息</th><th>时长</th><th></th></tr></thead>
             <tbody>

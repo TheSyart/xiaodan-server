@@ -302,9 +302,31 @@ export interface MemoryOverview {
     arcs: number;
     arc_from: string | null;
     arc_to: string | null;
+    arcs_this_month: number;
+    /** 还没整理成档案的原文条数 */
+    unarchived: number;
   } | null;
   kinds: { kind: string; label: string; sensitive: boolean }[];
   agents_with_memory: { id: string; name: string }[];
+}
+
+/** 冷记忆:一段对话的档案 */
+export interface MemoryArc {
+  id: number;
+  title: string;
+  summary: string;
+  bullets: string[];
+  topics: string[];
+  agent_name: string | null;
+  started_at: string;
+  ended_at: string;
+  duration_s: number;
+  turns: number;
+  messages: number;
+  sessions: number;
+  status: 'pending' | 'ready' | 'failed' | 'skipped' | 'raw_gone';
+  error: string;
+  has_raw: boolean;
 }
 
 export interface MemorySettings {

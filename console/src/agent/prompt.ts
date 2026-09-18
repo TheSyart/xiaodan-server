@@ -6,7 +6,7 @@
 import type { AgentTool, AgentRow } from './types.ts';
 
 /** 能力族:工具名前缀 → 能力描述。没有对应工具的族会进「做不到」清单。 */
-const FAMILIES: { match: (name: string) => boolean; can: string; cannot: string }[] = [
+const FAMILIES: { match: (name: string) => boolean; can: string; cannot?: string }[] = [
   { match: (n) => n === 'get_weather', can: '查天气并在屏幕上显示', cannot: '查天气' },
   { match: (n) => n === 'show_calendar', can: '查日期、星期、农历并在屏幕上显示日历', cannot: '显示日历' },
   { match: (n) => n === 'set_volume', can: '调节设备音量', cannot: '调节音量(让用户按机身按键)' },
@@ -18,6 +18,7 @@ const FAMILIES: { match: (name: string) => boolean; can: string; cannot: string 
   { match: (n) => n.startsWith('vocab_'), can: '陪用户学英语单词并记录进度', cannot: '记录单词学习进度' },
   { match: (n) => n === 'switch_role', can: '切换到别的角色', cannot: '切换角色' },
   { match: (n) => n === 'remember', can: '记住用户告诉你的名字、喜好等,以后聊天还记得', cannot: '长期记住聊过的内容(过一阵就会忘)' },
+  { match: (n) => n === 'recall_memory', can: '回想以前聊过的事' },
 ];
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
@@ -43,8 +44,8 @@ export interface PromptInput {
   loadedSkills?: readonly { name: string; body: string }[];
   /** 有屏幕的小单固件(features.xiaodan) */
   hasScreen: boolean;
-  /** 长期记忆:按分类分好的事实,以及敏感条目的提示(内容不在这里) */
-  memory?: { facts: string; sensitiveNote: string };
+  /** 长期记忆:按分类分好的事实、敏感条目的提示(内容不在这里)、以前聊过什么的索引 */
+  memory?: { facts: string; sensitiveNote: string; arcs: string };
   /** 开着的 MCP 服务器的使用说明(MCP 页填写) */
   mcpNotes?: readonly { name: string; instructions: string }[];
   /** 对话模型能看图 */
@@ -73,7 +74,7 @@ export function buildSystemPrompt(input: PromptInput): string {
   const cannot: string[] = [];
   for (const family of FAMILIES) {
     if (names.some(family.match)) can.push(family.can);
-    else cannot.push(family.cannot);
+    else if (family.cannot) cannot.push(family.cannot);
   }
   const mcp = tools.filter((tool) => tool.name.startsWith('mcp_'));
   if (mcp.length) {
@@ -217,6 +218,11 @@ export function buildSystemPrompt(input: PromptInput): string {
     if (input.memory.sensitiveNote) lines.push(input.memory.sensitiveNote);
     lines.push('这些是以前聊天中了解到的,自然地用上即可,不要逐条复述。', '</关于用户的记忆>');
     sections.push(lines.join('\n'));
+  }
+
+  // 模型得先知道「有东西可查」才会去查:这里只列最近几段的日期与标题,细节让它自己调 recall_memory 取
+  if (input.memory?.arcs.trim()) {
+    sections.push(`<以前聊过什么>\n${input.memory.arcs.trim()}\n</以前聊过什么>`);
   }
 
   const calendarHint = names.includes('show_calendar')

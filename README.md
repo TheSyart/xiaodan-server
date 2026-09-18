@@ -271,7 +271,20 @@ in one click. Migration v11 removed the three former built-in skills (unchanged 
   - A fact that contains or is contained in an existing one updates it instead of piling up. Each device keeps at most 60 facts of up
     to 90 characters, and the oldest automatic one makes room; facts added by hand are never pushed out.
   - Every record, edit and deletion leaves a trail on the memory page and can be undone with one click.
-  - The memory page also shows what the device has talked about; the former "Chat history" page was folded into it.
+  - **Conversation arcs (cold memory)**: about ten minutes after a conversation settles, a background job turns it into one record
+    (title, one-sentence summary, a few bullets, keywords). The transcript stays in the database and can be expanded turn by turn on
+    the page. The former "Chat history" page was folded into this one.
+    - Segments are cut on time gaps (a pause longer than 30 minutes starts a new one), not on connections: the device reconnects
+      every 150 idle seconds, so cutting on connections would shatter one evening into a dozen fragments.
+    - Tidying up and correcting or adding hot memory happen in the same model call, never a second one. At most three memory changes
+      are accepted per arc, and the category and the hard limits are decided server-side.
+    - When tidying fails (model error, unparsable answer) it backs off and retries three times, then falls back to a plain title. The
+      transcript stays readable and the page offers a manual retry.
+    - The migration writes a watermark: conversations from before it are not tidied retroactively and are listed under "Not tidied yet".
+    - The model calls `recall_memory` to find arcs by keyword or date and then pulls one arc's transcript by id. A short index of what
+      was discussed before stays in the system prompt.
+    - Transcripts are kept forever by default; set a retention in days on the memory page and tidied transcripts are cleared while the
+      summaries remain.
   - Unbinding a device deletes its memory.
 
 ## Qwen speech and voices

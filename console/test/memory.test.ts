@@ -14,8 +14,12 @@ import { loadAgent } from '../src/agent/routes.ts';
 import {
   classify, forget, hardBlock, listChanges, listMemory, MAX_FACTS_PER_DEVICE, memoryPrompt, remember, undoChange,
 } from '../src/agent/memory/store.ts';
+import { applyOps, archiveTick, claimSegments, cleanup, nudgeArchive, splitSegments, summarizeArc } from '../src/agent/memory/archive.ts';
+import { arcById, arcMessages } from '../src/agent/memory/arcs.ts';
+import { saveMemorySettings } from '../src/agent/memory/settings.ts';
+import { collectTools } from '../src/agent/registry.ts';
 import { syncSystemVoices } from '../src/voice/store.ts';
-import type { AgentDeps, DeviceContext, TurnSink } from '../src/agent/types.ts';
+import type { AgentDeps, DeviceContext, ToolContext, TurnSink } from '../src/agent/types.ts';
 
 let conn: Db;
 const MAC = '4c:11:ae:31:7a:30';
@@ -270,5 +274,215 @@ describe('解绑设备', () => {
       assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM memory_arcs')!.n, 0);
       assert.equal(all(conn, 'SELECT * FROM memory_changes').length, 0, '变更留痕跟着设备一起走');
     });
+  });
+});
+
+// ---------------------------------------------------------------- 冷记忆:对话档案
+
+/** 造一条聊天记录,时间用「几分钟前」 */
+function say(minutesAgo: number, type: 1 | 2 | 3, content: string, session = 's1') {
+  run(conn,
+    "INSERT INTO chat_messages (mac, session_id, chat_type, content, agent_id, created_at) VALUES (?, ?, ?, ?, ?, datetime('now', ?))",
+    MAC, session, type, content, DEFAULT_AGENT_ID, `-${minutesAgo} minutes`);
+}
+
+/** 模型一次性返回整理结果(走的是同一条 SSE 通道) */
+function fakeSummary(replies: string[]) {
+  const calls: { messages: { role: string; content: string }[] }[] = [];
+  const fetchImpl = async (_url: string, init: RequestInit = {}) => {
+    calls.push(JSON.parse(String(init.body)));
+    const text = replies[calls.length - 1] ?? replies.at(-1) ?? '{}';
+    return new Response(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`,
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  };
+  return { fetchImpl, calls };
+}
+
+const GOOD = JSON.stringify({
+  title: '恐龙和幼儿园的小饼干',
+  summary: '聊了霸王龙,还说幼儿园发了小饼干很好吃。',
+  bullets: ['改口说现在最喜欢三角龙', '幼儿园老师姓王'],
+  topics: ['恐龙', '幼儿园'],
+  memory_ops: [{ op: 'add', text: '幼儿园老师姓王', reason: '这次说的' }],
+});
+
+describe('对话归档', () => {
+  // 迁移把归档水位线设在「升级那一刻」,不回溯历史对话;测试里的消息是往前推的,所以把水位线调早
+  beforeEach(() => {
+    run(conn, "UPDATE settings SET value = datetime('now', '-1 day') WHERE key = 'memory.archive_from'");
+  });
+
+  test('按半小时的缺口切段,不按连接:29 分钟不切、31 分钟切', () => {
+    const rows = [
+      { id: 1, session_id: 'a', chat_type: 1, content: '', created_at: '2026-09-18 19:00:00', agent_id: null },
+      { id: 2, session_id: 'b', chat_type: 2, content: '', created_at: '2026-09-18 19:29:00', agent_id: null },
+      { id: 3, session_id: 'c', chat_type: 1, content: '', created_at: '2026-09-18 20:00:01', agent_id: null },
+    ];
+    const segments = splitSegments(rows);
+    assert.deepEqual(segments.map((seg) => seg.map((row) => row.id)), [[1, 2], [3]]);
+  });
+
+  test('聊完静置十分钟才整理;整理好的档案带摘要要点,并把补录写进热记忆', async () => {
+    say(40, 1, '你好呀');
+    say(40, 2, '🙂你好,今天想聊什么?');
+    say(39, 1, '我现在最喜欢三角龙了');
+    say(39, 3, '[{"type":"tool","text":"remember({})"}]');
+    say(39, 2, '🙂三角龙也很酷!');
+    say(2, 1, '我回来啦');          // 还在聊的一段:这次不整理
+
+    const llm = fakeSummary([GOOD]);
+    const d = deps(llm.fetchImpl);
+    const claimed = claimSegments(conn, MAC, Date.now(), 5);
+    assert.equal(claimed.length, 1, '只认领静置够久的那一段');
+    assert.equal(claimed[0]!.turns, 2);
+    assert.equal(claimed[0]!.sessions, 1);
+    assert.equal(await summarizeArc(d, claimed[0]!), 'ready');
+
+    const arc = arcById(conn, claimed[0]!.id)!;
+    assert.equal(arc.status, 'ready');
+    assert.equal(arc.title, '恐龙和幼儿园的小饼干');
+    assert.deepEqual(JSON.parse(arc.topics_json), ['恐龙', '幼儿园']);
+    assert.match(arc.search_text, /幼儿园/u);
+    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text), ['幼儿园老师姓王'], '补录直接生效');
+    assert.equal(listMemory(conn, MAC)[0]!.source, 'archive');
+    assert.equal(listChanges(conn, MAC)[0]!.arc_id, arc.id, '留痕能追到是哪段对话改的');
+
+    // 交给模型的输入:丢掉工具记录,带上已有记忆与记录范围
+    const sent = String(llm.calls[0]!.messages[1]!.content);
+    assert.doesNotMatch(sent, /remember\(/u, '工具记录不占字数');
+    assert.match(sent, /<记录范围>/u);
+    assert.match(sent, /用户:我现在最喜欢三角龙了/u);
+  });
+
+  test('同一批消息整理两次只会产生一个档案', async () => {
+    say(40, 1, '你好呀');
+    say(39, 2, '🙂你好');
+    const d = deps(fakeSummary([GOOD]).fetchImpl);
+    nudgeArchive('s1');
+    await archiveTick(d);
+    nudgeArchive('s1');
+    await archiveTick(d);
+    assert.equal(all(conn, 'SELECT * FROM memory_arcs').length, 1);
+    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM chat_messages WHERE arc_id IS NULL')!.n, 0);
+  });
+
+  test('模型返回看不懂的东西:退避重试,三次之后降级,原文与 arc_id 都不动', async () => {
+    say(40, 1, '你好呀');
+    say(39, 1, '再见');
+    const d = deps(fakeSummary(['我觉得这段对话很温馨。']).fetchImpl);
+    const [arc] = claimSegments(conn, MAC, Date.now(), 1);
+    for (let i = 0; i < 3; i += 1) {
+      const current = arcById(conn, arc!.id)!;
+      await summarizeArc(d, current);
+    }
+    const failed = arcById(conn, arc!.id)!;
+    assert.equal(failed.status, 'skipped', '三次之后不再重试');
+    assert.equal(failed.attempts, 3);
+    assert.equal(failed.title, '你好呀', '兜底用第一句话当标题');
+    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM chat_messages WHERE arc_id IS NULL')!.n, 0, 'arc_id 不回退,免得无限重试');
+    assert.equal(arcMessages(conn, arc!.id).length, 2, '原文还在,页面仍能逐轮看');
+  });
+
+  test('太短的段不调模型;记录范围里没有的红线内容一律不记', async () => {
+    say(40, 1, '你好');
+    const llm = fakeSummary([GOOD]);
+    const d = deps(llm.fetchImpl);
+    const [arc] = claimSegments(conn, MAC, Date.now(), 1);
+    assert.equal(await summarizeArc(d, arc!), 'skipped');
+    assert.equal(llm.calls.length, 0, '一句话的对话不值得一次模型调用');
+    assert.equal(arcById(conn, arc!.id)!.title, '你好');
+  });
+
+  test('更正与补录:最多三条,delete 按编号删且能撤销,红线内容丢掉', () => {
+    const kept = remember(conn, { mac: MAC, text: '最喜欢霸王龙', source: 'admin' });
+    const gone = remember(conn, { mac: MAC, text: '名字叫豆豆', source: 'admin' });
+    run(conn, `INSERT INTO memory_arcs (mac, agent_id, started_at, ended_at) VALUES (?, ?, datetime('now'), datetime('now'))`, MAC, DEFAULT_AGENT_ID);
+    const arc = arcById(conn, one<{ id: number }>(conn, 'SELECT id FROM memory_arcs ORDER BY id DESC LIMIT 1')!.id)!;
+
+    const applied = applyOps(conn, arc, [
+      { op: 'update', id: kept.status === 'added' ? kept.row.id : 0, text: '最喜欢三角龙', reason: '改口了' },
+      { op: 'delete', id: gone.status === 'added' ? gone.row.id : 0, reason: '记错了' },
+      { op: 'add', text: '家里 wifi 密码是 abc12345' },
+      { op: 'add', text: '第四条不该被采纳' },
+    ]);
+    assert.equal(applied, 2, '改一条、删一条;密码被红线挡掉,第四条超出上限没轮到');
+    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text), ['最喜欢三角龙']);
+
+    const del = listChanges(conn, MAC).find((c) => c.op === 'delete')!;
+    assert.equal(undoChange(conn, del), true);
+    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text).sort(), ['名字叫豆豆', '最喜欢三角龙']);
+  });
+
+  test('保留策略:整理过的原文到期清掉,摘要还在', () => {
+    say(40, 1, '你好呀');
+    say(39, 2, '🙂你好');
+    const [arc] = claimSegments(conn, MAC, Date.now(), 1);
+    run(conn, "UPDATE memory_arcs SET status = 'ready', title = '闲聊', ended_at = datetime('now', '-40 days') WHERE id = ?", arc!.id);
+    assert.deepEqual(cleanup(conn), { rawGone: 0, orphans: 0 }, '默认永久保留,不删任何原文');
+
+    saveMemorySettings(conn, { rawKeepDays: 30 });
+    assert.equal(cleanup(conn).rawGone, 1);
+    assert.equal(arcMessages(conn, arc!.id).length, 0);
+    const after = arcById(conn, arc!.id)!;
+    assert.equal(after.status, 'raw_gone');
+    assert.equal(after.title, '闲聊', '摘要与标题永久保留');
+  });
+});
+
+describe('回想以前聊过的', () => {
+  function readyArc(title: string, summary: string, topics: string[], daysAgo = 1) {
+    run(conn,
+      `INSERT INTO memory_arcs (mac, agent_id, title, summary, bullets_json, topics_json, search_text, started_at, ended_at, status, turns, messages)
+       VALUES (?, ?, ?, ?, '[]', ?, ?, datetime('now', ?), datetime('now', ?), 'ready', 4, 8)`,
+      MAC, DEFAULT_AGENT_ID, title, summary, JSON.stringify(topics),
+      `${title} ${summary} ${topics.join(' ')}`.toLowerCase(), `-${daysAgo} days`, `-${daysAgo} days`);
+    return one<{ id: number }>(conn, 'SELECT id FROM memory_arcs ORDER BY id DESC LIMIT 1')!.id;
+  }
+
+  test('提示词里列出最近几段的标题,模型据此才会去翻', async () => {
+    run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'memory', '{}')", DEFAULT_AGENT_ID);
+    readyArc('恐龙和小饼干', '聊了霸王龙。', ['恐龙']);
+    const llm = fakeLlm([{ text: '🙂好呀。' }]);
+    const d = deps(llm.fetchImpl);
+    await runTurn(d, {
+      agent: loadAgent(d, DEFAULT_AGENT_ID)!, device: device(), query: '你好', engineMessages: [],
+      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink: silentSink,
+    });
+    const system = String(llm.calls[0]!.messages[0]!.content);
+    assert.match(system, /<以前聊过什么>/u);
+    assert.match(system, /恐龙和小饼干/u);
+    assert.match(system, /recall_memory/u);
+    assert.ok(llm.calls[0]!.tools!.some((t) => t.function.name === 'recall_memory'));
+  });
+
+  test('按关键词找得到,按编号能调出原话;原文清掉后如实说只剩摘要', async () => {
+    run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'memory', '{}')", DEFAULT_AGENT_ID);
+    const dino = readyArc('恐龙和小饼干', '聊了霸王龙。', ['恐龙']);
+    readyArc('学了五个水果单词', '苹果香蕉。', ['单词'], 3);
+    run(conn, "INSERT INTO chat_messages (mac, session_id, chat_type, content, arc_id) VALUES (?, 's9', 1, '霸王龙有多大呀', ?)", MAC, dino);
+    run(conn, "INSERT INTO chat_messages (mac, session_id, chat_type, content, arc_id) VALUES (?, 's9', 2, '🙂比校车还长呢', ?)", MAC, dino);
+
+    const d = deps(async () => new Response('{}'));
+    const ctx: ToolContext = {
+      deps: d, agent: loadAgent(d, DEFAULT_AGENT_ID)!, device: device(),
+      sink: silentSink, signal: new AbortController().signal, conversationKey: `device:${MAC}`,
+    };
+    const recall = (await collectTools(ctx)).find((t) => t.name === 'recall_memory')!;
+
+    const found = await recall.run(ctx, { query: '恐龙' });
+    assert.match(found.content, /恐龙和小饼干/u);
+    assert.doesNotMatch(found.content, /水果单词/u, '关键词不匹配的不返回');
+    assert.match(found.content, new RegExp(`#${dino}`, 'u'), '带编号,好让模型再来调原话');
+
+    const raw = await recall.run(ctx, { arc_id: dino });
+    assert.match(raw.content, /霸王龙有多大呀/u);
+    assert.match(raw.content, /比校车还长呢/u);
+
+    assert.match((await recall.run(ctx, { query: '滑板车' })).content, /想不起来|没有聊到过/u);
+
+    run(conn, "UPDATE memory_arcs SET status = 'raw_gone' WHERE id = ?", dino);
+    assert.match((await recall.run(ctx, { arc_id: dino })).content, /只剩摘要/u);
   });
 });

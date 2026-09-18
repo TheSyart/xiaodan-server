@@ -290,6 +290,8 @@ export interface MemoryPrompt {
   facts: string;
   /** 敏感条目的提示:只说有什么,不说内容 */
   sensitiveNote: string;
+  /** 以前聊过什么(对话档案的索引),由 arcs.ts 拼 */
+  arcs: string;
 }
 
 /** 注入提示词的内容;没有记忆时返回 undefined。 */
@@ -316,5 +318,5 @@ export function memoryPrompt(conn: Db, mac: string): MemoryPrompt | undefined {
     ? `你还知道他的${kinds.join('与')}(共 ${sensitive.length} 条),内容没有写在这里。真的需要用到时调用 recall_memory 取,平时不要提起。`
     : '';
   if (!facts && !sensitiveNote) return undefined;
-  return { facts, sensitiveNote };
+  return { facts, sensitiveNote, arcs: '' };
 }

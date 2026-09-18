@@ -597,18 +597,20 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
 
   app.get('/chats', (c) => {
     const mac = c.req.query('mac');
-    const rows = mac
-      ? all(
-          conn,
-          `SELECT session_id, mac, COUNT(*) AS messages, MIN(created_at) AS started_at, MAX(created_at) AS ended_at
-           FROM chat_messages WHERE mac = ? GROUP BY session_id, mac ORDER BY ended_at DESC LIMIT 100`,
-          mac,
-        )
-      : all(
-          conn,
-          `SELECT session_id, mac, COUNT(*) AS messages, MIN(created_at) AS started_at, MAX(created_at) AS ended_at
-           FROM chat_messages GROUP BY session_id, mac ORDER BY ended_at DESC LIMIT 100`,
-        );
+    // unarchived=1:只要还没整理成档案的(记忆页用它列「还没整理的」,免得与档案重复)
+    const where = ['1 = 1'];
+    const params: unknown[] = [];
+    if (mac) {
+      where.push('mac = ?');
+      params.push(mac);
+    }
+    if (c.req.query('unarchived') === '1') where.push('arc_id IS NULL');
+    const rows = all(
+      conn,
+      `SELECT session_id, mac, COUNT(*) AS messages, MIN(created_at) AS started_at, MAX(created_at) AS ended_at
+       FROM chat_messages WHERE ${where.join(' AND ')} GROUP BY session_id, mac ORDER BY ended_at DESC LIMIT 100`,
+      ...params,
+    );
     return c.json({ items: rows });
   });
 

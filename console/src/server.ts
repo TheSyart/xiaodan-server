@@ -10,6 +10,7 @@ import { startReminderScheduler } from './agent/reminders/scheduler.ts';
 import { seedMedia } from './agent/media/seed.ts';
 import { startStorySynthesis } from './agent/media/synth.ts';
 import { startRoleGreetings } from './agent/roles/switch.ts';
+import { startMemoryArchiver } from './agent/memory/archive.ts';
 import { seedBuiltinMcp } from './agent/mcp/builtin.ts';
 import { authMode, isInitialized } from './auth.ts';
 import { getSetting } from './settings.ts';
@@ -38,6 +39,7 @@ function main(): void {
       startReminderScheduler(deps);
       startStorySynthesis(deps);
       startRoleGreetings(deps);
+      startMemoryArchiver(deps);
     },
   });
   const port = Number(process.env.PORT ?? 8002);

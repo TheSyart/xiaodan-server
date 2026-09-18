@@ -19,6 +19,7 @@ import { ttsOverrides } from './voice/profile.ts';
 import { defaultVoiceOf, modelFamily, resolveVoice } from './voice/store.ts';
 import { defaultSystemVoice } from './voice/system-voices.ts';
 import { onDeviceConfigFetched } from './agent/hooks.ts';
+import { nudgeArchive } from './agent/memory/archive.ts';
 import {
   canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
 } from './identity.ts';
@@ -293,10 +294,16 @@ export function managerApi(conn: Db): Hono {
   });
 
   // ---- 会话摘要与标题 ----
-  // 服务端在连接结束时会调,失败只打日志不影响对话。我们不做自动摘要
-  // (那需要再花一次 LLM 调用),直接确认即可。
-  app.post('/agent/chat-summary/:sessionId/save', (c) => c.json(ok(null)));
-  app.post('/agent/chat-title/:sessionId/generate', (c) => c.json(ok(null)));
+  // 服务端在连接结束时会调,失败只打日志不影响对话。这是控制塔唯一能及时知道「这次连接结束了」的时机:
+  // 只往内存里记一个待办(必须同步返回,引擎是在关连接的路上调的),整理对话档案的活由后台定时器做。
+  app.post('/agent/chat-summary/:sessionId/save', (c) => {
+    nudgeArchive(c.req.param('sessionId'));
+    return c.json(ok(null));
+  });
+  app.post('/agent/chat-title/:sessionId/generate', (c) => {
+    nudgeArchive(c.req.param('sessionId'));
+    return c.json(ok(null));
+  });
 
   // ---- 设备互呼通讯录 ----
   // 只有一台设备,没有互呼场景。返回空,服务端会安静地跳过。

@@ -24,7 +24,8 @@ export interface Conversation {
   lastAt: number;
 }
 
-const IDLE_MS = 30 * 60_000;
+/** 多久没说话就算新的一段对话。归档也用这个值切段,档案边界与模型当时的工作记忆边界重合 */
+export const IDLE_MS = 30 * 60_000;
 const MAX_TURNS = 16;
 const FULL_TURNS = 3;
 const TOOL_RESULT_CHARS = 1500;

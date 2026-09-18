@@ -216,3 +216,15 @@ export async function* streamChat(fetchImpl: FetchLike, config: LlmConfig, reque
     }));
   yield { type: 'done', toolCalls, finishReason, ...(usage ? { usage } : {}) };
 }
+
+/**
+ * 一次性调用:把流式增量拼成一段文字。后台用途(整理对话档案、起标题)不需要边生成边吐,
+ * 也不给工具,复用同一套请求构造与错误处理。
+ */
+export async function completeChat(fetchImpl: FetchLike, config: LlmConfig, request: ChatRequest): Promise<string> {
+  let out = '';
+  for await (const event of streamChat(fetchImpl, config, { ...request, tools: undefined })) {
+    if (event.type === 'text') out += event.text;
+  }
+  return out.trim();
+}
