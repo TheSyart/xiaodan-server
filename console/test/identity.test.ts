@@ -15,6 +15,14 @@ describe('MAC 规范化', () => {
     assert.equal(canonicalMac(' 4c:11:ae:31:7a:30 '), '4c:11:ae:31:7a:30');
   });
 
+  test('12 位紧凑形式也认(前端把 MAC 拼进 URL 就是这么写的)', () => {
+    assert.equal(canonicalMac('4c11ae317a30'), '4c:11:ae:31:7a:30');
+    assert.equal(canonicalMac('4C11AE317A30'), '4c:11:ae:31:7a:30');
+    assert.equal(canonicalMac('4c11ae317a3'), null);
+    assert.equal(canonicalMac('4c11ae317a300'), null);
+    assert.equal(canonicalMac('000000000000'), null);
+  });
+
   test('非十六进制、长度不对、全零与非字符串一律拒绝', () => {
     // 旧正则 [0-9A-Za-z] 会放过 zz 这样的值
     assert.equal(canonicalMac('zz:bb:cc:dd:ee:ff'), null);

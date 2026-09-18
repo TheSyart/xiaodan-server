@@ -37,6 +37,13 @@ async function failure(response: Response): Promise<ApiError> {
   return error;
 }
 
+/**
+ * 拼进 URL 的 MAC:去掉冒号写紧凑形式(如 4c11ae317a30)。
+ * 冒号会被编码成 %3A,而运维面板的统一 Auth 把「%3A 后面跟小写十六进制字母」
+ * 误判成小写的百分号编码,整条请求会被它 400 掉。后端 canonicalMac 两种都认。
+ */
+export const urlMac = (mac: string) => mac.replaceAll(':', '').toLowerCase();
+
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),

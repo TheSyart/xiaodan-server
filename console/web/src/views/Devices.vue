@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
+  urlMac,
   api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type Overview, type PendingDevice,
 } from '../api';
 import AppIcon from '../components/AppIcon.vue';
@@ -96,7 +97,7 @@ async function unbind(device: Device) {
   });
   if (!ok) return;
   try {
-    await api.del(`/devices/${encodeURIComponent(device.mac)}`);
+    await api.del(`/devices/${urlMac(device.mac)}`);
     toast(`已解绑 ${deviceName(device)}`);
     await load();
   } catch (e) {
@@ -144,7 +145,7 @@ async function rename(device: Device) {
   });
   if (next === null) return;
   try {
-    await api.put(`/devices/${encodeURIComponent(device.mac)}`, { alias: next.trim() });
+    await api.put(`/devices/${urlMac(device.mac)}`, { alias: next.trim() });
     toast('名称已保存');
     await load();
   } catch (e) {
@@ -155,7 +156,7 @@ async function rename(device: Device) {
 async function moveAgent(device: Device, target: string) {
   const agent = agents.value.find((item) => item.id === target);
   try {
-    await api.put(`/devices/${encodeURIComponent(device.mac)}`, { agent_id: target });
+    await api.put(`/devices/${urlMac(device.mac)}`, { agent_id: target });
     toast(`${deviceName(device)} 已切换到「${agent?.name ?? target}」,下次连接时生效`);
   } catch (e) {
     toastError(e);
@@ -175,7 +176,7 @@ const savingRoles = ref(false);
 const agentRuntimeRoles = computed(() => agents.value);
 
 async function openRoles(device: Device) {
-  const mac = encodeURIComponent(device.mac);
+  const mac = urlMac(device.mac);
   try {
     const roles = await api.get<{ agent_id: string; allowlist: string[] | null }>(`/devices/${mac}/roles`);
     restrictRoles.value = roles.allowlist !== null;
@@ -196,7 +197,7 @@ async function saveRoles() {
   savingRoles.value = true;
   try {
     const known = new Set(agentRuntimeRoles.value.map((agent) => agent.id));
-    await api.put(`/devices/${encodeURIComponent(device.mac)}/roles`, {
+    await api.put(`/devices/${urlMac(device.mac)}/roles`, {
       allowlist: restrictRoles.value ? allowedRoles.value.filter((id) => known.has(id)) : null,
     });
     toast('已保存可切换的角色');
@@ -233,7 +234,7 @@ async function setLocate(device: Device, enabled: boolean) {
     confirmText: '开启',
   }))) return;
   try {
-    await api.put(`/devices/${encodeURIComponent(device.mac)}/locate`, { enabled });
+    await api.put(`/devices/${urlMac(device.mac)}/locate`, { enabled });
     toast(enabled ? '已开启定位' : '已关闭定位并删掉记录');
     await load();
   } catch (e) {
@@ -246,7 +247,7 @@ async function refreshLocate(device: Device) {
   locating.value = device.mac;
   try {
     const result = await api.post<{ located: boolean; asked_device: boolean; note: string }>(
-      `/devices/${encodeURIComponent(device.mac)}/locate/refresh`, {},
+      `/devices/${urlMac(device.mac)}/locate/refresh`, {},
     );
     toast(result.located ? '定位好了' : result.note);
     await load();

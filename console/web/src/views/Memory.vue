@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
+  urlMac,
   api, type ChatMessage, type ChatSession, type MemoryArc, type MemoryChange, type MemoryFact, type MemoryOverview,
   type MemorySettings,
 } from '../api';
@@ -49,7 +50,7 @@ const savingSettings = ref(false);
 async function load() {
   loadError.value = '';
   try {
-    const data = await api.get<MemoryOverview>(`/memory/overview${mac.value ? `?mac=${encodeURIComponent(mac.value)}` : ''}`);
+    const data = await api.get<MemoryOverview>(`/memory/overview${mac.value ? `?mac=${urlMac(mac.value)}` : ''}`);
     overview.value = data;
     mac.value = data.device?.mac ?? '';
     if (!mac.value) {
@@ -58,7 +59,7 @@ async function load() {
       sessions.value = [];
       return;
     }
-    const query = `?mac=${encodeURIComponent(mac.value)}`;
+    const query = `?mac=${urlMac(mac.value)}`;
     const [factList, changeList, arcList, chats] = await Promise.all([
       api.get<{ items: MemoryFact[] }>(`/memory/facts${query}`),
       api.get<{ items: MemoryChange[] }>(`/memory/changes${query}`),
@@ -147,7 +148,7 @@ async function clearFacts() {
     danger: true,
   }))) return;
   try {
-    await api.del(`/memory/facts?mac=${encodeURIComponent(mac.value)}`);
+    await api.del(`/memory/facts?mac=${urlMac(mac.value)}`);
     await load();
   } catch (e) {
     toastError(e);
@@ -178,7 +179,7 @@ async function searchArcs() {
   loadingArcs.value = true;
   try {
     const result = await api.get<{ items: MemoryArc[]; next: string | null }>(
-      `/memory/arcs?mac=${encodeURIComponent(mac.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
+      `/memory/arcs?mac=${urlMac(mac.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
     );
     arcs.value = result.items;
     arcNext.value = result.next;
@@ -194,7 +195,7 @@ async function moreArcs() {
   loadingArcs.value = true;
   try {
     const result = await api.get<{ items: MemoryArc[]; next: string | null }>(
-      `/memory/arcs?mac=${encodeURIComponent(mac.value)}&before=${encodeURIComponent(arcNext.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
+      `/memory/arcs?mac=${urlMac(mac.value)}&before=${encodeURIComponent(arcNext.value)}${arcQuery.value ? `&q=${encodeURIComponent(arcQuery.value)}` : ''}`,
     );
     arcs.value = [...arcs.value, ...result.items];
     arcNext.value = result.next;

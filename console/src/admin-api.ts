@@ -602,7 +602,9 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
   // ---- 对话记录 ----
 
   app.get('/chats', (c) => {
-    const mac = c.req.query('mac');
+    const raw = c.req.query('mac');
+    const mac = raw ? canonicalMac(raw) : null;
+    if (raw && !mac) return c.json({ error: 'MAC 地址格式不正确' }, 400);
     // unarchived=1:只要还没整理成档案的(记忆页用它列「还没整理的」,免得与档案重复)
     const where = ['1 = 1'];
     const params: unknown[] = [];

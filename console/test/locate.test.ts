@@ -267,6 +267,13 @@ describe('设备页的定位开关', () => {
     assert.deepEqual(bridge.sent, []);
   });
 
+  test('紧凑形式的 MAC 也能用(前端拼进 URL 的就是这种)', async () => {
+    const app = createApp(conn, { agent: { fetch: async () => new Response('{}'), bridge: new FakeBridge(), log: () => {} } });
+    const response = await app.request('http://localhost/api/devices/4c11ae317a30/locate');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { enabled: boolean }).enabled, false);
+  });
+
   test('设备列表带上位置,页面不用再逐台查', async () => {
     run(conn, 'UPDATE devices SET locate = 1 WHERE mac = ?', MAC);
     run(conn,

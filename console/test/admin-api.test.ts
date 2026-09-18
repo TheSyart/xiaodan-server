@@ -511,4 +511,15 @@ describe('对话记录', () => {
     assert.equal(detail.items.length, 2);
     assert.equal(detail.items[0].content, '你好');
   });
+
+  test('按 mac 过滤:紧凑形式与冒号形式等价,坏格式报 400', async () => {
+    run(conn, 'INSERT INTO chat_messages (mac, session_id, chat_type, content) VALUES (?,?,?,?)',
+      'aa:bb:cc:dd:ee:20', 'sess-2', 1, '在吗');
+    for (const mac of ['aa:bb:cc:dd:ee:20', 'aabbccddee20', 'AA-BB-CC-DD-EE-20']) {
+      const list = await json(await api('GET', `/chats?mac=${mac}`));
+      assert.equal(list.items.length, 1, mac);
+      assert.equal(list.items[0].session_id, 'sess-2');
+    }
+    assert.equal((await api('GET', '/chats?mac=zz')).status, 400);
+  });
 });

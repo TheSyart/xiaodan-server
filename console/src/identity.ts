@@ -38,10 +38,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 /** 哈希加一段固定前缀,使这里存下的值不能被挪作他用的哈希直接比对。 */
 const HASH_DOMAIN = 'xiaodan/client-id/v1\n';
 
-/** 统一成小写冒号形式。连字符分隔、大写都接受;全零地址拒绝。 */
+/** 统一成小写冒号形式。连字符分隔、大写、12 位紧凑形式都接受;全零地址拒绝。 */
 export function canonicalMac(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const mac = raw.trim().toLowerCase().replaceAll('-', ':');
+  let mac = raw.trim().toLowerCase().replaceAll('-', ':');
+  // 紧凑形式(4c11ae317a30):前端把 MAC 拼进 URL 时用这种写法 —— 冒号会被编码成 %3A,
+  // 而运维面板的 URI 规范化把「%3A 后面跟小写十六进制字母」误判成小写的百分号编码而拒掉。
+  if (/^[0-9a-f]{12}$/u.test(mac)) mac = mac.replace(/(..)(?=..)/gu, '$1:');
   if (!MAC_RE.test(mac) || mac === '00:00:00:00:00:00') return null;
   return mac;
 }
