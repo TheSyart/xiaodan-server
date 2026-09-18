@@ -287,6 +287,24 @@ in one click. Migration v11 removed the three former built-in skills (unchanged 
       summaries remain.
   - Unbinding a device deletes its memory.
 
+## Device location
+
+**Off by default, enabled per device** (the "Location" column on the device page). Only the latest fix is stored; turning the
+feature off deletes it, and so does unbinding the device.
+
+- **From nearby Wi-Fi access points** (tens of metres in a city): while idle the device scans for access points and reports their
+  BSSIDs and signal strengths; a location service turns that into coordinates. The provider is configured under "Location service"
+  on the settings page (Amap's hardware location API, which needs a Web service key). **At least two access points** are required.
+  This tier needs firmware that can scan.
+- **Public IP as a fallback** (city level, 3-20 km): the `client_ip` that comes with every turn, no key required. It needs nginx to
+  forward `X-Real-IP`; otherwise only a private address is visible and the lookup is skipped rather than returning the server's own
+  location.
+- Coordinates are in **GCJ-02** (Amap's system), labelled as such and never converted. No map SDK is embedded — the content
+  security policy blocks external scripts — just a link that opens the point in Amap's web map.
+- **No BSSID is ever written to the database**: scan results live in memory only until they are resolved, and IPs and BSSIDs are
+  masked in the logs.
+- A failed fix records the reason and never overwrites the previous location.
+
 ## Qwen speech and voices
 
 Speech recognition, speech synthesis and text-to-image all use Alibaba Cloud Model Studio (Qwen) directly, without the model gateway;

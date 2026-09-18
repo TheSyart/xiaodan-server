@@ -231,6 +231,18 @@ export interface Device {
   created_at: string;
   /** verified = 用绑定码配对过、每次连接都核验身份;legacy = 身份校验上线前绑定,需重新配对才能对话 */
   identity: 'verified' | 'legacy';
+  /** 1 = 这台设备允许定位(默认关) */
+  locate: number;
+  loc_source: 'wifi' | 'ip' | null;
+  loc_lng: number | null;
+  loc_lat: number | null;
+  loc_radius: number | null;
+  loc_province: string | null;
+  loc_city: string | null;
+  loc_district: string | null;
+  loc_address: string | null;
+  loc_error: string | null;
+  loc_at: string | null;
 }
 
 /** 角色模板:一键建出配好人设、工具、技能与音色的智能体 */

@@ -207,6 +207,56 @@ async function saveRoles() {
   }
 }
 
+// ---- 定位 ----
+//
+// 默认关着。开了之后:每次对话带上来的公网 IP 会被记下当兜底(城市级),
+// 新固件还会在空闲时扫一下周围的 Wi-Fi 热点(几十米)。位置只存最新一条,关掉时一并删除。
+
+const locating = ref('');
+
+function locateText(device: Device): string {
+  const place = [device.loc_province, device.loc_city, device.loc_district].filter(Boolean);
+  const where = device.loc_address || [...new Set(place)].join(' ');
+  const precision = device.loc_source === 'wifi' && device.loc_radius ? `约 ${device.loc_radius} 米` : '城市级';
+  return `${where} · ${precision}`;
+}
+
+const locateTitle = (device: Device) =>
+  `${device.loc_source === 'wifi' ? '按周围 Wi-Fi 热点' : '按公网 IP'}定位,${relativeTime(device.loc_at)}`
+  + (device.loc_lat && device.loc_lng ? `(${device.loc_lat.toFixed(4)}, ${device.loc_lng.toFixed(4)} 高德坐标系)` : '');
+
+async function setLocate(device: Device, enabled: boolean) {
+  if (enabled && !(await confirmDialog({
+    title: `给「${deviceName(device)}」开启定位?`,
+    message: '开启后会记下这台设备的大致位置(先按公网 IP 定到城市;新固件在空闲时扫一下周围的 Wi-Fi 热点,可以精确到几十米)。'
+      + '只保留最新一条,关掉时一并删除。',
+    confirmText: '开启',
+  }))) return;
+  try {
+    await api.put(`/devices/${encodeURIComponent(device.mac)}/locate`, { enabled });
+    toast(enabled ? '已开启定位' : '已关闭定位并删掉记录');
+    await load();
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+async function refreshLocate(device: Device) {
+  if (locating.value) return;
+  locating.value = device.mac;
+  try {
+    const result = await api.post<{ located: boolean; asked_device: boolean; note: string }>(
+      `/devices/${encodeURIComponent(device.mac)}/locate/refresh`, {},
+    );
+    toast(result.located ? '定位好了' : result.note);
+    await load();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    locating.value = '';
+  }
+}
+
 const EVENT_TEXT: Record<IdentityEvent['kind'], string> = {
   mismatch: '出示的设备密钥与绑定时记录的不一致',
   missing_identity: '没有出示有效的设备密钥',
@@ -416,7 +466,7 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
     <div v-else class="table-wrap">
       <table class="table">
         <thead>
-          <tr><th>设备</th><th>身份</th><th>智能体</th><th>最后连接</th><th></th></tr>
+          <tr><th>设备</th><th>身份</th><th>智能体</th><th>最后连接</th><th>位置</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="device in devices" :key="device.mac">
@@ -447,6 +497,21 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
             <td>
               <div class="nowrap" :title="formatTime(device.last_connected_at)">{{ relativeTime(device.last_connected_at) }}</div>
               <div v-if="device.app_version" class="cell-sub">固件 {{ device.app_version }}</div>
+            </td>
+            <td>
+              <template v-if="device.locate">
+                <div v-if="device.loc_city" class="nowrap" :title="locateTitle(device)">{{ locateText(device) }}</div>
+                <div v-else class="cell-sub">{{ device.loc_error ? '定位失败' : '等设备下次说话' }}</div>
+                <div class="row" style="gap: 2px; margin-top: 2px">
+                  <button class="btn btn-ghost btn-sm" type="button" :aria-busy="locating === device.mac" @click="refreshLocate(device)">
+                    <AppIcon name="refresh" :size="13" /><span>立即定位</span>
+                  </button>
+                  <button class="btn btn-ghost btn-sm" type="button" @click="setLocate(device, false)"><span>关闭</span></button>
+                </div>
+              </template>
+              <button v-else class="btn btn-ghost btn-sm" type="button" @click="setLocate(device, true)">
+                <AppIcon name="globe" :size="13" /><span>开启定位</span>
+              </button>
             </td>
             <td class="actions">
               <button class="btn btn-ghost btn-sm" type="button" @click="openRoles(device)">

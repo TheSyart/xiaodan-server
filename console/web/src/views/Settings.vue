@@ -5,6 +5,7 @@ import { api, type Setting } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import PageHeader from '../components/PageHeader.vue';
 import SkeletonRows from '../components/SkeletonRows.vue';
+import ServiceProviders from '../components/ServiceProviders.vue';
 import SwitchToggle from '../components/SwitchToggle.vue';
 import type { IconName } from '../icons';
 import { confirmDialog, copyText, toast, toastError } from '../ui';
@@ -210,6 +211,23 @@ async function rotate() {
         <span class="field-hint"><code>{{ item.key }}</code></span>
       </div>
     </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2><AppIcon name="globe" :size="18" />定位服务</h2>
+        <p>
+          设备扫到周围的 Wi-Fi 热点后,由定位服务换算成坐标(市区通常几十米)。没配也能用:退回按公网 IP 的城市级定位。
+          定位默认是关的,要在「设备」页逐台打开。
+        </p>
+      </div>
+    </div>
+    <ServiceProviders
+      kind="locate"
+      hint="定位服务 · 高德「智能硬件定位」需要在高德开放平台申请 Web 服务 Key。"
+      empty-text="还没有配置定位服务(只能按 IP 定到城市)"
+    />
   </section>
 
   <div v-if="dirty" class="action-bar">

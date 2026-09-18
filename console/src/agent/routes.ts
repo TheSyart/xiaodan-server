@@ -14,6 +14,7 @@ import { one } from '../db.ts';
 import { canonicalMac } from '../identity.ts';
 import { SECRET_KEY } from '../seed.ts';
 import { conversations, runTurn } from './loop.ts';
+import { noteClientIp } from './locate/store.ts';
 import { verifyAgentToken } from './token.ts';
 import type { AgentDeps, AgentRow, DeviceContext, TraceEvent, TurnSink } from './types.ts';
 
@@ -144,6 +145,8 @@ export function agentRoutes(deps: AgentDeps): Hono {
         media: (item) => send({ t: 'media', ...item }),
         closeAfterTurn: () => send({ t: 'close_after_turn' }),
       };
+      // 设备的公网 IP 只在内存里留一份,给开了定位的设备当兜底(几十米的定位靠设备扫热点)
+      noteClientIp(mac, body.client_ip);
       const started = Date.now();
       const summary = await runTurn(deps, {
         agent,

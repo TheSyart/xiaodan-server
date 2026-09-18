@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router';
 import { api, type ToolView } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import PageHeader from '../components/PageHeader.vue';
-import SearchProviders from '../components/SearchProviders.vue';
+import ServiceProviders from '../components/ServiceProviders.vue';
 import SkeletonRows from '../components/SkeletonRows.vue';
 import type { IconName } from '../icons';
 import { toast, toastError } from '../ui';
@@ -132,7 +132,12 @@ const TOOL_ICON: Record<string, IconName> = {
           </dl>
 
           <div v-if="tool.code === 'search'" class="plugin-fields">
-            <SearchProviders @changed="load" />
+            <ServiceProviders
+              kind="search"
+              hint="搜索服务 · 可以配多家,默认那家生效。DeepSeek 官方联网搜索可以直接沿用 DeepSeek 对话模型的密钥。"
+              empty-text="还没有配置搜索服务"
+              @changed="load"
+            />
           </div>
           <form v-else-if="tool.fields.length" class="plugin-fields" @submit.prevent="save(tool)">
             <label v-for="field in tool.fields" :key="field.key" class="field">

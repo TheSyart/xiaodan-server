@@ -22,6 +22,7 @@ import { toolConfig } from './agent/tool-settings.ts';
 import { agentSkillRoutes, skillRoutes } from './agent/skills/routes.ts';
 import { reminderRoutes } from './agent/reminders/routes.ts';
 import { memoryRoutes } from './agent/memory/routes.ts';
+import { locateRoutes } from './agent/locate/routes.ts';
 import { serviceRoutes } from './agent/services-routes.ts';
 import { mediaAdminRoutes } from './agent/media/routes.ts';
 import { vocabRoutes } from './agent/vocab/routes.ts';
@@ -383,6 +384,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/agents', agentSkillRoutes(deps.agent));
     app.route('/role-templates', roleTemplateRoutes(deps.agent));
     app.route('/devices', deviceRoleRoutes(deps.agent));
+    app.route('/devices', locateRoutes(deps.agent));
   }
 
   // ---- 智能体 ----
@@ -481,10 +483,14 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     c.json({
       items: all(
         conn,
-        `SELECT d.mac, d.agent_id, d.alias, d.board, d.app_version, d.last_connected_at, d.created_at,
+        `SELECT d.mac, d.agent_id, d.alias, d.board, d.app_version, d.last_connected_at, d.created_at, d.locate,
                 CASE WHEN d.secret_hash IS NULL THEN 'legacy' ELSE 'verified' END AS identity,
-                a.name AS agent_name
+                a.name AS agent_name,
+                l.source AS loc_source, l.lng AS loc_lng, l.lat AS loc_lat, l.radius AS loc_radius,
+                l.province AS loc_province, l.city AS loc_city, l.district AS loc_district, l.address AS loc_address,
+                l.last_error AS loc_error, l.located_at AS loc_at
          FROM devices d LEFT JOIN agents a ON a.id = d.agent_id
+         LEFT JOIN device_locations l ON l.mac = d.mac
          ORDER BY d.last_connected_at DESC, d.created_at DESC`,
       ),
       pending: all(

@@ -8,13 +8,15 @@ import SkeletonRows from './SkeletonRows.vue';
 import SwitchToggle from './SwitchToggle.vue';
 import { confirmDialog, toast, toastError } from '../ui';
 
-// 「联网搜索」工具用的搜索服务:可以配多家,默认那家生效,随时切换。嵌在工具页的联网搜索里。
+// 外部服务商的增删改查:搜索服务嵌在工具页的「联网搜索」里,定位服务嵌在设置页。
+// 可以配多家,默认那家生效,随时切换;密钥打码显示,原样提交回来不会覆盖。
 
+const props = defineProps<{ kind: Kind; hint: string; emptyText: string }>();
 const emit = defineEmits<{ changed: [] }>();
 
-type Kind = 'search';
+type Kind = 'search' | 'locate';
 
-const catalog = ref<Record<Kind, ServiceDef[]>>({ search: [] });
+const catalog = ref<Record<Kind, ServiceDef[]>>({ search: [], locate: [] });
 const items = ref<ServiceProvider[]>([]);
 const models = ref<Model[]>([]);
 const loading = ref(true);
@@ -28,7 +30,7 @@ async function load() {
       api.get<{ items: ServiceProvider[] }>('/service-providers'),
       api.get<{ items: Model[] }>('/models'),
     ]);
-    catalog.value = c;
+    catalog.value = { search: c.search ?? [], locate: c.locate ?? [] };
     items.value = s.items;
     models.value = m.items;
   } catch (e) {
@@ -117,10 +119,12 @@ const testResult = ref<Record<string, string>>({});
 async function test(item: ServiceProvider) {
   testing.value = item.id;
   try {
-    const result = await api.post<{ ms: number; count?: number; sample?: { title: string }[] }>(`/service-providers/${item.id}/test`);
+    const result = await api.post<{ ms: number; count?: number; summary?: string; sample?: { title: string }[] }>(`/service-providers/${item.id}/test`);
     testResult.value = {
       ...testResult.value,
-      [item.id]: `可用 · ${result.count ?? 0} 条结果 · ${(result.ms / 1000).toFixed(1)} 秒${result.sample?.[0] ? ` · 例如「${result.sample[0].title}」` : ''}`,
+      [item.id]: result.summary
+        ? `${result.summary} · ${(result.ms / 1000).toFixed(1)} 秒`
+        : `可用 · ${result.count ?? 0} 条结果 · ${(result.ms / 1000).toFixed(1)} 秒${result.sample?.[0] ? ` · 例如「${result.sample[0].title}」` : ''}`,
     };
   } catch (e) {
     testResult.value = { ...testResult.value, [item.id]: `失败:${(e as Error).message}` };
@@ -155,8 +159,8 @@ async function remove(item: ServiceProvider) {
 <template>
   <div class="provider-block">
     <div class="row" style="gap: 8px; align-items: center">
-      <span class="field-label" style="flex: 1">搜索服务 · 可以配多家,默认那家生效。DeepSeek 官方联网搜索可以直接沿用 DeepSeek 对话模型的密钥。</span>
-      <button class="btn btn-sm" type="button" :disabled="loading || catalog.search.length === 0" @click="openCreate('search')">
+      <span class="field-label" style="flex: 1">{{ props.hint }}</span>
+      <button class="btn btn-sm" type="button" :disabled="loading || catalog[props.kind].length === 0" @click="openCreate(props.kind)">
         <AppIcon name="plus" :size="14" /><span>添加</span>
       </button>
     </div>
@@ -165,8 +169,8 @@ async function remove(item: ServiceProvider) {
     </div>
     <SkeletonRows v-if="loading" :rows="2" />
     <template v-else>
-      <EmptyState v-if="ofKind('search').length === 0" title="还没有配置搜索服务" description="点右上角添加。" />
-      <div v-for="item in ofKind('search')" :key="item.id" class="model-row">
+      <EmptyState v-if="ofKind(props.kind).length === 0" :title="props.emptyText" description="点右上角添加。" />
+      <div v-for="item in ofKind(props.kind)" :key="item.id" class="model-row">
         <div class="model-info">
           <div class="model-name">
             {{ item.name }}

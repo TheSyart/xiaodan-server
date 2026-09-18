@@ -1,4 +1,4 @@
-// 外部服务商管理接口(挂在 /api/service-providers):联网搜索。文生图是「模型」页里的一种模型,不在这里。
+// 外部服务商管理接口(挂在 /api/service-providers):联网搜索与定位。文生图是「模型」页里的一种模型,不在这里。
 
 import { randomBytes } from 'node:crypto';
 import { Hono } from 'hono';
@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { all, one, run, tx } from '../db.ts';
 import { SEARCH_PROVIDERS } from './search/providers.ts';
 import { maskConfig, serviceById } from './services.ts';
+import { locateByWifi } from './locate/providers.ts';
 import type { AgentDeps } from './types.ts';
 
 /** 各服务商的表单字段(与模型页的 ProviderDef 同形状) */
@@ -42,10 +43,23 @@ export const SERVICE_CATALOG = {
       ],
     },
   ],
+  locate: [
+    {
+      provider: 'amap',
+      label: '高德 智能硬件定位',
+      note: '设备扫到周围的 Wi-Fi 热点后由高德换算成坐标,市区通常几十米。要在高德开放平台申请「Web 服务」类型的 Key。'
+        + '至少要扫到两个热点才定得出来,扫不到时自动退回按 IP 的城市级定位(不需要任何 Key)。',
+      fields: [
+        { key: 'api_key', label: '高德 Web 服务 Key', type: 'password', required: true },
+        { key: 'endpoint', label: '接口地址', type: 'string', default: 'https://apilocate.amap.com/position', hint: '一般不用改' },
+        { key: 'ssid_placeholder', label: '热点名称占位符', type: 'string', hint: '设备不上报热点名称。高德若不接受空值,这里填一个占位串' },
+      ],
+    },
+  ],
 };
 
 const schema = z.object({
-  kind: z.enum(['search']),
+  kind: z.enum(['search', 'locate']),
   name: z.string().min(1).max(64),
   provider: z.string().min(1).max(64),
   config: z.record(z.string(), z.unknown()).default({}),
@@ -64,7 +78,7 @@ export function serviceRoutes(deps: AgentDeps): Hono {
     ).map((row) => ({ ...row, config: maskConfig(JSON.parse(row.config_json) as Record<string, unknown>), config_json: undefined })),
   }));
 
-  const known = (kind: 'search', provider: string) => SERVICE_CATALOG[kind].some((item) => item.provider === provider);
+  const known = (kind: keyof typeof SERVICE_CATALOG, provider: string) => SERVICE_CATALOG[kind].some((item) => item.provider === provider);
 
   app.post('/', async (c) => {
     const parsed = schema.safeParse(await c.req.json().catch(() => ({})));
@@ -111,10 +125,24 @@ export function serviceRoutes(deps: AgentDeps): Hono {
     return c.json({ ok: true });
   });
 
-  /** 测试:搜索服务搜一次 */
+  /** 测试:搜索服务搜一次;定位服务拿两个假热点打一次,能分清「Key 不对」与「这组数据定不出来」 */
   app.post('/:id/test', async (c) => {
     const service = serviceById(conn, c.req.param('id'));
     if (!service) return c.json({ error: '不存在' }, 404);
+    if (service.kind === 'locate') {
+      const started = Date.now();
+      try {
+        const result = await locateByWifi(deps.fetch, service.config, {
+          aps: [{ bssid: '001122334455', rssi: -55 }, { bssid: '00112233aabb', rssi: -70 }],
+        });
+        return c.json({ ok: true, ms: Date.now() - started, summary: `Key 可用,示例定位到 ${result.city || '未知城市'}` });
+      } catch (error) {
+        const message = (error as Error).message;
+        if (/KEY|USER_KEY|LIMIT|Key/u.test(message)) return c.json({ error: message }, 502);
+        // 假热点定不出位置是正常的,说明 Key 本身通了
+        return c.json({ ok: true, ms: Date.now() - started, summary: `Key 可用。测试用的假热点定不出位置(正常):${message}` });
+      }
+    }
     const provider = SEARCH_PROVIDERS[service.provider];
     if (!provider) return c.json({ error: '不认识的服务商' }, 400);
     try {
