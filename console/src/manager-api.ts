@@ -20,6 +20,7 @@ import { defaultVoiceOf, modelFamily, resolveVoice } from './voice/store.ts';
 import { defaultSystemVoice } from './voice/system-voices.ts';
 import { onDeviceConfigFetched } from './agent/hooks.ts';
 import { nudgeArchive } from './agent/memory/archive.ts';
+import { locateEnabled, noteScan } from './agent/locate/store.ts';
 import {
   canonicalMac, findPendingCode, hashClientId, parseClientId, recordIdentityEvent, resolveDevice,
 } from './identity.ts';
@@ -290,6 +291,28 @@ export function managerApi(conn: Db): Hono {
       chatType,
       content,
     );
+    return c.json(ok(true));
+  });
+
+  // ---- 设备报上来的东西:现在只有定位用的 Wi-Fi 热点 ----
+  //
+  // 引擎收到设备上行的热点后转到这里(Bearer 是与引擎共用的那串密钥,上面的守卫已经验过)。
+  // **热点只放进内存队列**,由后台解析成位置;BSSID 一个字节都不落库。
+  app.post('/agent/device-report', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { macAddress?: unknown; self?: unknown; aps?: unknown };
+    const mac = canonicalMac(body.macAddress);
+    if (!mac) return c.json(fail(CODE_DEVICE_NOT_FOUND, '缺少或无法识别的设备标识'));
+    if (!locateEnabled(conn, mac)) return c.json(ok(false));   // 没开定位就直接丢掉
+    const parse = (value: unknown) => {
+      const [bssid, rssi] = String(value ?? '').split(',');
+      const clean = (bssid ?? '').trim().toLowerCase().replace(/[:-]/gu, '');
+      const strength = Number(rssi);
+      return /^[0-9a-f]{12}$/u.test(clean) && Number.isFinite(strength) && strength <= 0 && strength >= -113
+        ? { bssid: clean, rssi: Math.round(strength) } : null;
+    };
+    const aps = (Array.isArray(body.aps) ? body.aps : []).slice(0, 30).map(parse).filter((item) => item !== null);
+    if (!aps.length) return c.json(fail(CODE_DEVICE_NOT_FOUND, '没有可用的热点'));
+    noteScan(mac, { self: parse(body.self), aps });
     return c.json(ok(true));
   });
 

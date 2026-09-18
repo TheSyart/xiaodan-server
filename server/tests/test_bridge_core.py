@@ -265,6 +265,49 @@ class DeviceCommandTest(unittest.TestCase):
         now[0] = 0.61
         self.assertTrue(limit.allow("a"))
 
+    def test_long_interval_rate_limit_is_not_pruned_early(self):
+        # 间隔 300 秒的限流器,键多于 256 个时不能被「清掉 60 秒前的项」误清成形同虚设
+        now = [0.0]
+        limit = core.RateLimit(300, clock=lambda: now[0])
+        self.assertTrue(limit.allow("watched"))
+        now[0] = 100.0
+        for i in range(300):
+            limit.allow(f"other-{i}")
+        self.assertFalse(limit.allow("watched"), "间隔没到就不该放行")
+        now[0] = 301.0
+        self.assertTrue(limit.allow("watched"))
+
+
+class LocationCommandTest(unittest.TestCase):
+    def test_parses_access_points(self):
+        command = core.parse_device_command({
+            "type": "xiaodan", "cmd": "loc",
+            "self": "001122334455,-46",
+            "aps": ["001122334455,-46", "00:11:22:33:44:66,-70", "zzz,-40", "001122334477,5"],
+        })
+        self.assertEqual(command["cmd"], "loc")
+        self.assertEqual(command["self"], {"bssid": "001122334455", "rssi": -46})
+        self.assertEqual([bss["bssid"] for bss in command["aps"]], ["001122334455", "001122334466"])
+
+    def test_rejects_empty_or_bad(self):
+        for bad in (
+            {"type": "xiaodan", "cmd": "loc"},
+            {"type": "xiaodan", "cmd": "loc", "aps": []},
+            {"type": "xiaodan", "cmd": "loc", "aps": ["001122334455"]},
+            {"type": "xiaodan", "cmd": "loc", "aps": ["00112233445,-40"]},
+            {"type": "xiaodan", "cmd": "loc", "aps": ["001122334455,-200"]},
+        ):
+            self.assertIsNone(core.parse_device_command(bad), bad)
+
+    def test_caps_the_number_of_access_points(self):
+        aps = [f"0011223344{i:02x},-50" for i in range(40)]
+        command = core.parse_device_command({"type": "xiaodan", "cmd": "loc", "aps": aps})
+        self.assertEqual(len(command["aps"]), core.MAX_LOC_APS)
+
+    def test_bssid_is_masked_in_logs(self):
+        self.assertEqual(core.mask_bssid("001122334455"), "0011**")
+        self.assertEqual(core.mask_bssid(""), "**")
+
 
 if __name__ == "__main__":
     unittest.main()

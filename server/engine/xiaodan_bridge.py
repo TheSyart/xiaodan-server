@@ -194,6 +194,10 @@ async def _speak_now(conn, text, chime_path=None, title=None):
 # 单词卡组的读音文字:控制塔经 xiaodan_agent 发卡组时存进来,设备点「读」时按 (MAC, 卡组 id, 第几个词) 取
 DECKS = core.DeckStore()
 DEVICE_RATE = core.RateLimit(0.6)
+# 定位:同一台设备最多五分钟报一次。间隔比清理阈值长的限流器要显式给 prune_s
+LOC_RATE = core.RateLimit(300, prune_s=900)
+# 控制塔地址与密钥,add_bridge_routes 时存下来:设备报上来的热点要转给它解析
+MANAGER = {"url": "", "secret": ""}
 DECK_TURN_WAIT_S = 3.0
 
 
@@ -202,6 +206,28 @@ async def _deck_busy(conn, deck_id, why):
         await send_device_message(conn, {"type": "xiaodan", "cmd": "deck_busy", "id": deck_id, "why": why})
     except Exception as e:
         logger.bind(tag=TAG).warning(f"回复设备 deck_busy 失败: {e}")
+
+
+async def _report_location(mac, command):
+    """把设备扫到的热点转给控制塔解析。BSSID 不进日志、不在引擎这边留存。"""
+    if not MANAGER["url"] or not MANAGER["secret"]:
+        logger.bind(tag=TAG).warning("没有配置控制塔地址,位置上报丢弃")
+        return
+    body = {
+        "macAddress": mac,
+        "kind": "wifi",
+        "aps": [f"{bss['bssid']},{bss['rssi']}" for bss in command["aps"]],
+    }
+    if command.get("self"):
+        body["self"] = f"{command['self']['bssid']},{command['self']['rssi']}"
+    url = MANAGER["url"].rstrip("/") + "/agent/device-report"
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+            response = await client.post(url, json=body, headers={"Authorization": f"Bearer {MANAGER['secret']}"})
+        if response.status_code != 200:
+            logger.bind(tag=TAG).warning(f"控制塔没收下位置上报 HTTP {response.status_code}")
+    except Exception as e:
+        logger.bind(tag=TAG).warning(f"位置上报失败: {type(e).__name__}: {e}")
 
 
 async def handle_device_message(conn, msg):
@@ -223,6 +249,13 @@ async def handle_device_message(conn, msg):
         DECKS.drop(mac, command["id"] or None)
         DECKS.note_exit(mac, command["id"], command["why"])
         logger.bind(tag=TAG).info(f"{mac} 退出单词卡组 {command['id']} {command['why']}")
+        return
+    if cmd == "loc":
+        if not LOC_RATE.allow((mac, "loc")):
+            return
+        sample = core.mask_bssid(command["aps"][0]["bssid"])
+        logger.bind(tag=TAG).info(f"{mac} 报来 {len(command['aps'])} 个热点(如 {sample}),转给控制塔定位")
+        asyncio.create_task(_report_location(mac, command))
         return
     if cmd == "img":
         log = logger.bind(tag=TAG).info if command["ok"] else logger.bind(tag=TAG).warning
@@ -293,6 +326,8 @@ def install_text_handler(registry):
 
 def add_bridge_routes(app, config):
     secret = str((config.get("manager-api") or {}).get("secret") or "")
+    MANAGER["url"] = str((config.get("manager-api") or {}).get("url") or "")
+    MANAGER["secret"] = secret
 
     def authorized(request):
         header = request.headers.get("Authorization", "")

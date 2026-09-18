@@ -3,7 +3,7 @@
 
 import { strict as assert } from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
-import { one, openMemoryDb, run, type Db } from '../src/db.ts';
+import { all, one, openMemoryDb, run, type Db } from '../src/db.ts';
 import { DEFAULT_AGENT_ID, seed } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
 import '../src/agent/index.ts';
@@ -181,6 +181,52 @@ describe('后台解析', () => {
     const location = deviceLocation(conn, MAC)!;
     assert.equal(location.city, '杭州市', '旧位置还在');
     assert.match(location.last_error, /DAILY_QUERY_OVER_LIMIT/u);
+  });
+});
+
+describe('引擎报上来的热点', () => {
+  const report = (app: ReturnType<typeof createApp>, body: unknown, secret = 'engine-secret') =>
+    app.request('http://localhost/xiaozhi/agent/device-report', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
+      body: JSON.stringify(body),
+    });
+
+  test('要密钥;开着定位才收;收下的热点只进内存,一个字节都不落库', async () => {
+    run(conn, "UPDATE settings SET value = 'engine-secret' WHERE key = 'server.secret'");
+    run(conn, 'UPDATE devices SET locate = 1 WHERE mac = ?', MAC);
+    enableAmap();
+    const { fetchImpl } = router([[/apilocate/u, () => amapOk('120.1,30.2')]]);
+    const app = createApp(conn, { agent: { fetch: fetchImpl, bridge: new FakeBridge(), log: () => {} } });
+
+    // 这套接口照上游的约定:HTTP 永远 200,成败看 body 里的 code
+    const denied = await report(app, { macAddress: MAC, aps: ['001122334455,-40'] }, 'wrong');
+    assert.equal(((await denied.json()) as { code: number }).code, 401);
+    const accepted = await report(app, { macAddress: MAC, self: '001122334455,-40', aps: ['001122334455,-40', '001122334466,-70'] });
+    assert.equal(accepted.status, 200);
+    assert.equal(((await accepted.json()) as { code: number }).code, 0);
+
+    // 落库的是解析出来的位置,不是热点
+    assert.equal(await locateTick(deps(fetchImpl)), 1);
+    const location = deviceLocation(conn, MAC)!;
+    assert.equal(location.source, 'wifi');
+    assert.equal(location.ap_count, 2);
+    const dump = JSON.stringify(all(conn, "SELECT * FROM device_locations"));
+    assert.doesNotMatch(dump, /001122334455/u, 'BSSID 不落库');
+  });
+
+  test('没开定位的设备直接丢掉;热点都不合法时报错', async () => {
+    run(conn, "UPDATE settings SET value = 'engine-secret' WHERE key = 'server.secret'");
+    const { fetchImpl, calls } = router([[/./u, () => new Response('{}')]]);
+    const app = createApp(conn, { agent: { fetch: fetchImpl, bridge: new FakeBridge(), log: () => {} } });
+    const ignored = await report(app, { macAddress: MAC, aps: ['001122334455,-40', '001122334466,-70'] });
+    assert.equal(((await ignored.json()) as { data: unknown }).data, false, '没开定位就当没收到');
+    assert.equal(await locateTick(deps(fetchImpl)), 0);
+    assert.deepEqual(calls, []);
+
+    run(conn, 'UPDATE devices SET locate = 1 WHERE mac = ?', MAC);
+    const bad = await report(app, { macAddress: MAC, aps: ['zzz,-40', '001122334455'] });
+    assert.notEqual(((await bad.json()) as { code: number }).code, 0);
   });
 });
 

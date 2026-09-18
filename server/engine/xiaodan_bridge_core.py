@@ -333,6 +333,7 @@ def parse_device_command(msg):
       deck_at   {"id","i"}                  正在看第 i 个词(保活)
       deck_exit {"id":0..65535}             退出卡组
       img       {"id":0..65535,"ok":bool,"w":0..128}  像素画显示结果
+      loc       {"self":"aabbccddeeff,-46","aps":["aabbccddeeff,-52", ...]}  扫到的 Wi-Fi 热点(定位用)
     """
     if not isinstance(msg, dict) or msg.get("type") != "xiaodan":
         return None
@@ -350,15 +351,49 @@ def parse_device_command(msg):
         if _int_in(msg.get("id"), 0, 65535) and isinstance(msg.get("ok"), bool) and _int_in(msg.get("w", 0), 0, 128):
             return {"cmd": cmd, "id": msg["id"], "ok": msg["ok"], "w": msg.get("w", 0)}
         return None
+    if cmd == "loc":
+        aps = [bss for bss in (parse_bss(item) for item in (msg.get("aps") or [])[:MAX_LOC_APS]) if bss]
+        if not aps:
+            return None
+        return {"cmd": cmd, "self": parse_bss(msg.get("self")), "aps": aps}
     return None
+
+
+MAX_LOC_APS = 16
+_BSSID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def parse_bss(value):
+    """"aabbccddeeff,-52" → {"bssid":"aabbccddeeff","rssi":-52};不合法返回 None。"""
+    if not isinstance(value, str) or "," not in value:
+        return None
+    bssid, _, rssi = value.partition(",")
+    bssid = bssid.strip().lower().replace(":", "").replace("-", "")
+    if not _BSSID_RE.match(bssid):
+        return None
+    try:
+        strength = int(rssi.strip())
+    except ValueError:
+        return None
+    if not -113 <= strength <= 0:
+        return None
+    return {"bssid": bssid, "rssi": strength}
+
+
+def mask_bssid(bssid):
+    """日志里的 BSSID 只留前两段:位置数据一个字节都不该原样进日志。"""
+    text = str(bssid or "").replace(":", "")
+    return f"{text[:4]}**" if len(text) >= 4 else "**"
 
 
 class RateLimit:
     """同一个键两次放行至少间隔 interval_s 秒(设备连点确定键时不让百炼合成排成长队)。"""
 
-    def __init__(self, interval_s=0.6, clock=time.monotonic):
+    def __init__(self, interval_s=0.6, clock=time.monotonic, prune_s=None):
         self.interval_s = interval_s
         self._clock = clock
+        # 清理阈值必须比间隔长,否则长间隔的限流器在设备多时会被提前清空、形同虚设
+        self._prune_s = prune_s if prune_s is not None else max(60, interval_s * 2)
         self._last = {}
         self._lock = threading.Lock()
 
@@ -370,6 +405,6 @@ class RateLimit:
                 return False
             self._last[key] = now
             if len(self._last) > 256:
-                for stale in [k for k, t in self._last.items() if now - t > 60]:
+                for stale in [k for k, t in self._last.items() if now - t > self._prune_s]:
                     del self._last[stale]
             return True
