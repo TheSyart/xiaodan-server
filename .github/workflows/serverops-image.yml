@@ -118,7 +118,9 @@ jobs:
           cleanup() {
             docker rm --force xiaodan-console-smoke xiaodan-engine-smoke >/dev/null 2>&1 || true
             docker network rm xiaodan-smoke >/dev/null 2>&1 || true
-            rm -rf "$RUNNER_TEMP/engine-data" || true
+            # 这个目录 chown 给 1000:1000 了(runner 用户已不是属主),普通 rm 删不掉里面的 .config.yaml;
+            # 它装着服务端密钥,不能留在盘上
+            sudo rm -rf "$RUNNER_TEMP/engine-data" || true
           }
           trap cleanup EXIT
           docker pull "$CONSOLE"
@@ -211,8 +213,10 @@ jobs:
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.add_bridge_routes' core/http_server.py
           docker exec xiaodan-engine-smoke grep -q '_xiaodan_bridge.install_text_handler(message_registry)' core/handle/textHandle.py
           # 运行中的引擎确实挂上了设备桥,而且控制塔按默认地址 http://engine:8003 够得着;不带密钥必须 401,带上 200
-          docker exec xiaodan-console-smoke node -e "
-            const s = process.argv[1];
+          # 密钥经环境变量传:它是随机生成的 base64url,可能以 - 开头,
+          # 当位置参数传给 node 会被当成选项解析(bad option,退出码 9;2026-09-18 就撞上了)
+          docker exec --env BRIDGE_SECRET="$secret" xiaodan-console-smoke node -e "
+            const s = process.env.BRIDGE_SECRET;
             (async () => {
               const bare = await fetch('http://engine:8003/xiaodan/bridge/health');
               if (bare.status !== 401) throw new Error('设备桥不带密钥应回 401,实际 ' + bare.status);
@@ -220,7 +224,7 @@ jobs:
               if (ok.status !== 200) throw new Error('设备桥带密钥应回 200,实际 ' + ok.status);
               console.log('bridge reachable', await ok.text());
             })().catch((e) => { console.error(e); process.exit(1); });
-          " "$secret"
+          "
 
       - name: Record trusted build proof (console)
         shell: bash
