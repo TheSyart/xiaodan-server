@@ -194,6 +194,11 @@ export interface PluginDef {
   keyless: boolean;
   /** 分组显示用 */
   group: string;
+  /**
+   * 这项能力有自己的页面:工具页不给它列卡片,只在页尾指个路;智能体页照常显示开关。
+   * 它仍留在 PLUGINS 里,是因为「哪个角色开着它」还是记在 agent_plugins。
+   */
+  page?: { path: string; label: string };
 }
 
 export const PLUGINS: PluginDef[] = [
@@ -279,10 +284,11 @@ export const PLUGINS: PluginDef[] = [
   {
     code: 'memory',
     label: '长期记忆',
-    description: '记住用户主动说起的名字、年龄、喜好、生日等,换了角色、过了几天也记得。在设备页可以查看和删除。住址、电话、学校这类隐私不记。',
+    description: '记住关于用户的事(称呼、喜好、家人、作息……),换了角色、过了几天也记得;每段对话还会整理成档案。在「记忆」页查看与管理。',
     keyless: true,
     group: '陪伴',
     fields: [],
+    page: { path: '/memory', label: '记忆' },
   },
   {
     code: 'roles',

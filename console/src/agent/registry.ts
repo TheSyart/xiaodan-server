@@ -7,6 +7,7 @@
 
 import { all } from '../db.ts';
 import type { Conversation } from './context.ts';
+import type { MemoryPrompt } from './memory/store.ts';
 import { ENGINE_TOOL_META, engineTools } from './engine-tools.ts';
 import { toolConfig } from './tool-settings.ts';
 import type { AgentTool, ToolContext } from './types.ts';
@@ -30,7 +31,7 @@ export interface SkillCatalog {
  */
 export const PROMPT_EXTRAS: {
   skills: (ctx: ToolContext) => SkillCatalog;
-  memory: (ctx: ToolContext) => string | undefined;
+  memory: (ctx: ToolContext) => MemoryPrompt | undefined;
   mcpNotes: (ctx: ToolContext) => { name: string; instructions: string }[];
 } = {
   skills: () => ({ available: [], loaded: () => [] }),
@@ -83,7 +84,7 @@ export function mcpNotesFor(ctx: ToolContext): { name: string; instructions: str
   }
 }
 
-export function memoryFor(ctx: ToolContext): string | undefined {
+export function memoryFor(ctx: ToolContext): MemoryPrompt | undefined {
   try {
     return PROMPT_EXTRAS.memory(ctx);
   } catch (error) {

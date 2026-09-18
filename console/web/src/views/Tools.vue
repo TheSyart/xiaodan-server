@@ -37,11 +37,13 @@ async function load() {
 }
 onMounted(load);
 
+// 有自己页面的能力(长期记忆)不在这里列卡片,只在页尾指个路
 const groups = computed(() => {
   const map = new Map<string, ToolView[]>();
-  for (const tool of tools.value) map.set(tool.group, [...(map.get(tool.group) ?? []), tool]);
+  for (const tool of tools.value.filter((item) => !item.page)) map.set(tool.group, [...(map.get(tool.group) ?? []), tool]);
   return [...map.entries()];
 });
+const elsewhere = computed(() => tools.value.filter((tool) => tool.page));
 
 const dirty = (tool: ToolView) => JSON.stringify(drafts.value[tool.code]) !== JSON.stringify(toDraft(tool));
 
@@ -152,6 +154,31 @@ const TOOL_ICON: Record<string, IconName> = {
               </button>
             </div>
           </form>
+        </article>
+      </div>
+    </section>
+
+    <section v-if="elsewhere.length" class="card">
+      <div class="card-head"><div><h2>有自己页面的能力</h2><p>它们的内容太多,放在单独的页面里管理;哪个智能体开着它,仍在「智能体」页设置。</p></div></div>
+      <div class="plugin-grid">
+        <article v-for="tool in elsewhere" :key="tool.code" class="plugin">
+          <div class="plugin-head">
+            <span class="plugin-icon"><AppIcon :name="TOOL_ICON[tool.code] ?? 'zap'" :size="18" /></span>
+            <span class="plugin-title">{{ tool.label }}</span>
+          </div>
+          <p class="plugin-desc">{{ tool.description }}</p>
+          <div class="tool-meta">
+            <div>
+              <span class="cell-sub">开着它的智能体:</span>
+              <template v-if="tool.agents.length">
+                <RouterLink v-for="agent in tool.agents" :key="agent.id" to="/agents" class="tag sky">{{ agent.name }}</RouterLink>
+              </template>
+              <span v-else class="cell-sub">还没有</span>
+            </div>
+          </div>
+          <RouterLink v-if="tool.page" class="btn btn-sm" :to="tool.page.path" style="margin-top: 8px; align-self: flex-start">
+            <AppIcon name="arrowRight" :size="14" /><span>去「{{ tool.page.label }}」页</span>
+          </RouterLink>
         </article>
       </div>
     </section>

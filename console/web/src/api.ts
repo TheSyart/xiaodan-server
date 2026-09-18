@@ -216,6 +216,8 @@ export interface ToolView {
   status: { ready: boolean; message: string };
   agents: { id: string; name: string }[];
   skills: string[];
+  /** 有自己的页面时:工具页只指路 */
+  page?: { path: string; label: string };
 }
 
 export interface Device {
@@ -255,15 +257,63 @@ export interface RoleTemplateApplied {
   missing: string[];
 }
 
-/** 设备的长期记忆:一条一件关于用户的事 */
-export interface MemoryItem {
+/** 热记忆:一条一件关于用户的事。住址与联系方式标成 sensitive,页面上默认打码 */
+export interface MemoryFact {
   id: number;
   text: string;
-  source: 'agent' | 'admin';
+  kind: string;
+  kind_label: string;
+  sensitive: number;
+  source: 'agent' | 'admin' | 'archive';
   agent_id: string | null;
   agent_name: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 记忆的一次变更,可以撤销 */
+export interface MemoryChange {
+  id: number;
+  op: 'add' | 'update' | 'delete';
+  fact_id: number | null;
+  before_text: string;
+  after_text: string;
+  kind_label: string;
+  sensitive: number;
+  reason: string;
+  source: 'agent' | 'admin' | 'archive';
+  agent_name: string | null;
+  undone: number;
+  created_at: string;
+}
+
+export interface MemoryOverview {
+  devices: { mac: string; alias: string; agent_id: string; agent_name: string | null }[];
+  device: {
+    mac: string;
+    alias: string;
+    agent_id: string;
+    /** 这台设备当前的角色开没开记忆 */
+    enabled: boolean;
+    facts: number;
+    sensitive: number;
+    max_facts: number;
+    max_chars: number;
+    arcs: number;
+    arc_from: string | null;
+    arc_to: string | null;
+  } | null;
+  kinds: { kind: string; label: string; sensitive: boolean }[];
+  agents_with_memory: { id: string; name: string }[];
+}
+
+export interface MemorySettings {
+  scope: string;
+  summaryModelId: string;
+  rawKeepDays: number;
+  minTurns: number;
+  default_scope: string;
+  models: { id: string; name: string }[];
 }
 
 /** 正在等待绑定的设备身份。绑定码只显示在设备屏幕上,这里刻意没有。 */

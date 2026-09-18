@@ -80,6 +80,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     title: '设备与角色',
     items: [
       { path: '/devices', label: '设备', icon: 'device' },
+      { path: '/memory', label: '记忆', icon: 'brain' },
       { path: '/agents', label: '智能体', icon: 'bot' },
       { path: '/voices', label: '音色', icon: 'volume' },
       { path: '/playground', label: '试聊', icon: 'message' },
@@ -106,7 +107,6 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     title: '系统',
     items: [
       { path: '/models', label: '模型', icon: 'layers' },
-      { path: '/chats', label: '对话记录', icon: 'news' },
       { path: '/words', label: '读音替换', icon: 'replace' },
       { path: '/settings', label: '设置', icon: 'sliders' },
     ],

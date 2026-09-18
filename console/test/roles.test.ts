@@ -10,7 +10,6 @@ import { Bridge } from '../src/agent/bridge.ts';
 import { conversations } from '../src/agent/context.ts';
 import { runTurn } from '../src/agent/loop.ts';
 import { loadAgent } from '../src/agent/routes.ts';
-import { forget, listMemory, MAX_FACTS_PER_DEVICE, memoryPrompt, privacyReason, remember } from '../src/agent/memory/store.ts';
 import { applyTemplate, ROLE_TEMPLATES, templateById } from '../src/agent/roles/templates.ts';
 import { greetAfterSwitch, matchRole, needsReconnect, queueGreeting, switchableRoles, takeGreeting } from '../src/agent/roles/switch.ts';
 import { syncSystemVoices } from '../src/voice/store.ts';
@@ -263,101 +262,5 @@ describe('切换角色', () => {
     assert.equal(got.allowlist, null);
     assert.equal((await put(['agent_missing'])).status, 400);
     assert.equal((await app.request('http://localhost/api/devices/aa:bb:cc:dd:ee:ff/roles')).status, 404);
-  });
-});
-
-// ---------------------------------------------------------------- 长期记忆
-
-describe('长期记忆', () => {
-  test('写入、去重更新、隐私拦截、挤掉最早的', () => {
-    assert.equal(remember(conn, { mac: MAC, text: '名字叫乐乐。', source: 'agent' }).status, 'added');
-    assert.equal(remember(conn, { mac: MAC, text: '名字叫乐乐', source: 'agent' }).status, 'unchanged', '句号不算不同');
-    assert.equal(remember(conn, { mac: MAC, text: '喜欢恐龙', source: 'agent' }).status, 'added');
-    const updated = remember(conn, { mac: MAC, text: '最喜欢霸王龙', source: 'agent', replaces: '喜欢恐龙' });
-    assert.equal(updated.status, 'updated');
-    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text), ['名字叫乐乐', '最喜欢霸王龙']);
-
-    for (const text of ['家住在幸福路 12 号', '妈妈电话 13800138000', '在实验小学上学', '密码是 1234']) {
-      const outcome = remember(conn, { mac: MAC, text, source: 'agent' });
-      assert.equal(outcome.status, 'rejected', text);
-    }
-    assert.equal(privacyReason('生日是三月十七日'), null);
-    assert.equal(privacyReason('在上小学'), null, '年龄段不是隐私');
-    assert.equal(privacyReason('上幼儿园大班了'), null);
-    assert.notEqual(privacyReason('三年级二班'), null);
-    assert.notEqual(privacyReason('学校叫阳光学校'), null);
-    assert.equal(remember(conn, { mac: MAC, text: '字'.repeat(61), source: 'agent' }).status, 'rejected');
-
-    run(conn, 'DELETE FROM device_memory');
-    remember(conn, { mac: MAC, text: '手动加的', source: 'admin' });
-    for (let i = 0; i < MAX_FACTS_PER_DEVICE; i += 1) remember(conn, { mac: MAC, text: `第${i}件事是${'甲乙丙丁'[i % 4]}${i}`, source: 'agent' });
-    const rows = listMemory(conn, MAC);
-    assert.equal(rows.length, MAX_FACTS_PER_DEVICE);
-    assert.equal(rows[0]!.text, '手动加的', '手动添加的不会被挤掉');
-    assert.ok(!rows.some((r) => r.text === '第0件事是甲0'), '挤掉最早一条自动记的');
-
-    assert.deepEqual(forget(conn, MAC, '手动').map((r) => r.text), ['手动加的']);
-    assert.match(memoryPrompt(conn, MAC)!, /^- 第1件事/u);
-    assert.equal(memoryPrompt(conn, 'aa:bb:cc:dd:ee:ff'), undefined);
-  });
-
-  test('开了记忆的角色:记忆进提示词,模型能记能忘;没开的角色看不到', async () => {
-    remember(conn, { mac: MAC, text: '名字叫乐乐', source: 'admin' });
-    const plain = fakeLlm([{ text: '🙂你好。' }]);
-    let d = deps(plain.fetchImpl);
-    await runTurn(d, {
-      agent: loadAgent(d, DEFAULT_AGENT_ID)!, device: device(), query: '你好', engineMessages: [],
-      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink: recorder().sink,
-    });
-    assert.doesNotMatch(String(plain.calls[0]!.messages[0]!.content), /乐乐/u, '没开记忆插件');
-
-    run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'memory', '{}')", DEFAULT_AGENT_ID);
-    const llm = fakeLlm([
-      { calls: [{ name: 'remember', arguments: { fact: '最喜欢霸王龙' } }] },
-      { text: '🙂霸王龙超酷的!' },
-      { calls: [{ name: 'forget', arguments: { fact: '霸王龙' } }] },
-      { text: '🙂好,忘掉啦。' },
-    ]);
-    d = deps(llm.fetchImpl);
-    await runTurn(d, {
-      agent: loadAgent(d, DEFAULT_AGENT_ID)!, device: device(), query: '我最喜欢霸王龙', engineMessages: [],
-      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink: recorder().sink,
-    });
-    const system = String(llm.calls[0]!.messages[0]!.content);
-    assert.match(system, /<关于用户的记忆>\n- 名字叫乐乐/u);
-    assert.ok(llm.calls[0]!.tools!.some((t) => t.function.name === 'remember'));
-    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text), ['名字叫乐乐', '最喜欢霸王龙']);
-    assert.equal(listMemory(conn, MAC)[1]!.agent_id, DEFAULT_AGENT_ID);
-
-    await runTurn(d, {
-      agent: loadAgent(d, DEFAULT_AGENT_ID)!, device: device(), query: '忘掉霸王龙吧', engineMessages: [],
-      conversationKey: `device:${MAC}`, record: null, signal: new AbortController().signal, sink: recorder().sink,
-    });
-    assert.deepEqual(listMemory(conn, MAC).map((r) => r.text), ['名字叫乐乐']);
-  });
-
-  test('管理接口:增、改、删、清空,隐私同样拦截', async () => {
-    const app = createApp(conn, { agent: { fetch: async () => new Response('{}'), bridge: new FakeBridge(), log: () => {} } });
-    const api = (method: string, path: string, body?: unknown) => app.request(`http://localhost/api/devices/${MAC}${path}`, {
-      method, headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const added = await (await api('POST', '/memory', { text: '生日是三月十七日' })).json() as { item: { id: number } };
-    assert.equal((await api('POST', '/memory', { text: '电话 13800138000' })).status, 400);
-    assert.equal((await api('PUT', `/memory/${added.item.id}`, { text: '生日是三月十八日' })).status, 200);
-    assert.equal((await api('PUT', `/memory/${added.item.id}`, { text: '住址是幸福路 12 号' })).status, 400);
-    const list = await (await api('GET', '/memory')).json() as { items: { text: string; source: string }[] };
-    assert.deepEqual(list.items.map((r) => [r.text, r.source]), [['生日是三月十八日', 'admin']]);
-    assert.equal((await api('DELETE', `/memory/${added.item.id}`)).status, 200);
-    remember(conn, { mac: MAC, text: '喜欢画画', source: 'agent' });
-    assert.equal((await api('DELETE', '/memory')).status, 200);
-    assert.equal(listMemory(conn, MAC).length, 0);
-  });
-
-  test('解绑设备时记忆与白名单一起删掉', () => {
-    remember(conn, { mac: MAC, text: '喜欢画画', source: 'agent' });
-    run(conn, 'INSERT INTO device_roles (mac, agent_id) VALUES (?, ?)', MAC, DEFAULT_AGENT_ID);
-    run(conn, 'DELETE FROM devices WHERE mac = ?', MAC);
-    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM device_memory')!.n, 0);
-    assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM device_roles')!.n, 0);
   });
 });

@@ -101,6 +101,8 @@ export function toolRoutes(deps: AgentDeps): Hono {
       description: def.description,
       group: def.group,
       keyless: def.keyless,
+      // 有自己页面的能力(长期记忆):工具页只指路,不列卡片
+      page: def.page,
       runs_in: ENGINE_TOOL_META[def.code] ? 'engine' : 'console',
       fields: def.fields.map((field) => (field.optionsFrom ? { ...field, options: fieldOptions(conn, field) } : field)),
       config: toolConfig(conn, def.code),

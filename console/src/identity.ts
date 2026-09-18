@@ -271,11 +271,16 @@ export function bindByCode(conn: Db, bind: { code: string; agentId: string | nul
   return { ok: true, mac: pending.mac };
 }
 
-/** 解绑:设备行(连同哈希)、该 MAC 的待绑定行与身份事件一并清除。返回设备是否存在。 */
+/**
+ * 解绑:设备行(连同哈希)、该 MAC 的待绑定行、身份事件与对话档案一并清除。返回设备是否存在。
+ * 长期记忆、角色白名单、定位随外键级联删;memory_arcs 与 chat_messages 一样没有外键,要显式删
+ * (原文照旧保留,与现在解绑不删对话记录的行为一致)。
+ */
 export function unbindDevice(conn: Db, mac: string): boolean {
   if (one(conn, 'SELECT 1 FROM devices WHERE mac = ?', mac) === undefined) return false;
   run(conn, 'DELETE FROM devices WHERE mac = ?', mac);
   run(conn, 'DELETE FROM pending_devices WHERE mac = ?', mac);
   run(conn, 'DELETE FROM identity_events WHERE mac = ?', mac);
+  run(conn, 'DELETE FROM memory_arcs WHERE mac = ?', mac);
   return true;
 }

@@ -258,15 +258,20 @@ in one click. Migration v11 removed the three former built-in skills (unchanged 
   - Persona, tools and memory rules come from the console, so they apply from the next turn.
   - Voice, recognition and other engine-side settings are fixed when the connection opens. When those differ, the console closes
     the connection after the turn; the device reconnects, fetches the new configuration and the new role greets in its own voice.
-  - The device page's "Roles & memory" dialog can restrict which roles a device may switch to. Without a restriction, every
+  - The device page's "Switchable roles" dialog can restrict which roles a device may switch to. Without a restriction, every
     role is allowed.
-- **Long-term memory** (`remember`/`forget`/`list_memories`, plugin code `memory`): roles with this tool record stable facts the user
-  mentions, such as name, age, likes and birthday, one short sentence each. Facts are stored per device and shared across roles.
-  - They are injected into the system prompt of roles that have the tool.
-  - A fact that contains or is contained in an existing one updates it instead of piling up. Each device keeps at most 40 facts, and
-    the oldest automatic one makes room; facts added by hand are never pushed out.
-  - Addresses, phone numbers, school names, ID numbers and passwords are refused in the tool and in the admin API.
-  - The "Roles & memory" dialog lists, adds, edits and clears facts.
+- **Long-term memory** (`remember`/`forget`/`list_memories`, plugin code `memory`, with its own "Memory" page): roles with this tool
+  record facts about the user, one short sentence each. Facts are stored per device and shared across roles; the agent page decides
+  which roles may use memory, while the content is managed on the memory page.
+  - Every fact is filed under one category: name and identity, family, contact details, home and frequented places, likes, what the
+    user is learning, health notes, daily routine. The recording scope is editable on the memory page and the same text goes into the
+    `remember` function description, so live recording and later tidying follow one rule.
+  - **Addresses and contact details are recorded but marked private**: masked on the page, and the prompt only states that they exist
+    and can be fetched when needed, never the text itself. Passwords, payment details, card and ID numbers are never recorded.
+  - A fact that contains or is contained in an existing one updates it instead of piling up. Each device keeps at most 60 facts of up
+    to 90 characters, and the oldest automatic one makes room; facts added by hand are never pushed out.
+  - Every record, edit and deletion leaves a trail on the memory page and can be undone with one click.
+  - The memory page also shows what the device has talked about; the former "Chat history" page was folded into it.
   - Unbinding a device deletes its memory.
 
 ## Qwen speech and voices

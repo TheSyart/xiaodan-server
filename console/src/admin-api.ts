@@ -21,6 +21,7 @@ import { toolRoutes } from './agent/tools-routes.ts';
 import { toolConfig } from './agent/tool-settings.ts';
 import { agentSkillRoutes, skillRoutes } from './agent/skills/routes.ts';
 import { reminderRoutes } from './agent/reminders/routes.ts';
+import { memoryRoutes } from './agent/memory/routes.ts';
 import { serviceRoutes } from './agent/services-routes.ts';
 import { mediaAdminRoutes } from './agent/media/routes.ts';
 import { vocabRoutes } from './agent/vocab/routes.ts';
@@ -374,6 +375,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/mcp-servers', mcpRoutes(deps.agent));
     app.route('/skills', skillRoutes(deps.agent));
     app.route('/reminders', reminderRoutes(deps.agent));
+    app.route('/memory', memoryRoutes(deps.agent));
     app.route('/media', mediaAdminRoutes(deps.agent));
     app.route('/vocab', vocabRoutes(deps.agent));
     app.route('/images', imageRoutes(deps.agent));

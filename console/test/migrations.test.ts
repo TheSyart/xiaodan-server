@@ -377,6 +377,44 @@ test('v11:没改过的内置技能删掉(连同角色勾选),改过的留作自�
   assert.ok(columns(conn, 'mcp_servers').includes('instructions'));
 });
 
+test('v12:老记忆一条不少并带上分类,新表与定位开关就位,服务商多一类', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(11));
+  seed(conn);
+  exec(conn, "INSERT INTO devices (mac, agent_id) VALUES ('4c:11:ae:31:7a:30', ?)", DEFAULT_AGENT_ID);
+  exec(conn, "INSERT INTO device_memory (mac, text, source, agent_id) VALUES ('4c:11:ae:31:7a:30', '名字叫乐乐', 'admin', ?)", DEFAULT_AGENT_ID);
+  exec(conn, "INSERT INTO device_memory (mac, text, source) VALUES ('4c:11:ae:31:7a:30', '最喜欢霸王龙', 'agent')");
+  exec(conn, "INSERT INTO service_providers (id, kind, name, provider) VALUES ('svc_1', 'search', '博查', 'bocha')");
+  exec(conn, "INSERT INTO chat_messages (mac, session_id, chat_type, content) VALUES ('4c:11:ae:31:7a:30', 's1', 1, '你好')");
+
+  runMigrations(conn);
+
+  const facts = all<{ text: string; kind: string; sensitive: number; source: string; agent_id: string | null }>(
+    conn, 'SELECT text, kind, sensitive, source, agent_id FROM device_memory ORDER BY id');
+  assert.deepEqual(facts.map((row) => row.text), ['名字叫乐乐', '最喜欢霸王龙'], '老记忆一条不少');
+  assert.deepEqual(facts.map((row) => [row.kind, row.sensitive]), [['other', 0], ['other', 0]], '老数据当作非敏感,分类以后再纠正');
+  assert.equal(facts[0]!.source, 'admin');
+  assert.equal(facts[0]!.agent_id, DEFAULT_AGENT_ID);
+  assert.ok(indexes(conn, 'device_memory').includes('idx_device_memory_mac'));
+  // 外键仍在:删设备连记忆一起走
+  exec(conn, "DELETE FROM devices WHERE mac = '4c:11:ae:31:7a:30'");
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM device_memory')!.n, 0);
+
+  assert.ok(tableExists(conn, 'memory_arcs'));
+  assert.ok(tableExists(conn, 'memory_changes'));
+  assert.ok(tableExists(conn, 'device_locations'));
+  assert.ok(columns(conn, 'chat_messages').includes('arc_id'));
+  assert.ok(columns(conn, 'devices').includes('locate'));
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM chat_messages')!.n, 1, '原文不动');
+  assert.ok(value(conn, 'memory.archive_from'), '有归档水位线,不回溯历史对话');
+
+  assert.deepEqual(all<{ id: string; kind: string }>(conn, 'SELECT id, kind FROM service_providers').map((r) => ({ ...r })),
+    [{ id: 'svc_1', kind: 'search' }]);
+  exec(conn, "INSERT INTO service_providers (id, kind, name, provider) VALUES ('svc_2', 'locate', '高德', 'amap')");
+  assert.throws(() => exec(conn, "INSERT INTO service_providers (id, kind, name, provider) VALUES ('svc_3', 'nope', 'x', 'x')"));
+});
+
 describe('关外键执行的迁移', () => {
   const withMigration = (up: (db: Db) => void) => [...MIGRATIONS, { version: LATEST + 1, name: 'fk-off', disableForeignKeys: true, up }];
 

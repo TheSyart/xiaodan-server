@@ -10,6 +10,7 @@ import type { Db } from './db.ts';
 import { migrateQwenOnly } from './migrations/v8-qwen-only.ts';
 import { migrateCapabilityPages } from './migrations/v10-capability-pages.ts';
 import { migrateRetireBuiltinSkills } from './migrations/v11-retire-builtin-skills.ts';
+import { migrateMemoryAndLocation } from './migrations/v12-memory-and-location.ts';
 
 export interface Migration {
   version: number;
@@ -356,5 +357,12 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'retire-builtin-skills',
     // 讲故事、学单词、AI 资讯各只归一类能力:删掉没改过的内置技能,MCP 服务器加使用说明。见迁移文件开头
     up: migrateRetireBuiltinSkills,
+  },
+  {
+    version: 12,
+    name: 'memory-and-location',
+    disableForeignKeys: true,
+    // 记忆独立成页(热记忆分类、冷记忆档案、变更留痕)与设备定位。重建了 device_memory 与 service_providers。见迁移文件开头
+    up: migrateMemoryAndLocation,
   },
 ];

@@ -1,10 +1,9 @@
-// 管理接口:角色模板、设备可切换的角色、设备的长期记忆。
+// 管理接口:角色模板、设备可切换的角色。设备的长期记忆搬去了「记忆」页(agent/memory/routes.ts)。
 
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { all, one, run, tx } from '../../db.ts';
 import { canonicalMac } from '../../identity.ts';
-import { listMemory, MAX_FACT_CHARS, privacyReason, remember } from '../memory/store.ts';
 import type { AgentDeps } from '../types.ts';
 import { applyTemplate, ROLE_TEMPLATES, templateById } from './templates.ts';
 import { systemVoiceOf } from '../../voice/system-voices.ts';
@@ -45,7 +44,7 @@ export function roleTemplateRoutes(deps: AgentDeps): Hono {
   return app;
 }
 
-/** 挂在 /devices 下:/:mac/roles 与 /:mac/memory */
+/** 挂在 /devices 下:/:mac/roles */
 export function deviceRoleRoutes(deps: AgentDeps): Hono {
   const app = new Hono({ strict: false });
 
@@ -78,56 +77,6 @@ export function deviceRoleRoutes(deps: AgentDeps): Hono {
       const rows = ids === null ? [] : ids.length ? [...new Set(ids)] : [found.agent_id];
       for (const id of rows) run(deps.conn, 'INSERT INTO device_roles (mac, agent_id) VALUES (?, ?)', found.mac, id);
     });
-    return c.json({ ok: true });
-  });
-
-  app.get('/:mac/memory', (c) => {
-    const found = device(c.req.param('mac'));
-    if (!found) return c.json({ error: '设备不存在' }, 404);
-    const names = new Map(all<{ id: string; name: string }>(deps.conn, 'SELECT id, name FROM agents').map((row) => [row.id, row.name]));
-    return c.json({
-      items: listMemory(deps.conn, found.mac).map((row) => ({ ...row, agent_name: row.agent_id ? names.get(row.agent_id) ?? null : null })),
-      max_chars: MAX_FACT_CHARS,
-    });
-  });
-
-  app.post('/:mac/memory', async (c) => {
-    const found = device(c.req.param('mac'));
-    if (!found) return c.json({ error: '设备不存在' }, 404);
-    const parsed = z.object({ text: z.string().min(1).max(200) }).safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) return c.json({ error: '请填写要记住的内容' }, 400);
-    const outcome = remember(deps.conn, { mac: found.mac, text: parsed.data.text, source: 'admin' });
-    if (outcome.status === 'rejected') return c.json({ error: `没有保存:${outcome.reason}` }, 400);
-    return c.json({ ok: true, status: outcome.status, item: outcome.row });
-  });
-
-  app.put('/:mac/memory/:id', async (c) => {
-    const found = device(c.req.param('mac'));
-    if (!found) return c.json({ error: '设备不存在' }, 404);
-    const id = Number(c.req.param('id'));
-    const row = one<{ id: number }>(deps.conn, 'SELECT id FROM device_memory WHERE id = ? AND mac = ?', id, found.mac);
-    if (!row) return c.json({ error: '这条记忆不存在' }, 404);
-    const parsed = z.object({ text: z.string().min(1).max(200) }).safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) return c.json({ error: '请填写内容' }, 400);
-    const text = parsed.data.text.trim();
-    if ([...text].length > MAX_FACT_CHARS) return c.json({ error: `超过 ${MAX_FACT_CHARS} 个字` }, 400);
-    const privacy = privacyReason(text);
-    if (privacy) return c.json({ error: `没有保存:${privacy}` }, 400);
-    run(deps.conn, "UPDATE device_memory SET text = ?, source = 'admin', updated_at = datetime('now') WHERE id = ?", text, id);
-    return c.json({ ok: true });
-  });
-
-  app.delete('/:mac/memory/:id', (c) => {
-    const found = device(c.req.param('mac'));
-    if (!found) return c.json({ error: '设备不存在' }, 404);
-    run(deps.conn, 'DELETE FROM device_memory WHERE id = ? AND mac = ?', Number(c.req.param('id')), found.mac);
-    return c.json({ ok: true });
-  });
-
-  app.delete('/:mac/memory', (c) => {
-    const found = device(c.req.param('mac'));
-    if (!found) return c.json({ error: '设备不存在' }, 404);
-    run(deps.conn, 'DELETE FROM device_memory WHERE mac = ?', found.mac);
     return c.json({ ok: true });
   });
 

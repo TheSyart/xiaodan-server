@@ -43,8 +43,8 @@ export interface PromptInput {
   loadedSkills?: readonly { name: string; body: string }[];
   /** 有屏幕的小单固件(features.xiaodan) */
   hasScreen: boolean;
-  /** 长期记忆摘要(P6) */
-  memory?: string;
+  /** 长期记忆:按分类分好的事实,以及敏感条目的提示(内容不在这里) */
+  memory?: { facts: string; sensitiveNote: string };
   /** 开着的 MCP 服务器的使用说明(MCP 页填写) */
   mcpNotes?: readonly { name: string; instructions: string }[];
   /** 对话模型能看图 */
@@ -210,8 +210,13 @@ export function buildSystemPrompt(input: PromptInput): string {
     ].join('\n'));
   }
 
-  if (input.memory?.trim()) {
-    sections.push(`<关于用户的记忆>\n${input.memory.trim()}\n这些是以前聊天中了解到的,自然地用上即可,不要逐条复述。\n</关于用户的记忆>`);
+  if (input.memory && (input.memory.facts.trim() || input.memory.sensitiveNote)) {
+    // 住址、联系方式这类只说「有」,不写内容:平时的每一轮都不必把它们发给模型供应商,要用时模型自己去取
+    const lines = ['<关于用户的记忆>'];
+    if (input.memory.facts.trim()) lines.push(input.memory.facts.trim());
+    if (input.memory.sensitiveNote) lines.push(input.memory.sensitiveNote);
+    lines.push('这些是以前聊天中了解到的,自然地用上即可,不要逐条复述。', '</关于用户的记忆>');
+    sections.push(lines.join('\n'));
   }
 
   const calendarHint = names.includes('show_calendar')

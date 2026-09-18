@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { RouterLink } from 'vue-router';
 import {
-  api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type MemoryItem, type Overview, type PendingDevice,
+  api, type Agent, type ApiError, type Device, type DeviceList, type IdentityEvent, type Overview, type PendingDevice,
 } from '../api';
 import AppIcon from '../components/AppIcon.vue';
 import CodeInput from '../components/CodeInput.vue';
@@ -162,31 +163,23 @@ async function moveAgent(device: Device, target: string) {
   await load();   // 失败时把下拉框恢复成真实值
 }
 
-// ---- 角色与记忆 ----
+// ---- 可切换的角色 ----
 //
-// 可切换的角色:设备上说「换童童来陪我」时能切到哪些角色(需要当前角色开着「切换角色」工具)。
-// 长期记忆:开着「长期记忆」工具的角色记下的、关于用户的事,换了角色也共用。
+// 设备上说「换童童来陪我」时能切到哪些角色(需要当前角色开着「切换角色」工具)。
+// 这台设备的长期记忆与聊过的内容在「记忆」页。
 
 const roleDevice = ref<Device | null>(null);
 const restrictRoles = ref(false);
 const allowedRoles = ref<string[]>([]);
-const memories = ref<MemoryItem[]>([]);
-const newMemory = ref('');
 const savingRoles = ref(false);
-const addingMemory = ref(false);
 const agentRuntimeRoles = computed(() => agents.value);
 
 async function openRoles(device: Device) {
   const mac = encodeURIComponent(device.mac);
   try {
-    const [roles, memory] = await Promise.all([
-      api.get<{ agent_id: string; allowlist: string[] | null }>(`/devices/${mac}/roles`),
-      api.get<{ items: MemoryItem[] }>(`/devices/${mac}/memory`),
-    ]);
+    const roles = await api.get<{ agent_id: string; allowlist: string[] | null }>(`/devices/${mac}/roles`);
     restrictRoles.value = roles.allowlist !== null;
     allowedRoles.value = roles.allowlist ?? agentRuntimeRoles.value.map((agent) => agent.id);
-    memories.value = memory.items;
-    newMemory.value = '';
     roleDevice.value = device;
   } catch (e) {
     toastError(e);
@@ -211,49 +204,6 @@ async function saveRoles() {
     toastError(e);
   } finally {
     savingRoles.value = false;
-  }
-}
-
-async function reloadMemory() {
-  if (!roleDevice.value) return;
-  memories.value = (await api.get<{ items: MemoryItem[] }>(`/devices/${encodeURIComponent(roleDevice.value.mac)}/memory`)).items;
-}
-
-async function addMemory() {
-  const device = roleDevice.value;
-  const text = newMemory.value.trim();
-  if (!device || !text || addingMemory.value) return;
-  addingMemory.value = true;
-  try {
-    await api.post(`/devices/${encodeURIComponent(device.mac)}/memory`, { text });
-    newMemory.value = '';
-    await reloadMemory();
-  } catch (e) {
-    toastError(e);
-  } finally {
-    addingMemory.value = false;
-  }
-}
-
-async function removeMemory(item: MemoryItem) {
-  if (!roleDevice.value) return;
-  try {
-    await api.del(`/devices/${encodeURIComponent(roleDevice.value.mac)}/memory/${item.id}`);
-    await reloadMemory();
-  } catch (e) {
-    toastError(e);
-  }
-}
-
-async function clearMemory() {
-  const device = roleDevice.value;
-  if (!device) return;
-  if (!(await confirmDialog({ title: '清空这台设备的全部记忆?', message: '所有角色都会忘掉这些事,不能恢复。', confirmText: '清空', danger: true }))) return;
-  try {
-    await api.del(`/devices/${encodeURIComponent(device.mac)}/memory`);
-    await reloadMemory();
-  } catch (e) {
-    toastError(e);
   }
 }
 
@@ -500,7 +450,7 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
             </td>
             <td class="actions">
               <button class="btn btn-ghost btn-sm" type="button" @click="openRoles(device)">
-                <AppIcon name="user" :size="14" /><span>角色与记忆</span>
+                <AppIcon name="user" :size="14" /><span>可切换的角色</span>
               </button>
               <button class="btn btn-ghost btn-sm" type="button" @click="rename(device)">
                 <AppIcon name="pencil" :size="14" /><span>改名</span>
@@ -515,7 +465,7 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
     </div>
   </section>
 
-  <ModalDialog :open="!!roleDevice" wide :title="`${roleDevice ? deviceName(roleDevice) : ''} · 角色与记忆`" @close="roleDevice = null">
+  <ModalDialog :open="!!roleDevice" wide :title="`${roleDevice ? deviceName(roleDevice) : ''} · 可切换的角色`" @close="roleDevice = null">
     <div v-if="roleDevice" class="stack">
       <section class="stack" style="gap: 10px">
         <h3 style="margin: 0; font-size: 15px">可以切换到的角色</h3>
@@ -534,27 +484,9 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
         <div><button class="btn btn-sm" type="button" :aria-busy="savingRoles" @click="saveRoles"><AppIcon name="check" :size="14" /><span>保存角色设置</span></button></div>
       </section>
 
-      <section class="stack" style="gap: 10px">
-        <div class="row" style="justify-content: space-between">
-          <h3 style="margin: 0; font-size: 15px">长期记忆 <span v-if="memories.length" class="count">{{ memories.length }}</span></h3>
-          <button v-if="memories.length" class="btn btn-ghost btn-sm danger" type="button" @click="clearMemory"><AppIcon name="trash" :size="14" /><span>全部清空</span></button>
-        </div>
-        <p class="field-hint" style="margin: 0">
-          开着「长期记忆」工具的角色会记下用户主动说起的名字、喜好等,换了角色也记得。住址、电话、学校这类隐私不会保存。
-        </p>
-        <EmptyState v-if="memories.length === 0" title="还没有记住什么" description="聊天时用户说起自己的事,角色会记下来;也可以在下面手动添加。" />
-        <ul v-else class="memory-list">
-          <li v-for="item in memories" :key="item.id">
-            <span class="memory-text">{{ item.text }}</span>
-            <span class="tag" :title="formatTime(item.updated_at)">{{ item.source === 'admin' ? '手动添加' : `${item.agent_name ?? '角色'}记下` }}</span>
-            <button class="btn btn-ghost btn-sm btn-icon danger" type="button" :aria-label="`删除:${item.text}`" @click="removeMemory(item)"><AppIcon name="trash" :size="14" /></button>
-          </li>
-        </ul>
-        <form class="row" style="gap: 8px" @submit.prevent="addMemory">
-          <input v-model="newMemory" class="input" type="text" maxlength="60" placeholder="比如:名字叫乐乐,最喜欢霸王龙" style="flex: 1; min-width: 0" />
-          <button class="btn btn-sm" type="submit" :disabled="!newMemory.trim()" :aria-busy="addingMemory"><AppIcon name="plus" :size="14" /><span>添加</span></button>
-        </form>
-      </section>
+      <p class="field-hint" style="margin: 0">
+        这台设备记住的事、聊过的内容都在<RouterLink to="/memory">记忆</RouterLink>页。
+      </p>
     </div>
   </ModalDialog>
 </template>
