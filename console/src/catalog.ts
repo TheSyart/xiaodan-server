@@ -34,6 +34,8 @@ export interface ProviderField {
   /** type 为 number 时的范围 */
   min?: number;
   max?: number;
+  /** 文字类字段的字数上限,不填是 200。介绍稿这类整段文字要显式放宽 */
+  maxLength?: number;
 }
 
 export interface ProviderDef {
@@ -289,6 +291,22 @@ export const PLUGINS: PluginDef[] = [
     group: '陪伴',
     fields: [],
     page: { path: '/memory', label: '记忆' },
+  },
+  {
+    code: 'introduce_self',
+    group: '角色',
+    label: '自我介绍',
+    description: '小朋友问"你是谁""你有什么本事"时,把一段写好的稿子念出来。稿子在这里改,语气由模型按"激情"演绎。',
+    keyless: true,
+    fields: [
+      {
+        key: 'script',
+        label: '介绍稿',
+        type: 'text',
+        maxLength: 1500,
+        hint: '留空就用内置那份。这段会被一字不改地念出来:写成口语,不要 markdown 标记(** 会被念成"星号"),最多 1500 字',
+      },
+    ],
   },
   {
     code: 'roles',

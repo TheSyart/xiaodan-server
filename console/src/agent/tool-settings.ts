@@ -58,7 +58,8 @@ export function validateToolConfig(conn: Db, def: PluginDef, input: Record<strin
       default: {
         if (typeof raw !== 'string') return { error: `「${field.label}」要填文字` };
         const value = raw.trim();
-        if (value.length > 200) return { error: `「${field.label}」太长了` };
+        const limit = field.maxLength ?? 200;
+        if (value.length > limit) return { error: `「${field.label}」最多 ${limit} 字` };
         if (value) config[field.key] = value;
       }
     }
