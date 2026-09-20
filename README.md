@@ -329,6 +329,18 @@ http URLs on `*.aliyuncs.com` to https and refuses every other http URL.
 - The pure logic of both providers lives in `server/engine/qwen_audio.py` (unit tests); `server/tests/smoke_qwen_audio.py` runs the
   networking parts inside the image against fake Model Studio servers.
 
+The same two models are also reachable through a self-hosted OpenAI-compatible gateway, as `gateway_asr` and `gateway_tts`. Both
+**inherit the providers above and replace only the transport**, so sentence splitting, subtitles, inline emotion tags, playback
+keepalive and the base-class fixes are shared rather than duplicated. Recognition is standard multipart
+`/v1/audio/transcriptions`; synthesis is `/v1/audio/speech` with `stream: true` and `response_format: "pcm"`, one request per
+sentence, first chunk in about 390 ms regardless of sentence length. Two traps are guarded in code: `sample_rate` must be an
+**integer** or the gateway silently falls back to 22050 and the voice comes out high and fast without any error, so the rate is
+read back from the response `Content-Type` and mismatches are logged; and `qwen3-tts` models silently return WAV when asked for
+pcm, so only the `qwen-audio-3.0` family is offered. Hot words only work on the `qwen-audio-3.0-asr` family, and only when the
+clip runs longer than about two seconds. **Voice design and cloning stay on the direct Model Studio provider** — they use a
+Model Studio-only endpoint the gateway does not proxy. Pure logic in `server/engine/gateway_audio.py` (unit tests);
+`server/tests/smoke_gateway_audio.py` runs both providers in the image against a fake gateway.
+
 ### Voices
 
 Each agent picks exactly one voice, and the voice decides the synthesis model. A voice belongs to a Qwen synthesis model and carries

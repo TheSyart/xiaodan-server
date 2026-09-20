@@ -153,9 +153,18 @@ describe('模型', () => {
   test('模型页只有四类:对话、识别、合成、文生图;语音全走千问,工具调用与视觉不再是模型', async () => {
     const catalog = await json(await api('GET', '/catalog'));
     assert.deepEqual(catalog.modelTypes, ['LLM', 'ASR', 'TTS', 'Image']);
+    // 语音各两条路:百炼直连与自建网关,同一批模型、同一套音色,只是密钥与传输不同
     assert.deepEqual(Object.fromEntries(catalog.modelTypes.map((type: string) => [type, catalog.providers[type].map((p: any) => p.provider)])), {
-      LLM: ['openai'], ASR: ['qwen_audio_asr'], TTS: ['qwen_audio_tts'], Image: ['qwen_image'],
+      LLM: ['openai'], ASR: ['qwen_audio_asr', 'gateway_asr'], TTS: ['qwen_audio_tts', 'gateway_tts'], Image: ['qwen_image'],
     });
+    // 网关那两条要带 bailian/ 前缀的模型名,漏了会 404
+    for (const type of ['ASR', 'TTS'] as const) {
+      const gateway = catalog.providers[type].find((p: any) => p.provider.startsWith('gateway_'));
+      const model = gateway.fields.find((f: any) => f.key === 'model_name');
+      const value = model.default ?? model.options[0].value;
+      assert.ok(String(value).startsWith('bailian/'), `${type} 网关默认模型名要带前缀:${value}`);
+      assert.ok(gateway.fields.some((f: any) => f.key === 'base_url' && f.required), `${type} 网关要能填接口地址`);
+    }
     assert.equal(catalog.providers.LLM[0].fields.find((f: any) => f.key === 'vision').type, 'boolean');
     assert.equal(catalog.providers.TTS[0].fields.some((f: any) => f.key === 'voice'), false, '音色在音色页选,不在模型上');
     assert.deepEqual(catalog.providers.TTS[0].fields.find((f: any) => f.key === 'model_name').options.map((o: any) => o.value),

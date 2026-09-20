@@ -26,7 +26,7 @@ import {
   validateProfile, type VoiceProfile,
 } from './profile.ts';
 import { issueSampleToken, revokeSampleToken, sampleUrl } from './samples.ts';
-import { loadTtsModel, QWEN_TTS, syncSystemVoices, voiceFits, type TtsModelRow, type VoiceRow } from './store.ts';
+import { loadTtsModel, QWEN_TTS, supportsVoices, syncSystemVoices, voiceFits, type TtsModelRow, type VoiceRow } from './store.ts';
 import { familyOf, voiceKey } from './system-voices.ts';
 
 export { voiceKey };
@@ -87,7 +87,8 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
   const requireQwen = (modelId: string): TtsModelRow => {
     const model = loadTtsModel(conn, modelId);
     if (!model) throw new DashscopeError('指定的语音合成模型不存在', 400);
-    if (model.provider !== QWEN_TTS) throw new DashscopeError('只有千问语音合成模型支持这个操作', 400);
+    // 声音设计与复刻走百炼专有接口(customization),网关没有代理,所以这里仍只认百炼直连的模型
+    if (model.provider !== QWEN_TTS) throw new DashscopeError('声音设计与复刻要用百炼直连的合成模型,走网关的模型只能用系统音色', 400);
     return model;
   };
 
@@ -112,7 +113,7 @@ export function voiceRoutes(conn: Db, deps: VoiceDeps): Hono {
       model_name: model ? (typeof model.config['model_name'] === 'string' && model.config['model_name']) || 'qwen-audio-3.0-tts-flash' : '',
       model_label: model?.name ?? row.tts_model_id,
       family: model ? familyOf(model.config['model_name']) : 'flash',
-      compatible: model ? model.provider === QWEN_TTS && voiceFits(row, model) : false,
+      compatible: model ? supportsVoices(model.provider) && voiceFits(row, model) : false,
       instruction: composeInstruction(profile),
       summary: profileSummary(profile),
       agents: all<{ id: string; name: string }>(conn, 'SELECT id, name FROM agents WHERE tts_voice_id = ? ORDER BY name', row.id),
