@@ -253,15 +253,6 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
   播放音频文件时每约 20 秒插一条 `sentence_start`,免得设备 60 秒的播放看门狗把长音乐、长故事截断。
 - 两个 provider 的纯逻辑在 `server/engine/qwen_audio.py`(单元测试),联网部分由 `server/tests/smoke_qwen_audio.py` 在镜像里对着假的百炼服务端跑一遍。
 
-
-同一批模型也可以走自建的 OpenAI 兼容网关,对应 `gateway_asr` 与 `gateway_tts`。两者都**继承上面那对 provider,只换传输层** ——
-切句、字幕、情感标签、播放保活以及那几处上游基类的修补都在父类里,不重写第二份。识别是标准 multipart `/v1/audio/transcriptions`;
-合成是 `/v1/audio/speech` 加 `stream: true` 与 `response_format: "pcm"`,每句一个请求,首包约 390 毫秒且与句子长短无关。
-代码里挡了两个坑:`sample_rate` **必须是整数**,否则网关会悄悄退回 22050,声音偏尖偏快却【不报错】,所以要从响应的
-`Content-Type` 把采样率读回来核对;`qwen3-tts` 系请求 pcm 会悄悄返回 WAV,因此只提供 `qwen-audio-3.0` 这一族。
-热词只有 `qwen-audio-3.0-asr` 这一族支持,且音频短于约两秒时压不过声学模型。**声音设计与复刻仍留在百炼直连那条路上** ——
-它们走百炼专有接口,网关没有代理。纯逻辑在 `server/engine/gateway_audio.py`(有单元测试),
-`server/tests/smoke_gateway_audio.py` 在镜像里对着假网关把两个 provider 跑一遍。
 ### 音色
 
 每个智能体只选一个音色,合成模型由音色决定。音色挂在某个千问合成模型下,自带整套说话设置,在「音色」页配置:

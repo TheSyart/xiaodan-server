@@ -10,23 +10,6 @@ import {
 } from './system-voices.ts';
 
 export const QWEN_TTS = 'qwen_audio_tts';
-/** 走 OpenAI 兼容网关的同一批模型:音色名与百炼直连完全一致,所以共用音色体系 */
-export const GATEWAY_TTS = 'gateway_tts';
-
-/** 这个合成供应商的音色是不是千问那一套(系统音色、flash/plus 分族都按同一套规则) */
-export function supportsVoices(provider: unknown): boolean {
-  return provider === QWEN_TTS || provider === GATEWAY_TTS;
-}
-
-/**
- * 剥掉网关给模型名加的供应商前缀(bailian/qwen-audio-3.0-tts-flash → qwen-audio-3.0-tts-flash)。
- * 百炼返回的 target_model 不带前缀,不剥就会把同一个模型判成两个,复刻出来的音色全部显示为不兼容。
- */
-export function bareModel(name: unknown): string {
-  const value = typeof name === 'string' ? name.trim() : '';
-  const slash = value.lastIndexOf('/');
-  return slash >= 0 ? value.slice(slash + 1) : value;
-}
 
 export interface TtsModelRow {
   id: string;
@@ -97,8 +80,8 @@ export const modelFamily = (model: TtsModelRow): VoiceFamily => familyOf(model.c
 
 /** 兼容性:系统音色要属于模型那一套;复刻与设计的音色要是给这个合成模型建的 */
 export function voiceFits(voice: Pick<VoiceRow, 'kind' | 'voice' | 'target_model'>, model: TtsModelRow): boolean {
-  const modelName = bareModel(model.config['model_name']) || 'qwen-audio-3.0-tts-flash';
-  if (voice.kind !== 'system') return !voice.target_model || bareModel(voice.target_model) === modelName;
+  const modelName = typeof model.config['model_name'] === 'string' && model.config['model_name'] ? model.config['model_name'] : 'qwen-audio-3.0-tts-flash';
+  if (voice.kind !== 'system') return !voice.target_model || voice.target_model === modelName;
   const system = systemVoiceOf(voice.voice);
   if (system) return system.family === familyOf(modelName);
   // 按 ID 加的基础音色名字里带着模型名
@@ -117,8 +100,8 @@ export function voicesReady(conn: Db): boolean {
 export function syncSystemVoices(conn: Db, modelId?: string): number {
   if (!voicesReady(conn)) return 0;
   const models = all<{ id: string; config_json: string }>(conn,
-    `SELECT id, config_json FROM models WHERE model_type = 'TTS' AND provider IN (?, ?)${modelId ? ' AND id = ?' : ''}`,
-    ...(modelId ? [QWEN_TTS, GATEWAY_TTS, modelId] : [QWEN_TTS, GATEWAY_TTS]));
+    `SELECT id, config_json FROM models WHERE model_type = 'TTS' AND provider = ?${modelId ? ' AND id = ?' : ''}`,
+    ...(modelId ? [QWEN_TTS, modelId] : [QWEN_TTS]));
   let added = 0;
   for (const model of models) {
     const family = familyOf(parseConfig(model.config_json)['model_name']);

@@ -31,7 +31,7 @@ import { deviceRoleRoutes, roleTemplateRoutes } from './agent/roles/routes.ts';
 import type { AgentDeps } from './agent/types.ts';
 import { voiceRoutes } from './voice/routes.ts';
 import { VOICE_CATALOG } from './voice/profile.ts';
-import { defaultVoiceId, parseConfig, supportsVoices, syncSystemVoices } from './voice/store.ts';
+import { defaultVoiceId, parseConfig, QWEN_TTS, syncSystemVoices } from './voice/store.ts';
 import { familyOf } from './voice/system-voices.ts';
 
 const idSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/u, 'id 只能包含字母、数字、下划线与连字符');
@@ -297,7 +297,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
       );
     }
 
-    if (payload.model_type === 'TTS' && supportsVoices(payload.provider)) {
+    if (payload.model_type === 'TTS' && payload.provider === QWEN_TTS) {
       // 这一套的系统音色自动出现在音色页;还没有音色的智能体顺手绑上默认音色,设备马上有声音
       syncSystemVoices(conn, payload.id);
       const voiceId = defaultVoiceId(conn);

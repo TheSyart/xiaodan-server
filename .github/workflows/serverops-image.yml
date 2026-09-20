@@ -207,8 +207,6 @@ jobs:
           # 千问识别与合成对着容器里假的百炼服务端走一遍:协议顺序、打断、失败重试、保活、上游 processed_chars 修复(说明见文件开头)
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_qwen_audio.py
           # 大脑在控制塔:真实的 chat() 经 xiaodan_agent 走一轮假控制塔,以及设备桥的全部接口(说明见文件开头)
-          # 走网关的那两个 provider:对着假网关跑一遍,证明工厂能按 type 加载、继承链是通的(说明见文件开头)
-          docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_gateway_audio.py
           docker exec -i xiaodan-engine-smoke python - < server/tests/smoke_agent.py
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.register(self)' core/connection.py
           docker exec xiaodan-engine-smoke grep -q 'xiaodan_bridge.unregister(self)' core/connection.py

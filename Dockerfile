@@ -91,11 +91,6 @@ COPY server/providers/gateway_omni_tts.py core/providers/tts/gateway_omni_tts.py
 COPY server/engine/qwen_audio.py core/utils/qwen_audio.py
 COPY server/providers/qwen_audio_asr.py core/providers/asr/qwen_audio_asr.py
 COPY server/providers/qwen_audio_tts.py core/providers/tts/qwen_audio_tts.py
-# 同样两件事,但走 OpenAI 兼容网关(model.shanchen.space):识别是标准 multipart,合成是 HTTP 分块流式。
-# 两个 provider 都【继承】上面那对,只换传输层 —— 切句、字幕、情感标签、播放保活都在父类里,不重写。
-COPY server/engine/gateway_audio.py core/utils/gateway_audio.py
-COPY server/providers/gateway_asr.py core/providers/asr/gateway_asr.py
-COPY server/providers/gateway_tts.py core/providers/tts/gateway_tts.py
 # 智能体大脑在控制塔:引擎的 LLM provider「xiaodan_agent」把一轮对话转给控制塔、执行它回来的事件;
 # 「设备桥」是引擎内网 HTTP 端口上的几个接口,控制塔借它调用引擎插件、主动播报(提醒)。补丁见下面第 4-6 处。
 COPY server/engine/xiaodan_bridge_core.py core/utils/xiaodan_bridge_core.py
@@ -282,7 +277,7 @@ RUN set -eux; \
     find /opt/xiaozhi-esp32-server -name __pycache__ -type d -prune -exec rm -rf {} +; \
     python -m compileall -q /opt/xiaozhi-esp32-server/app.py /opt/xiaozhi-esp32-server/config \
       /opt/xiaozhi-esp32-server/core /opt/xiaozhi-esp32-server/plugins_func || true; \
-    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py','/opt/xiaozhi-esp32-server/core/utils/qwen_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/qwen_audio_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/qwen_audio_tts.py','/opt/xiaozhi-esp32-server/core/utils/gateway_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/gateway_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_bridge_core.py','/opt/xiaozhi-esp32-server/core/xiaodan_bridge.py','/opt/xiaozhi-esp32-server/core/providers/llm/xiaodan_agent/xiaodan_agent.py']]"; \
+    python -c "import ast; [ast.parse(open(p,encoding='utf-8').read()) for p in ['/opt/xiaozhi-esp32-server/core/providers/asr/gateway_chat.py','/opt/xiaozhi-esp32-server/core/providers/tts/gateway_omni_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_tool_text.py','/opt/xiaozhi-esp32-server/core/utils/qwen_audio.py','/opt/xiaozhi-esp32-server/core/providers/asr/qwen_audio_asr.py','/opt/xiaozhi-esp32-server/core/providers/tts/qwen_audio_tts.py','/opt/xiaozhi-esp32-server/core/utils/xiaodan_bridge_core.py','/opt/xiaozhi-esp32-server/core/xiaodan_bridge.py','/opt/xiaozhi-esp32-server/core/providers/llm/xiaodan_agent/xiaodan_agent.py']]"; \
     test -s /opt/xiaozhi-esp32-server/xiaodan-base-prompt.txt
 
 FROM debian:trixie-slim AS engine

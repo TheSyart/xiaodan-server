@@ -67,16 +67,6 @@ const BAILIAN_KEY: ProviderField[] = [
   { key: 'base_url', label: '接口地址', type: 'string', hint: '可以直接填业务空间地址 https://<业务空间>.cn-beijing.maas.aliyuncs.com/api/v1;留空按业务空间 ID 自动拼' },
 ];
 
-/** 走 OpenAI 兼容网关(model.shanchen.space)的共用字段 */
-const GATEWAY_KEY: ProviderField[] = [
-  {
-    key: 'base_url', label: '接口地址', type: 'string', required: true,
-    default: 'https://model.shanchen.space/v1',
-    hint: '填到 /v1 即可,识别与合成的路径自动拼',
-  },
-  { key: 'api_key', label: '网关 API 密钥', type: 'password', required: true },
-];
-
 /** 文生图模型:同步的直接出图,异步的(万相)要轮询任务 */
 export const IMAGE_MODELS: { value: string; label: string; async: boolean }[] = [
   { value: 'qwen-image-3.0-pro', label: 'qwen-image-3.0-pro(千问图像 3.0,推荐)', async: false },
@@ -110,25 +100,6 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
       fields: [
         ...BAILIAN_KEY,
         { key: 'model_name', label: '识别模型', type: 'string', default: 'qwen-audio-3.0-asr-flash' },
-        { key: 'vocabulary', label: '热词', type: 'text', default: '小单|5' },
-        { key: 'language_hints', label: '语种提示', type: 'string', hint: '逗号分隔,如 zh,en;留空自动识别' },
-        { key: 'timeout', label: '超时(秒)', type: 'number', default: 8 },
-        OUTPUT_DIR,
-      ],
-    },
-    {
-      provider: 'gateway_asr',
-      label: '语音识别(自建网关)',
-      note:
-        '与上面同一批百炼模型,但经自建网关转发,密钥统一成网关的一把。' +
-        '热词只有 qwen-audio-3.0-asr 这一族支持(qwen3-asr 系官方规格里就是不支持,填了也不生效);' +
-        '另外音频短于约 2 秒时热词压不过声学模型,「小单」仍可能听成「小丹」,可在「读音替换」页兜底。',
-      fields: [
-        ...GATEWAY_KEY,
-        {
-          key: 'model_name', label: '识别模型', type: 'string', default: 'bailian/qwen-audio-3.0-asr-flash',
-          hint: '要带 bailian/ 前缀;换成 qwen3-asr 系会失去热词',
-        },
         { key: 'vocabulary', label: '热词', type: 'text', default: '小单|5' },
         { key: 'language_hints', label: '语种提示', type: 'string', hint: '逗号分隔,如 zh,en;留空自动识别' },
         { key: 'timeout', label: '超时(秒)', type: 'number', default: 8 },
@@ -175,26 +146,6 @@ export const PROVIDERS: Record<ModelType, ProviderDef[]> = {
             { value: 'qwen-audio-3.0-tts-flash', label: 'qwen-audio-3.0-tts-flash(快,12 个系统音色)' },
             { value: 'qwen-audio-3.0-tts-plus', label: 'qwen-audio-3.0-tts-plus(旗舰,2 个系统音色)' },
           ],
-        },
-        OUTPUT_DIR,
-      ],
-    },
-    {
-      provider: 'gateway_tts',
-      label: '语音合成(自建网关)',
-      note:
-        '与上面同一批百炼模型、同一套系统音色,但经自建网关转发,密钥统一成网关的一把。每句话一个流式请求,边合成边播。' +
-        '【声音设计与声音复刻用不了】:那两样走百炼专有接口,网关没有代理,需要时把合成模型切回「千问语音合成(百炼)」。' +
-        '音量、语速、语气仍在音色页按音色设置。',
-      fields: [
-        ...GATEWAY_KEY,
-        {
-          key: 'model_name', label: '合成模型', type: 'select', default: 'bailian/qwen-audio-3.0-tts-flash',
-          options: [
-            { value: 'bailian/qwen-audio-3.0-tts-flash', label: 'qwen-audio-3.0-tts-flash(快,12 个系统音色)' },
-            { value: 'bailian/qwen-audio-3.0-tts-plus', label: 'qwen-audio-3.0-tts-plus(旗舰,2 个系统音色)' },
-          ],
-          hint: 'qwen3-tts 系不能选:它请求 pcm 时会退回 WAV,音色名也是另一套',
         },
         OUTPUT_DIR,
       ],
