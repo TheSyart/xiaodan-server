@@ -20,15 +20,18 @@ import { QUALITIES, QUALITY_LABEL, scoreResult } from './score.ts';
 import {
   adjustBody, examplesBody, keyCreate, keyUpdate, LEDGER_KINDS, redeemBody, reorderBody, rewardCreate, rewardUpdate,
   RULE_RANGES, ruleCreate, rulePreview, ruleUpdate, taskAssign, taskClaim, taskCustom, taskMissed, taskResult,
-  TASK_STATUSES, taskUpdate, day as daySchema,
+  TASK_STATUSES, taskUpdate, WALLET_KINDS, walletAdjustBody, walletUseBody, day as daySchema,
 } from './schemas.ts';
 import {
   ADMIN, CreditError, adjust, assignTasks, balance, childView, claimTask, createCustomTask, createReward, createRule,
   daySummary, deleteReward, deleteRule, deleteTask, ledgerById, ledgerPage, listRewards, listRules, listTasks, missTask,
   pendingClaims, previewTask, queryTasks, redeem, reorder, requireReward, requireRule, requireTask, restoreReward,
   restoreRule, revert, scoreTask, seedExamples, shiftDay, stats, today, unclaimTask, updateReward, updateRule, updateTask,
-  type Actor, type LedgerKind, type TaskStatusFilter,
+  walletBalance, walletSummary,
+  type Actor, type LedgerKind, type RewardRow, type TaskStatusFilter, type WalletKind, type WalletRow,
 } from './store.ts';
+import { AMOUNT_MAX, fromBase, KIND_LABEL, REWARD_KINDS, toBase, UNIT, type RewardKind } from './units.ts';
+import { walletAdjust, walletEntry, walletOut, walletPage, walletRevert, walletUse } from './wallet.ts';
 
 export interface CreditRouteOptions {
   now?: (() => Date) | undefined;
@@ -47,6 +50,30 @@ const idParam = (c: Context) => {
   return id;
 };
 const limitParam = (c: Context) => Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 30) || 30));
+
+/**
+ * 奖励对外的样子:amount 换成自然单位(分钟 / 元),带上单位;
+ * 时间与零花钱奖励再带上账户余额 wallet_balance,页面和 App 不用另查。
+ */
+function rewardOut(conn: Db, row: RewardRow) {
+  return {
+    ...row,
+    amount: fromBase(row.kind, row.amount),
+    unit: UNIT[row.kind],
+    ...(row.kind === 'item' ? {} : { wallet_balance: fromBase(row.kind, walletBalance(conn, row.id)) }),
+  };
+}
+
+/** 账户那一块的返回:数额换成自然单位 */
+function walletPart(wallet: { entry: WalletRow; balance: number } | undefined) {
+  if (!wallet) return {};
+  const kind = wallet.entry.reward_kind;
+  return { wallet: { entry: walletOut(wallet.entry), balance: fromBase(kind, wallet.balance), unit: UNIT[kind] } };
+}
+
+/** 接口收的 amount 是自然单位,库里是基本单位;物品没有 amount */
+const amountIn = (kind: RewardKind, amount: number | undefined) =>
+  kind === 'item' || amount === undefined ? undefined : toBase(kind, amount, '一份换多少');
 
 export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
   const app = new Hono({ strict: false });
@@ -101,7 +128,12 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
     qualities: QUALITIES.map((key) => ({ key, label: QUALITY_LABEL[key] })),
     task_statuses: TASK_STATUSES,
     ledger_kinds: LEDGER_KINDS,
-    ranges: { ...RULE_RANGES, cost: [1, 100000], adjust: [-1000, 1000], actual_minutes: [0, 1440] },
+    reward_kinds: REWARD_KINDS.map((key) => ({ key, label: KIND_LABEL[key], unit: UNIT[key], amount_max: AMOUNT_MAX[key] })),
+    wallet_kinds: WALLET_KINDS,
+    ranges: {
+      ...RULE_RANGES, cost: [1, 100000], adjust: [-1000, 1000], actual_minutes: [0, 1440], times: [1, 100],
+      time_amount: [1, 1440], money_amount: [0.01, 100000],
+    },
   }));
 
   // ---- 孩子(= 设备,只读) ----
@@ -247,38 +279,46 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
 
   app.get('/rewards', handle((c) => {
     const found = requireDevice(c.req.query('mac'));
-    return c.json({ items: listRewards(conn, found.mac, c.req.query('archived') === '1'), balance: balance(conn, found.mac) });
+    return c.json({
+      items: listRewards(conn, found.mac, c.req.query('archived') === '1').map((r) => rewardOut(conn, r)),
+      balance: balance(conn, found.mac),
+    });
   }));
 
   app.post('/rewards', handle(async (c) => {
-    const { mac, ...input } = await parse(c, rewardCreate);
-    return c.json({ ok: true, item: createReward(conn, requireDevice(mac).mac, input) });
+    const { mac, amount, ...input } = await parse(c, rewardCreate);
+    const kind = input.kind ?? 'item';
+    const item = createReward(conn, requireDevice(mac).mac, { ...input, kind, amount: amountIn(kind, amount) });
+    return c.json({ ok: true, item: rewardOut(conn, item) });
   }));
 
   app.post('/rewards/reorder', handle(async (c) => {
     const body = await parse(c, reorderBody);
     const mac = requireDevice(body.mac).mac;
     reorder(conn, 'credit_rewards', mac, body.ids);
-    return c.json({ ok: true, items: listRewards(conn, mac) });
+    return c.json({ ok: true, items: listRewards(conn, mac).map((r) => rewardOut(conn, r)) });
   }));
 
-  app.get('/rewards/:id', handle((c) => c.json({ item: requireReward(conn, idParam(c)) })));
+  app.get('/rewards/:id', handle((c) => c.json({ item: rewardOut(conn, requireReward(conn, idParam(c))) })));
 
   patch('/rewards/:id', async (c) => {
-    const input = await parse(c, rewardUpdate);
-    return c.json({ ok: true, item: updateReward(conn, idParam(c), input) });
+    const id = idParam(c);
+    const { amount, ...input } = await parse(c, rewardUpdate);
+    const kind = input.kind ?? requireReward(conn, id).kind;
+    return c.json({ ok: true, item: rewardOut(conn, updateReward(conn, id, { ...input, amount: amountIn(kind, amount) })) });
   });
 
   app.delete('/rewards/:id', handle((c) => c.json({ ok: true, result: deleteReward(conn, idParam(c)) })));
 
-  app.post('/rewards/:id/restore', handle((c) => c.json({ ok: true, item: restoreReward(conn, idParam(c)) })));
+  app.post('/rewards/:id/restore', handle((c) => c.json({ ok: true, item: rewardOut(conn, restoreReward(conn, idParam(c))) })));
 
   // ---- 兑换与手动奖惩 ----
 
   app.post('/redeem', handle(async (c) => {
     const body = await parse(c, redeemBody);
     const mac = requireDevice(body.mac).mac;
-    return c.json({ ok: true, ...redeem(conn, mac, body.reward_id, body.note ?? '', actorOf(c)) });
+    const { wallet, ...rest } = redeem(conn, mac, body.reward_id, body.times ?? 1, body.note ?? '', actorOf(c));
+    return c.json({ ok: true, ...rest, ...walletPart(wallet) });
   }));
 
   app.post('/adjust', handle(async (c) => {
@@ -309,7 +349,46 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
     return c.json({ item });
   }));
 
-  app.post('/ledger/:id/revert', handle((c) => c.json({ ok: true, ...revert(conn, idParam(c), actorOf(c)) })));
+  app.post('/ledger/:id/revert', handle((c) => {
+    const { wallet, ...rest } = revert(conn, idParam(c), actorOf(c));
+    return c.json({ ok: true, ...rest, ...walletPart(wallet) });
+  }));
+
+  // ---- 时间与零花钱余额 ----
+
+  app.get('/wallets', handle((c) => {
+    const found = requireDevice(c.req.query('mac'));
+    return c.json({ items: walletSummary(conn, found.mac) });
+  }));
+
+  app.get('/wallets/entries', handle((c) => {
+    const found = requireDevice(c.req.query('mac'));
+    const { kind, from, to } = c.req.query();
+    const before = Number(c.req.query('before') ?? 0);
+    const rewardId = Number(c.req.query('reward_id') ?? 0);
+    return c.json(walletPage(conn, found.mac, Number.isInteger(before) && before > 0 ? before : null, limitParam(c), {
+      reward_id: Number.isInteger(rewardId) && rewardId > 0 ? rewardId : undefined,
+      kind: kind ? query(z.enum(WALLET_KINDS), kind) as WalletKind : undefined,
+      from: from ? query(daySchema, from) : undefined,
+      to: to ? query(daySchema, to) : undefined,
+    }));
+  }));
+
+  app.get('/wallets/entries/:id', handle((c) => c.json({ item: walletEntry(conn, idParam(c)) })));
+
+  app.post('/wallets/use', handle(async (c) => {
+    const body = await parse(c, walletUseBody);
+    const mac = requireDevice(body.mac).mac;
+    return c.json({ ok: true, ...walletUse(conn, mac, body.reward_id, body.amount, body.reason, body.note ?? '', actorOf(c)) });
+  }));
+
+  app.post('/wallets/adjust', handle(async (c) => {
+    const body = await parse(c, walletAdjustBody);
+    const mac = requireDevice(body.mac).mac;
+    return c.json({ ok: true, ...walletAdjust(conn, mac, body.reward_id, body.amount, body.reason, actorOf(c)) });
+  }));
+
+  app.post('/wallets/entries/:id/revert', handle((c) => c.json({ ok: true, ...walletRevert(conn, idParam(c), actorOf(c)) })));
 
   // ---- 统计 ----
 

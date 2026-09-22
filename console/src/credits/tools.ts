@@ -9,8 +9,10 @@ import { CONSOLE_TOOLS } from '../agent/registry.ts';
 import type { AgentTool, ToolContext } from '../agent/types.ts';
 import { QUALITY_LABEL } from './score.ts';
 import {
-  CreditError, balance, claimTask, listRewards, listTasks, redeem, shiftDay, stats, today, type RewardRow, type TaskRow,
+  CreditError, balance, claimTask, listRewards, listTasks, redeem, shiftDay, stats, today, walletSummary,
+  type RewardRow, type TaskRow, type WalletSummary,
 } from './store.ts';
+import { formatQty, UNIT } from './units.ts';
 
 export const CREDITS_PLUGIN = 'credits';
 
@@ -39,11 +41,47 @@ function taskLine(task: TaskRow): string {
   return `- ${task.name}(编号 ${task.id}):还没做,规定 ${task.target_minutes} 分钟内完成能得 ${signed(task.ontime_points)} 分`;
 }
 
+const label = (reward: { emoji: string; name: string }) => `${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`;
+
+/** 「10 分换 5 分钟」;物品是「要 200 分」 */
+export function rewardRate(reward: RewardRow): string {
+  return reward.kind === 'item' ? `要 ${reward.cost} 分` : `${reward.cost} 分换 ${formatQty(reward.kind, reward.amount)}`;
+}
+
 function rewardLine(reward: RewardRow, points: number): string {
-  const label = `${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`;
-  return points >= reward.cost
-    ? `- ${label}:要 ${reward.cost} 分,现在就够了`
-    : `- ${label}:要 ${reward.cost} 分,还差 ${reward.cost - points} 分`;
+  const most = Math.min(100, Math.floor(Math.max(0, points) / reward.cost));
+  if (most === 0) return `- ${label(reward)}:${rewardRate(reward)},还差 ${reward.cost - points} 分`;
+  if (reward.kind === 'item') return `- ${label(reward)}:${rewardRate(reward)},现在就够了`;
+  return `- ${label(reward)}:${rewardRate(reward)},现在最多能换 ${most} 份(${formatQty(reward.kind, reward.amount * most)})`;
+}
+
+/** 「💰 零花钱还有 12.5 元」 */
+export function walletLine(wallet: WalletSummary): string {
+  return `${label(wallet)}还有 ${wallet.balance} ${wallet.unit}`;
+}
+
+/**
+ * 这次换几份:说了份数就用份数;说的是数量(15 分钟、10 元)就换算成份数,凑不成整份时返回给模型的说明;
+ * 都没说就是一份。物品的数量就是份数。
+ */
+export function redeemTimes(reward: RewardRow, amountArg: unknown, timesArg: unknown): number | string {
+  const num = (value: unknown) => (typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : Number.NaN);
+  const times = num(timesArg);
+  if (timesArg !== undefined && timesArg !== null && timesArg !== '') {
+    return Number.isInteger(times) && times >= 1 && times <= 100 ? times : '份数要是 1~100 的整数。';
+  }
+  const amount = num(amountArg);
+  if (amountArg === undefined || amountArg === null || amountArg === '') return 1;
+  if (!Number.isFinite(amount) || amount <= 0) return '数量要大于 0。';
+  if (reward.kind === 'item') return Number.isInteger(amount) && amount <= 100 ? amount : '份数要是 1~100 的整数。';
+  const base = reward.kind === 'money' ? Math.round(amount * 100) : amount;
+  const count = base / reward.amount;
+  if (Number.isInteger(count) && count >= 1 && count <= 100) return count;
+  const lower = Math.min(100, Math.floor(count));
+  const options = [lower, lower + 1].filter((n) => n >= 1 && n <= 100)
+    .map((n) => `${formatQty(reward.kind, reward.amount * n)}(${n} 份,${reward.cost * n} 分)`);
+  return `「${reward.name}」按 ${rewardRate(reward)} 整份兑换,${amount} ${UNIT[reward.kind]}凑不成整份。`
+    + (options.length ? `可以换 ${options.join(' 或 ')}。问清楚再换。` : '');
 }
 
 const NO_DEVICE = { ok: false, content: '这次对话没有对应的设备,查不到学分。如实告诉用户。' };
@@ -59,8 +97,8 @@ CONSOLE_TOOLS.set(CREDITS_PLUGIN, (ctx) => {
     label: '查学分',
     hint: '正在查学分',
     description:
-      '查孩子的学分:当前余额、今天每项作业的状态、每个奖励还差多少分、最近 7 天挣了多少。'
-      + '孩子问「我有多少分」「今天还有什么作业」「还差多少能看电视」时调用。' + RULE,
+      '查孩子的学分:当前余额、今天每项作业的状态、每个奖励的兑换比例和现在能换多少、零花钱和游戏 / 电视时间还剩多少、最近 7 天挣了多少。'
+      + '孩子问「我有多少分」「今天还有什么作业」「还差多少能看电视」「我还有多少零花钱」时调用。' + RULE,
     parameters: { type: 'object', properties: {} },
     async run(toolCtx: ToolContext) {
       const mac = toolCtx.device.mac;
@@ -73,8 +111,10 @@ CONSOLE_TOOLS.set(CREDITS_PLUGIN, (ctx) => {
       const lines = [`现在有 ${points} 分。`];
       lines.push(tasks.length ? '今天的作业:' : '今天还没有布置作业。');
       lines.push(...tasks.map(taskLine));
-      if (rewards.length) lines.push('能兑换的奖励:', ...rewards.map((r) => rewardLine(r, points)));
+      if (rewards.length) lines.push('能兑换的奖励(按整份换):', ...rewards.map((r) => rewardLine(r, points)));
       else lines.push('爸爸妈妈还没有设置奖励。');
+      const wallets = walletSummary(conn, mac);
+      if (wallets.length) lines.push(`已经换到手、还没用的:${wallets.map(walletLine).join(';')}。`);
       lines.push(`最近 7 天挣了 ${week.earned} 分,扣了 ${week.penalty} 分,花了 ${week.spent} 分。`);
       lines.push(`(${RULE})`);
       return { ok: true, content: lines.join('\n') };
@@ -137,11 +177,16 @@ CONSOLE_TOOLS.set(CREDITS_PLUGIN, (ctx) => {
     label: '兑换奖励',
     hint: '正在兑换奖励',
     description:
-      '孩子想用学分换奖励(「我要换看电视」)时调用。分够就直接兑换并扣分,不够会返回还差多少。'
+      '孩子想用学分换奖励(「我要换看电视」「换 15 分钟游戏」「换 10 块钱」)时调用。按整份兑换,分够就直接兑换并扣分,'
+      + '换到的时间和零花钱存进余额,玩的时候由爸爸妈妈记用掉。不够会返回还差多少。'
       + '孩子只是问问还差多少时用 credits_status,不要调这个。' + RULE,
     parameters: {
       type: 'object',
-      properties: { reward: { type: 'string', description: '奖励名,比如「看电视」' } },
+      properties: {
+        reward: { type: 'string', description: '奖励名,比如「玩游戏」「零花钱」' },
+        amount: { type: 'number', description: '孩子说要换多少:时间填分钟数,零花钱填元;不说就不填' },
+        times: { type: 'integer', minimum: 1, maximum: 100, description: '孩子说换几份 / 几次时填;和 amount 二选一,都不填就是一份' },
+      },
       required: ['reward'],
     },
     async run(toolCtx, args) {
@@ -162,9 +207,15 @@ CONSOLE_TOOLS.set(CREDITS_PLUGIN, (ctx) => {
         return { ok: false, content: `「${query}」对上了好几个奖励:${found.map((r) => r.name).join('、')}。问孩子想换哪个。` };
       }
       const reward = found[0]!;
+      const times = redeemTimes(reward, args['amount'], args['times']);
+      if (typeof times === 'string') return { ok: false, content: times };
       try {
-        const result = redeem(conn, mac, reward.id, '孩子通过小单兑换', { source: 'agent', actor: toolCtx.agent.name });
-        return { ok: true, content: `兑换成功:${reward.name},扣了 ${reward.cost} 分,还剩 ${result.balance} 分。提醒孩子跟爸爸妈妈说一声。` };
+        const result = redeem(conn, mac, reward.id, times, '孩子通过小单兑换', { source: 'agent', actor: toolCtx.agent.name });
+        const got = result.wallet ? `${label(reward)}现在有 ${formatQty(reward.kind, result.wallet.balance)}。` : '';
+        return {
+          ok: true,
+          content: `兑换成功:${result.ledger.title},扣了 ${reward.cost * times} 分,还剩 ${result.balance} 分。${got}提醒孩子跟爸爸妈妈说一声。`,
+        };
       } catch (error) {
         if (error instanceof CreditError && error.code === 'insufficient_balance') {
           const open = listTasks(conn, mac, today(now())).filter((t) => t.status === 'pending' && !t.claimed_at).map((t) => t.name);

@@ -9,23 +9,11 @@
 import type { Db } from '../db.ts';
 import { all, one, run, tx } from '../db.ts';
 import { formatBeijing } from '../agent/reminders/time.ts';
+import { CreditError } from './errors.ts';
 import { scoreMissed, scoreResult, type Quality, type ScoreParams, type ScoreResult } from './score.ts';
+import { formatQty, fromBase, UNIT, type RewardKind } from './units.ts';
 
-export type CreditErrorCode =
-  | 'invalid' | 'not_found' | 'device_not_found' | 'already_scored' | 'archived'
-  | 'insufficient_balance' | 'already_reverted' | 'not_revertible' | 'read_only_key' | 'idempotency_key_reused';
-
-/** 带 HTTP 状态与机器可读代码的业务错误,路由层原样转成 {error, code} */
-export class CreditError extends Error {
-  readonly status: 400 | 403 | 404 | 409 | 422;
-  readonly code: CreditErrorCode;
-
-  constructor(message: string, status: 400 | 403 | 404 | 409 | 422, code: CreditErrorCode) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
+export { CreditError, type CreditErrorCode } from './errors.ts';
 
 /** 这一笔是谁动的 */
 export interface Actor {
@@ -80,8 +68,12 @@ export interface RewardRow {
   id: number;
   mac: string;
   name: string;
+  /** 一份要多少分 */
   cost: number;
   emoji: string;
+  kind: RewardKind;
+  /** 一份换多少,基本单位(时间:分钟;钱:分;物品恒为 1) */
+  amount: number;
   sort: number;
   archived: number;
   created_at: string;
@@ -101,9 +93,52 @@ export interface LedgerRow {
   reverted_by: number | null;
   source: Actor['source'];
   actor: string;
+  /** 兑换:这次换了几份 */
+  times: number | null;
   created_at: string;
   /** 这一笔之后的余额(查询时现算) */
   balance_after?: number;
+}
+
+export type WalletKind = 'redeem' | 'use' | 'adjust' | 'revert';
+
+/** 时间 / 零花钱余额账户的一笔流水。qty 是基本单位 */
+export interface WalletRow {
+  id: number;
+  mac: string;
+  reward_id: number;
+  qty: number;
+  kind: WalletKind;
+  /** 兑换进账对应的那笔学分流水 */
+  ledger_id: number | null;
+  /** 撤销记录指向被撤销的那一笔 */
+  ref_id: number | null;
+  title: string;
+  note: string;
+  reverted_by: number | null;
+  source: Actor['source'];
+  actor: string;
+  created_at: string;
+  /** 以下为查询时带出来的 */
+  reward_kind: RewardKind;
+  reward_name: string;
+  reward_emoji: string;
+  balance_after: number;
+}
+
+/** 一个余额账户的汇总,自然单位 */
+export interface WalletSummary {
+  reward_id: number;
+  name: string;
+  emoji: string;
+  kind: RewardKind;
+  unit: string;
+  archived: number;
+  balance: number;
+  /** 累计兑换进来的(撤销过的不算) */
+  redeemed: number;
+  /** 累计用掉 / 花掉的(撤销过的不算) */
+  used: number;
 }
 
 export type RuleInput = Partial<ScoreParams> & { name?: string };
@@ -134,11 +169,63 @@ export function balance(conn: Db, mac: string): number {
 
 function addLedger(
   conn: Db, mac: string, delta: number, kind: LedgerKind, refId: number | null, title: string, note: string, by: Actor,
+  times: number | null = null,
 ): number {
   run(conn,
-    'INSERT INTO credit_ledger (mac, delta, kind, ref_id, title, note, source, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    mac, delta, kind, refId, title.slice(0, 80), note.slice(0, 200), by.source, by.actor.slice(0, 40));
+    'INSERT INTO credit_ledger (mac, delta, kind, ref_id, title, note, source, actor, times) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    mac, delta, kind, refId, title.slice(0, 80), note.slice(0, 200), by.source, by.actor.slice(0, 40), times);
   return lastId(conn);
+}
+
+// ---------------------------------------------------------------- 时间与零花钱的余额账户(底层)
+// 高层操作(用掉、调整、撤销、翻页)在 wallet.ts;兑换进账与撤销兑换要和学分流水同一个事务,所以底层放这里。
+
+const WALLET_SELECT = `SELECT w.*, r.kind AS reward_kind, r.name AS reward_name, r.emoji AS reward_emoji,
+    (SELECT SUM(qty) FROM credit_wallet x WHERE x.reward_id = w.reward_id AND x.id <= w.id) AS balance_after
+  FROM credit_wallet w JOIN credit_rewards r ON r.id = w.reward_id`;
+
+export function walletBalance(conn: Db, rewardId: number): number {
+  return one<{ n: number | null }>(conn, 'SELECT SUM(qty) AS n FROM credit_wallet WHERE reward_id = ?', rewardId)?.n ?? 0;
+}
+
+export function walletById(conn: Db, id: number): WalletRow | undefined {
+  return plain(one<WalletRow>(conn, `${WALLET_SELECT} WHERE w.id = ?`, id));
+}
+
+export function walletRows(conn: Db, where: string, params: unknown[], limit: number): WalletRow[] {
+  return all<WalletRow>(conn, `${WALLET_SELECT} WHERE ${where} ORDER BY w.id DESC LIMIT ?`, ...params, limit)
+    .map((row) => ({ ...row }));
+}
+
+export function addWallet(
+  conn: Db, mac: string, rewardId: number, qty: number, kind: WalletKind,
+  refs: { ledgerId?: number | null; refId?: number | null }, title: string, note: string, by: Actor,
+): number {
+  run(conn,
+    `INSERT INTO credit_wallet (mac, reward_id, qty, kind, ledger_id, ref_id, title, note, source, actor)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    mac, rewardId, qty, kind, refs.ledgerId ?? null, refs.refId ?? null, title.slice(0, 80), note.slice(0, 200),
+    by.source, by.actor.slice(0, 40));
+  return lastId(conn);
+}
+
+/** 每个时间 / 零花钱奖励一个账户;停用的奖励只要还有余额也列出来 */
+export function walletSummary(conn: Db, mac: string): WalletSummary[] {
+  return all<{ id: number; name: string; emoji: string; kind: RewardKind; archived: number; balance: number | null; redeemed: number | null; used: number | null }>(conn,
+    `SELECT r.id, r.name, r.emoji, r.kind, r.archived,
+       (SELECT SUM(qty) FROM credit_wallet w WHERE w.reward_id = r.id) AS balance,
+       (SELECT SUM(qty) FROM credit_wallet w WHERE w.reward_id = r.id AND w.kind = 'redeem' AND w.reverted_by IS NULL) AS redeemed,
+       (SELECT -SUM(qty) FROM credit_wallet w WHERE w.reward_id = r.id AND w.kind = 'use' AND w.reverted_by IS NULL) AS used
+     FROM credit_rewards r
+     WHERE r.mac = ? AND r.kind != 'item'
+     ORDER BY r.archived, r.sort, r.id`, mac)
+    .filter((row) => !row.archived || (row.balance ?? 0) !== 0)
+    .map((row) => ({
+      reward_id: row.id, name: row.name, emoji: row.emoji, kind: row.kind, unit: UNIT[row.kind], archived: row.archived,
+      balance: fromBase(row.kind, row.balance ?? 0),
+      redeemed: fromBase(row.kind, row.redeemed ?? 0),
+      used: fromBase(row.kind, row.used ?? 0),
+    }));
 }
 
 // ---------------------------------------------------------------- 孩子(= 设备)
@@ -149,6 +236,8 @@ export interface ChildView {
   balance: number;
   today: { total: number; done: number; points: number };
   pending_claims: number;
+  /** 时间与零花钱余额,自然单位 */
+  wallets: { reward_id: number; name: string; emoji: string; kind: RewardKind; unit: string; balance: number }[];
 }
 
 export function childView(conn: Db, device: { mac: string; alias: string }, day: string): ChildView {
@@ -158,6 +247,8 @@ export function childView(conn: Db, device: { mac: string; alias: string }, day:
     balance: balance(conn, device.mac),
     today: daySummary(conn, device.mac, day),
     pending_claims: pendingClaims(conn, device.mac),
+    wallets: walletSummary(conn, device.mac)
+      .map(({ reward_id, name, emoji, kind, unit, balance: left }) => ({ reward_id, name, emoji, kind, unit, balance: left })),
   };
 }
 
@@ -400,28 +491,61 @@ export function listRewards(conn: Db, mac: string, includeArchived = false): Rew
     .map((row) => ({ ...row }));
 }
 
-export function createReward(conn: Db, mac: string, input: { name: string; cost: number; emoji?: string | undefined }): RewardRow {
+/** 奖励的输入:amount 已换成基本单位(见 units.ts toBase);物品不看 amount,恒为 1 */
+export interface RewardInput {
+  name?: string | undefined;
+  cost?: number | undefined;
+  emoji?: string | undefined;
+  kind?: RewardKind | undefined;
+  amount?: number | undefined;
+}
+
+function checkRewardAmount(kind: RewardKind, amount: number | undefined): number {
+  if (kind === 'item') return 1;
+  if (amount === undefined) {
+    throw new CreditError(kind === 'time' ? '时间奖励要填一份换多少分钟' : '零花钱奖励要填一份换多少元', 400, 'invalid');
+  }
+  const max = kind === 'time' ? 1440 : 10000000;
+  if (!Number.isInteger(amount) || amount < 1 || amount > max) {
+    throw new CreditError(kind === 'time' ? '一份换的分钟数要在 1~1440 之间' : '一份换的钱要在 0.01~100000 元之间', 400, 'invalid');
+  }
+  return amount;
+}
+
+/** 这个奖励换过、或者账户里有过流水:种类就不能再改,否则余额的单位会乱 */
+function rewardUsed(conn: Db, id: number): boolean {
+  return !!one(conn, "SELECT 1 FROM credit_ledger WHERE kind = 'redeem' AND ref_id = ? LIMIT 1", id)
+    || !!one(conn, 'SELECT 1 FROM credit_wallet WHERE reward_id = ? LIMIT 1', id);
+}
+
+export function createReward(conn: Db, mac: string, input: RewardInput & { name: string; cost: number }): RewardRow {
+  const kind = input.kind ?? 'item';
+  const amount = checkRewardAmount(kind, input.amount);
   const sort = (one<{ n: number | null }>(conn, 'SELECT MAX(sort) AS n FROM credit_rewards WHERE mac = ?', mac)?.n ?? 0) + 1;
-  run(conn, 'INSERT INTO credit_rewards (mac, name, cost, emoji, sort) VALUES (?, ?, ?, ?, ?)',
-    mac, input.name, input.cost, input.emoji ?? '', sort);
+  run(conn, 'INSERT INTO credit_rewards (mac, name, cost, emoji, sort, kind, amount) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    mac, input.name, input.cost, input.emoji ?? '', sort, kind, amount);
   return rewardById(conn, lastId(conn))!;
 }
 
-export function updateReward(
-  conn: Db, id: number, input: { name?: string | undefined; cost?: number | undefined; emoji?: string | undefined },
-): RewardRow {
-  requireReward(conn, id);
+/** 份价与一份换多少随时能改,只影响以后的兑换;种类只有没用过时才能改 */
+export function updateReward(conn: Db, id: number, input: RewardInput): RewardRow {
+  const current = requireReward(conn, id);
+  const kind = input.kind ?? current.kind;
+  if (kind !== current.kind && rewardUsed(conn, id)) {
+    throw new CreditError(`「${current.name}」已经兑换或记过账,不能再改种类;要换种类就新建一个奖励`, 409, 'invalid');
+  }
+  const amount = kind === current.kind && input.amount === undefined ? current.amount : checkRewardAmount(kind, input.amount);
   if (input.name !== undefined) run(conn, 'UPDATE credit_rewards SET name = ? WHERE id = ?', input.name, id);
   if (input.cost !== undefined) run(conn, 'UPDATE credit_rewards SET cost = ? WHERE id = ?', input.cost, id);
   if (input.emoji !== undefined) run(conn, 'UPDATE credit_rewards SET emoji = ? WHERE id = ?', input.emoji, id);
-  run(conn, "UPDATE credit_rewards SET updated_at = datetime('now') WHERE id = ?", id);
+  run(conn, "UPDATE credit_rewards SET kind = ?, amount = ?, updated_at = datetime('now') WHERE id = ?", kind, amount, id);
   return rewardById(conn, id)!;
 }
 
-/** 兑换过的归档(流水里还要能对上是哪个奖励),没兑换过的直接删 */
+/** 兑换过或记过账的归档(流水里还要能对上是哪个奖励),没用过的直接删 */
 export function deleteReward(conn: Db, id: number): 'deleted' | 'archived' {
   requireReward(conn, id);
-  if (one(conn, "SELECT 1 FROM credit_ledger WHERE kind = 'redeem' AND ref_id = ? LIMIT 1", id)) {
+  if (rewardUsed(conn, id)) {
     run(conn, "UPDATE credit_rewards SET archived = 1, updated_at = datetime('now') WHERE id = ?", id);
     return 'archived';
   }
@@ -435,21 +559,45 @@ export function restoreReward(conn: Db, id: number): RewardRow {
   return rewardById(conn, id)!;
 }
 
-/** 兑换:余额可以因为惩罚是负的,但兑换必须够分 */
+/** 兑换的流水标题:「🎮 玩游戏 ×3(15 分钟)」;物品只换一份时就是名字本身 */
+export function redeemTitle(reward: RewardRow, times: number): string {
+  const label = `${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`;
+  const count = times > 1 ? ` ×${times}` : '';
+  return reward.kind === 'item' ? `${label}${count}` : `${label}${count}(${formatQty(reward.kind, reward.amount * times)})`;
+}
+
+export interface RedeemResult {
+  ledger: LedgerRow;
+  balance: number;
+  /** 时间 / 零花钱:进账那一笔与账户余额(基本单位) */
+  wallet?: { entry: WalletRow; balance: number };
+}
+
+/**
+ * 兑换 times 份:扣 cost × times 分。余额可以因为惩罚是负的,但兑换必须够分。
+ * 时间与零花钱同一个事务里往这个奖励的账户记一笔进账 amount × times。
+ */
 export function redeem(
-  conn: Db, mac: string, rewardId: number, note = '', by: Actor = ADMIN,
-): { ledger: LedgerRow; balance: number } {
+  conn: Db, mac: string, rewardId: number, times = 1, note = '', by: Actor = ADMIN,
+): RedeemResult {
+  if (!Number.isInteger(times) || times < 1 || times > 100) throw new CreditError('一次兑换 1~100 份', 400, 'invalid');
   return tx(conn, () => {
     const reward = rewardById(conn, rewardId);
     if (!reward || reward.mac !== mac) throw new CreditError('奖励不存在', 404, 'not_found');
     if (reward.archived) throw new CreditError(`「${reward.name}」已停用`, 409, 'archived');
+    const cost = reward.cost * times;
     const current = balance(conn, mac);
-    if (current < reward.cost) {
-      throw new CreditError(`分数不够,还差 ${reward.cost - current} 分`, 409, 'insufficient_balance');
+    if (current < cost) {
+      throw new CreditError(`分数不够,${times > 1 ? `换 ${times} 份要 ${cost} 分,` : ''}还差 ${cost - current} 分`, 409, 'insufficient_balance');
     }
-    const id = addLedger(conn, mac, -reward.cost, 'redeem', reward.id,
-      `${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`, note, by);
-    return { ledger: ledgerById(conn, id)!, balance: balance(conn, mac) };
+    const title = redeemTitle(reward, times);
+    const id = addLedger(conn, mac, -cost, 'redeem', reward.id, title, note, by, times);
+    const result: RedeemResult = { ledger: ledgerById(conn, id)!, balance: balance(conn, mac) };
+    if (reward.kind !== 'item') {
+      const entry = addWallet(conn, mac, reward.id, reward.amount * times, 'redeem', { ledgerId: id }, title, note, by);
+      result.wallet = { entry: walletById(conn, entry)!, balance: walletBalance(conn, reward.id) };
+    }
+    return result;
   });
 }
 
@@ -493,13 +641,36 @@ export function ledgerPage(
  * 撤销一笔流水:追加一条等额反向的,原流水记下是被谁撤销的。
  * 撤销的是作业打分时,作业回到「待完成」,可以重新录入。撤销流水本身不能再撤。
  */
-export function revert(conn: Db, ledgerId: number, by: Actor = ADMIN): { ledger: LedgerRow; balance: number; task?: TaskRow } {
+export function revert(
+  conn: Db, ledgerId: number, by: Actor = ADMIN,
+): { ledger: LedgerRow; balance: number; task?: TaskRow; wallet?: { entry: WalletRow; balance: number } } {
   return tx(conn, () => {
     const row = ledgerById(conn, ledgerId);
     if (!row) throw new CreditError('流水不存在', 404, 'not_found');
     if (row.kind === 'revert') throw new CreditError('撤销记录本身不能再撤销', 409, 'not_revertible');
     if (row.reverted_by) throw new CreditError('这一笔已经撤销过了', 409, 'already_reverted');
+    // 撤销时间 / 零花钱的兑换:账户里那笔进账一起退回;已经用掉了就退不回,余额不能变负
+    const income = row.kind === 'redeem'
+      ? one<{ id: number; reward_id: number; qty: number }>(conn,
+        "SELECT id, reward_id, qty FROM credit_wallet WHERE ledger_id = ? AND kind = 'redeem' AND reverted_by IS NULL", row.id)
+      : undefined;
+    if (income) {
+      const left = walletBalance(conn, income.reward_id);
+      if (left < income.qty) {
+        const reward = rewardById(conn, income.reward_id)!;
+        throw new CreditError(
+          `这次兑换的 ${formatQty(reward.kind, income.qty)}已经用掉了一部分(账户只剩 ${formatQty(reward.kind, left)}),`
+          + '要撤销得先撤销用掉的记录', 409, 'insufficient_wallet');
+      }
+    }
     const id = addLedger(conn, row.mac, -row.delta, 'revert', row.id, `撤销:${row.title}`, '', by);
+    let wallet: { entry: WalletRow; balance: number } | undefined;
+    if (income) {
+      const back = addWallet(conn, row.mac, income.reward_id, -income.qty, 'revert', { ledgerId: id, refId: income.id },
+        `撤销:${row.title}`, '', by);
+      run(conn, 'UPDATE credit_wallet SET reverted_by = ? WHERE id = ?', back, income.id);
+      wallet = { entry: walletById(conn, back)!, balance: walletBalance(conn, income.reward_id) };
+    }
     run(conn, 'UPDATE credit_ledger SET reverted_by = ? WHERE id = ?', id, row.id);
     let task: TaskRow | undefined;
     if (row.kind === 'task' || row.kind === 'missed') {
@@ -512,7 +683,7 @@ export function revert(conn: Db, ledgerId: number, by: Actor = ADMIN): { ledger:
         task = taskById(conn, found.id);
       }
     }
-    return { ledger: ledgerById(conn, id)!, balance: balance(conn, row.mac), ...(task ? { task } : {}) };
+    return { ledger: ledgerById(conn, id)!, balance: balance(conn, row.mac), ...(task ? { task } : {}), ...(wallet ? { wallet } : {}) };
   });
 }
 
@@ -536,6 +707,10 @@ export interface CreditStats {
   tasks: { name: string; assigned: number; done: number; missed: number; ontime: number; avg_minutes: number | null; avg_points: number | null }[];
   completion_rate: number | null;
   ontime_rate: number | null;
+  /** 各奖励兑换了几次、几份、多少(自然单位)、花了多少分。撤销过的不计 */
+  redeemed: { reward_id: number; name: string; emoji: string; kind: RewardKind; unit: string; count: number; times: number; quantity: number; points: number }[];
+  /** 各时间 / 零花钱账户这段时间进了多少、用了多少(自然单位)。撤销过的不计 */
+  wallets: { reward_id: number; name: string; emoji: string; kind: RewardKind; unit: string; redeemed: number; used: number }[];
 }
 
 export function stats(conn: Db, mac: string, from: string, to: string): CreditStats {
@@ -575,10 +750,40 @@ export function stats(conn: Db, mac: string, from: string, to: string): CreditSt
   const done = tasks.reduce((n, t) => n + t.done, 0);
   const finished = tasks.reduce((n, t) => n + t.done + t.missed, 0);
   const ontime = tasks.reduce((n, t) => n + t.ontime, 0);
+  const redeemed = all<{ reward_id: number; name: string; emoji: string; kind: RewardKind; amount: number; count: number; times: number; points: number }>(conn,
+    `SELECT r.id AS reward_id, r.name, r.emoji, r.kind, r.amount,
+       COUNT(*) AS count, SUM(COALESCE(l.times, 1)) AS times, -SUM(l.delta) AS points
+     FROM credit_ledger l JOIN credit_rewards r ON r.id = l.ref_id
+     WHERE l.mac = ? AND l.kind = 'redeem' AND l.reverted_by IS NULL AND date(l.created_at, '+8 hours') BETWEEN ? AND ?
+     GROUP BY r.id ORDER BY points DESC, r.id`, mac, from, to)
+    .map((row) => {
+      const quantity = row.kind === 'item'
+        ? row.times
+        : fromBase(row.kind, one<{ n: number | null }>(conn,
+          `SELECT SUM(w.qty) AS n FROM credit_wallet w JOIN credit_ledger l ON l.id = w.ledger_id
+           WHERE w.reward_id = ? AND w.kind = 'redeem' AND w.reverted_by IS NULL AND date(l.created_at, '+8 hours') BETWEEN ? AND ?`,
+          row.reward_id, from, to)?.n ?? 0);
+      return {
+        reward_id: row.reward_id, name: row.name, emoji: row.emoji, kind: row.kind, unit: UNIT[row.kind],
+        count: row.count, times: row.times, quantity, points: row.points,
+      };
+    });
+  const wallets = all<{ reward_id: number; name: string; emoji: string; kind: RewardKind; redeemed: number | null; used: number | null }>(conn,
+    `SELECT r.id AS reward_id, r.name, r.emoji, r.kind,
+       SUM(CASE WHEN w.kind = 'redeem' THEN w.qty ELSE 0 END) AS redeemed,
+       -SUM(CASE WHEN w.kind = 'use' THEN w.qty ELSE 0 END) AS used
+     FROM credit_wallet w JOIN credit_rewards r ON r.id = w.reward_id
+     WHERE w.mac = ? AND w.kind IN ('redeem', 'use') AND w.reverted_by IS NULL AND date(w.created_at, '+8 hours') BETWEEN ? AND ?
+     GROUP BY r.id ORDER BY r.sort, r.id`, mac, from, to)
+    .map((row) => ({
+      reward_id: row.reward_id, name: row.name, emoji: row.emoji, kind: row.kind, unit: UNIT[row.kind],
+      redeemed: fromBase(row.kind, row.redeemed ?? 0), used: fromBase(row.kind, row.used ?? 0),
+    }));
   return {
     from, to, balance: balance(conn, mac), days, totals, tasks,
     completion_rate: finished ? Math.round((done / finished) * 1000) / 1000 : null,
     ontime_rate: done ? Math.round((ontime / done) * 1000) / 1000 : (assigned ? 0 : null),
+    redeemed, wallets,
   };
 }
 
@@ -596,8 +801,12 @@ export function seedExamples(conn: Db, mac: string): { rules: number; rewards: n
       }
     }
     if (!one(conn, 'SELECT 1 FROM credit_rewards WHERE mac = ? LIMIT 1', mac)) {
-      for (const [name, cost, emoji] of [['看电视 30 分钟', 20, '📺'], ['玩手机 15 分钟', 15, '📱'], ['买个小玩具', 200, '🧸']] as const) {
-        createReward(conn, mac, { name, cost, emoji });
+      // 10 分 = 5 分钟游戏 / 5 元零花钱 / 10 分钟电视;amount 是基本单位(钱按分)
+      const examples = [
+        ['玩游戏', 10, '🎮', 'time', 5], ['零花钱', 10, '💰', 'money', 500], ['看电视', 10, '📺', 'time', 10],
+      ] as const;
+      for (const [name, cost, emoji, kind, amount] of examples) {
+        createReward(conn, mac, { name, cost, emoji, kind, amount });
         rewards += 1;
       }
     }

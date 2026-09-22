@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import { PARAM_KEYS } from './store.ts';
 import { QUALITIES } from './score.ts';
+import { REWARD_KINDS } from './units.ts';
 
 export const int = (min: number, max: number) => z.number().int().min(min).max(max);
 export const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, '日期格式应为 YYYY-MM-DD').describe('北京时间的日期 YYYY-MM-DD');
@@ -78,9 +79,49 @@ export const taskClaim = z.object({
 });
 export const TASK_STATUSES = ['pending', 'done', 'missed', 'claimed'] as const;
 
-export const rewardCreate = z.object({ mac, name, cost: int(1, 100000).describe('兑换要多少分'), emoji: z.string().max(8).optional() });
-export const rewardUpdate = z.object({ name: name.optional(), cost: int(1, 100000).optional(), emoji: z.string().max(8).optional() });
-export const redeemBody = z.object({ mac, reward_id: z.number().int().positive(), note: z.string().max(200).optional() });
+export const REWARD_KIND_VALUES = REWARD_KINDS;
+const rewardKind = z.enum(REWARD_KINDS, { message: '种类要选 item、time、money 之一' })
+  .describe('item 物品(兑换就完事)/ time 时间(进时间余额,单位分钟)/ money 零花钱(进零花钱余额,单位元)');
+const rewardAmount = z.number().positive('一份换多少要大于 0').max(100000)
+  .describe('一份换多少:time 填整数分钟,money 填元(最多两位小数),item 不用填');
+export const rewardCreate = z.object({
+  mac, name,
+  cost: int(1, 100000).describe('一份要多少分'),
+  emoji: z.string().max(8).optional(),
+  kind: rewardKind.optional().describe('不填是 item'),
+  amount: rewardAmount.optional(),
+});
+export const rewardUpdate = z.object({
+  name: name.optional(),
+  cost: int(1, 100000).optional().describe('一份要多少分'),
+  emoji: z.string().max(8).optional(),
+  kind: rewardKind.optional().describe('兑换或记过账之后不能再改'),
+  amount: rewardAmount.optional(),
+});
+export const redeemBody = z.object({
+  mac,
+  reward_id: z.number().int().positive(),
+  times: int(1, 100).optional().describe('换几份,默认 1。扣 cost × times 分;时间 / 零花钱进账 amount × times'),
+  note: z.string().max(200).optional(),
+});
+
+export const WALLET_KINDS = ['redeem', 'use', 'adjust', 'revert'] as const;
+const walletAmount = z.number().positive('数额要大于 0').max(100000)
+  .describe('自然单位:时间是整数分钟,零花钱是元(最多两位小数)');
+export const walletUseBody = z.object({
+  mac,
+  reward_id: z.number().int().positive().describe('哪个时间 / 零花钱奖励(账户)'),
+  amount: walletAmount,
+  reason: z.string().trim().min(1, '要写明用在哪了').max(80).describe('比如「买文具」「玩了一局游戏」'),
+  note: z.string().max(200).optional(),
+});
+export const walletAdjustBody = z.object({
+  mac,
+  reward_id: z.number().int().positive(),
+  amount: z.number().min(-100000).max(100000).refine((n) => n !== 0, '数额不能是 0')
+    .describe('加填正数、减填负数;调完余额不能小于 0'),
+  reason: z.string().trim().min(1, '要写明原因').max(80),
+});
 export const adjustBody = z.object({
   mac,
   delta: int(-1000, 1000).refine((n) => n !== 0, '分数不能是 0').describe('加分填正数,扣分填负数,不能是 0'),

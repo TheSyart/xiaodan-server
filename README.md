@@ -394,6 +394,16 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
 - **Balance = sum of the ledger**; there is no stored balance. Penalties may push it below zero; **redeeming requires enough points**
   (409 "N short" otherwise). The ledger is append-only: undoing appends an equal and opposite entry and marks the original; undoing a
   homework score puts the task back to pending so it can be re-entered.
+- **Rewards are exchanged in whole portions at a rate** (phase 4, migration v15): a reward costs `cost` points per portion and has a
+  `kind` — `item` (a toy: redeemed and done), `time` (10 points = 5 minutes of games) or `money` (10 points = 5 yuan). `POST /redeem`
+  takes `times` (1–100). Time and money go into **that reward's own balance account** (`credit_wallet`, one per reward: game minutes
+  and TV minutes are separate); using time or spending money is recorded against it and **can never exceed the balance**; adjustments
+  may not take it below zero. Balances are the sum of the account's entries (stored in minutes / cents, exposed as minutes / yuan with
+  up to two decimals, `credits/units.ts`). Undoing a time/money redemption in the ledger also takes the income back out of the account
+  in the same transaction, and is refused (`insufficient_wallet`) if it has already been used; the income entry itself can only be
+  undone from the ledger. A reward's `kind` is frozen once it has been redeemed. Endpoints: `GET /wallets`, `GET /wallets/entries`,
+  `POST /wallets/use`, `POST /wallets/adjust`, `POST /wallets/entries/:id/revert`; `/children` carries each child's `wallets`, `/stats`
+  adds `redeemed` and `wallets`. Page: 学分 → 钱与时间.
 - **Two entry points, one router** (`console/src/credits/routes.ts`): the page uses `/api/credits/*` (console sign-in); apps, phone
   shortcuts and scripts use **`/open/v1/credits/*`** with `Authorization: Bearer <key>` (mounting and guard in `credits/open-api.ts`).
   - **The full description is `/open/v1/credits/openapi.json`** (OpenAPI 3.1, no key needed). Request bodies and their ranges are
@@ -425,7 +435,9 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
   adjust, redeem on the child's behalf, undo (latest entry by default), create/update/delete/restore rules and rewards, history. It is an
   ordinary tool with no extra gate: enabled on a toy's role, whoever talks to the toy gets these powers. Every function takes an optional
   `child`; without it the current device is used if it is a toy, else the only child, else the model is told to ask. Deletes, undos and
-  changes of 50 points or more are confirmed with the parent first (prompt-level only).
+  changes of 50 points or more are confirmed with the parent first (prompt-level only). It also has `credits_wallet` (status / use / adjust / undo on
+  the time and money balances). The child's tool can redeem by amount ("15 minutes of games" → 3 portions; an amount that is not a
+  whole number of portions is answered with the nearest options) and reads the balances, but cannot record usage.
 - **The ops panel must open `/open/`**: it sits behind the unified sign-in by default and external callers would be redirected to the
   login page. Add in the panel's domain/Nginx tab:
   ```nginx

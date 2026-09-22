@@ -497,6 +497,32 @@ test('v14:一期没开过外部接口时不凭空造密钥', () => {
   assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_api_keys')!.n, 0);
 });
 
+test('v15:老奖励变成物品 × 1、老流水 times 为空;账户流水表与 CHECK;随设备删除', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(14));
+  seed(conn);
+  const MAC = '4c:11:ae:31:7a:30';
+  exec(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', MAC, DEFAULT_AGENT_ID);
+  exec(conn, "INSERT INTO credit_rewards (mac, name, cost, emoji) VALUES (?, '看电视 30 分钟', 20, '📺')", MAC);
+  exec(conn, "INSERT INTO credit_ledger (mac, delta, kind, ref_id, title) VALUES (?, -20, 'redeem', 1, '📺 看电视 30 分钟')", MAC);
+
+  runMigrations(conn);
+
+  const reward = one<{ name: string; cost: number; kind: string; amount: number }>(conn, 'SELECT name, cost, kind, amount FROM credit_rewards')!;
+  assert.deepEqual({ ...reward }, { name: '看电视 30 分钟', cost: 20, kind: 'item', amount: 1 }, '老奖励照旧:物品、一份就是一份');
+  assert.equal(one<{ times: number | null }>(conn, 'SELECT times FROM credit_ledger')!.times, null);
+  assert.ok(tableExists(conn, 'credit_wallet'));
+
+  assert.throws(() => exec(conn, "UPDATE credit_rewards SET kind = 'coupon'"), '种类只有三种');
+  assert.throws(() => exec(conn, 'UPDATE credit_rewards SET amount = 0'), '一份至少换 1');
+  assert.throws(() => exec(conn, 'UPDATE credit_ledger SET times = 101'), '一次最多 100 份');
+  assert.throws(() => exec(conn, "INSERT INTO credit_wallet (mac, reward_id, qty, kind) VALUES (?, 1, 5, 'gift')", MAC));
+  exec(conn, "INSERT INTO credit_wallet (mac, reward_id, qty, kind, title) VALUES (?, 1, 500, 'redeem', '💰 零花钱')", MAC);
+  exec(conn, 'DELETE FROM devices WHERE mac = ?', MAC);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_wallet')!.n, 0, '账户流水随设备删除');
+});
+
 describe('关外键执行的迁移', () => {
   const withMigration = (up: (db: Db) => void) => [...MIGRATIONS, { version: LATEST + 1, name: 'fk-off', disableForeignKeys: true, up }];
 

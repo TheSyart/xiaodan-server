@@ -13,6 +13,7 @@ import { migrateRetireBuiltinSkills } from './migrations/v11-retire-builtin-skil
 import { migrateMemoryAndLocation } from './migrations/v12-memory-and-location.ts';
 import { migrateCredits } from './migrations/v13-credits.ts';
 import { migrateCreditsApi } from './migrations/v14-credits-api.ts';
+import { migrateCreditsWallet } from './migrations/v15-credits-wallet.ts';
 
 export interface Migration {
   version: number;
@@ -378,5 +379,11 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'credits-api',
     // 学分二期:多把外部密钥(一期那把搬过来)、孩子报完成、流水记来源、外部写接口防重复。只加表加列。见迁移文件开头
     up: migrateCreditsApi,
+  },
+  {
+    version: 15,
+    name: 'credits-wallet',
+    // 学分四期:奖励按比例整份兑换(kind / amount)、兑换记份数、时间与钱的余额账户流水。只加表加列。见迁移文件开头
+    up: migrateCreditsWallet,
   },
 ];

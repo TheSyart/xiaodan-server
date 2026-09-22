@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { api, urlMac, type CreditReward } from '../../api';
+import { api, urlMac, type CreditReward, type CreditRewardKind } from '../../api';
 import AppIcon from '../../components/AppIcon.vue';
 import EmptyState from '../../components/EmptyState.vue';
 import ModalDialog from '../../components/ModalDialog.vue';
@@ -8,7 +8,9 @@ import CreditHeader from '../../components/credits/CreditHeader.vue';
 import { useCreditChild } from '../../credits/useCreditChild';
 import { confirmDialog, toast, toastError } from '../../ui';
 
-// 兑换奖励:分够才能兑换;惩罚可以把分扣成负数,要先挣回来。手动加减分也在这里。
+// 兑换奖励:按整份兑换,分够才能换;惩罚可以把分扣成负数,要先挣回来。手动加减分也在这里。
+// 三种奖励:物品(换了就完事)、时间(10 分 = 5 分钟游戏)、零花钱(10 分 = 5 元)。
+// 时间和零花钱换到后进各自的余额,用掉 / 花掉在「钱与时间」页记。
 
 const { mac, child, refresh } = useCreditChild();
 const rewards = ref<CreditReward[]>([]);
@@ -38,12 +40,35 @@ async function addExamples() {
   }
 }
 
-async function redeem(reward: CreditReward) {
-  if (!(await confirmDialog({ title: `兑换「${reward.name}」?`, message: `扣 ${reward.cost} 分,兑换后剩 ${balance.value - reward.cost} 分。`, confirmText: '兑换' }))) return;
+const KINDS: { key: CreditRewardKind; label: string; unit: string; hint: string }[] = [
+  { key: 'time', label: '时间', unit: '分钟', hint: '比如玩游戏、看电视:换到的分钟存进余额,玩的时候再记用掉' },
+  { key: 'money', label: '零花钱', unit: '元', hint: '换到的钱存进零花钱余额,花的时候再记一笔,可以精确到分' },
+  { key: 'item', label: '物品', unit: '份', hint: '买个小玩具、去一次公园:换了就完事,没有余额' },
+];
+const unitOf = (kind: CreditRewardKind) => KINDS.find((k) => k.key === kind)!.unit;
+/** 「10 分 = 5 分钟」;物品是「200 分」 */
+const rate = (r: CreditReward) => (r.kind === 'item' ? `${r.cost} 分` : `${r.cost} 分 = ${r.amount} ${r.unit}`);
+/** 钱按分算,避免 0.1 + 0.2 这种小数误差 */
+const times = (r: CreditReward, n: number) => (r.kind === 'money' ? Math.round(r.amount * 100 * n) / 100 : r.amount * n);
+const most = (r: CreditReward) => Math.min(100, Math.floor(Math.max(0, balance.value) / r.cost));
+
+const redeemOpen = ref(false);
+const redeeming = ref<CreditReward | null>(null);
+const portions = ref(1);
+function openRedeem(reward: CreditReward) {
+  redeeming.value = reward;
+  portions.value = 1;
+  redeemOpen.value = true;
+}
+async function redeem() {
+  const reward = redeeming.value;
+  if (!reward) return;
   try {
-    await api.post('/credits/redeem', { mac: mac.value, reward_id: reward.id });
-    toast(`兑换成功:${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`);
-    await refresh();
+    await api.post('/credits/redeem', { mac: mac.value, reward_id: reward.id, times: portions.value });
+    toast(`兑换成功:${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`
+      + (reward.kind === 'item' ? (portions.value > 1 ? ` ×${portions.value}` : '') : ` ${times(reward, portions.value)} ${reward.unit}`));
+    redeemOpen.value = false;
+    await Promise.all([load(), refresh()]);
   } catch (e) {
     toastError(e);
   }
@@ -51,14 +76,19 @@ async function redeem(reward: CreditReward) {
 
 const rewardOpen = ref(false);
 const editing = ref<CreditReward | null>(null);
-const form = ref({ name: '', cost: 20, emoji: '' });
+const form = ref({ name: '', cost: 10, emoji: '', kind: 'time' as CreditRewardKind, amount: 5 });
 function openReward(reward?: CreditReward) {
   editing.value = reward ?? null;
-  form.value = reward ? { name: reward.name, cost: reward.cost, emoji: reward.emoji } : { name: '', cost: 20, emoji: '' };
+  form.value = reward
+    ? { name: reward.name, cost: reward.cost, emoji: reward.emoji, kind: reward.kind, amount: reward.amount }
+    : { name: '', cost: 10, emoji: '', kind: 'time', amount: 5 };
   rewardOpen.value = true;
 }
 async function saveReward() {
-  const body = { name: form.value.name.trim(), cost: Number(form.value.cost), emoji: form.value.emoji.trim() };
+  const body = {
+    name: form.value.name.trim(), cost: Number(form.value.cost), emoji: form.value.emoji.trim(), kind: form.value.kind,
+    ...(form.value.kind === 'item' ? {} : { amount: Number(form.value.amount) }),
+  };
   try {
     if (editing.value) await api.patch(`/credits/rewards/${editing.value.id}`, body);
     else await api.post('/credits/rewards', { mac: mac.value, ...body });
@@ -114,7 +144,7 @@ async function saveAdjust() {
 </script>
 
 <template>
-  <CreditHeader title="兑换奖励" description="分数够才能兑换;惩罚可以把分扣成负数,要先挣回来。孩子也可以对小单说「我要换看电视」,够分直接兑换。">
+  <CreditHeader title="兑换奖励" description="按整份兑换,分够才能换;惩罚可以把分扣成负数,要先挣回来。换到的时间和零花钱存进余额,在「钱与时间」里记用掉。孩子也可以对小单说「换 15 分钟游戏」。">
     <template #actions>
       <button class="btn btn-sm" type="button" @click="adjustOpen = true"><AppIcon name="sliders" :size="14" /><span>手动加减分</span></button>
       <button class="btn btn-primary btn-sm" type="button" @click="openReward()"><AppIcon name="plus" :size="14" /><span>新奖励</span></button>
@@ -127,15 +157,16 @@ async function saveAdjust() {
           <label class="row muted" style="gap: 6px"><input v-model="showArchived" type="checkbox" />显示已停用的</label>
         </div>
       </div>
-      <EmptyState v-if="active.length === 0" title="还没有奖励" description="比如「看电视 30 分钟 20 分」「买个小玩具 200 分」。">
+      <EmptyState v-if="active.length === 0" title="还没有奖励" description="比如「10 分 = 5 分钟游戏」「10 分 = 5 元零花钱」「买个小玩具 200 分」。">
         <button class="btn btn-primary" type="button" @click="addExamples"><AppIcon name="plus" :size="16" /><span>添加示例</span></button>
       </EmptyState>
       <div v-else class="reward-grid">
         <div v-for="(r, index) in active" :key="r.id" class="reward">
           <div class="reward-emoji" aria-hidden="true">{{ r.emoji || '🎁' }}</div>
           <div class="reward-name">{{ r.name }}</div>
-          <div class="reward-cost">{{ r.cost }} 分</div>
-          <button class="btn btn-primary btn-sm" type="button" :disabled="balance < r.cost" @click="redeem(r)">
+          <div class="reward-cost">{{ rate(r) }}</div>
+          <div v-if="r.kind !== 'item'" class="reward-left">余额 {{ r.wallet_balance ?? 0 }} {{ r.unit }}</div>
+          <button class="btn btn-primary btn-sm" type="button" :disabled="balance < r.cost" @click="openRedeem(r)">
             {{ balance < r.cost ? `还差 ${r.cost - balance} 分` : '兑换' }}
           </button>
           <div class="row reward-tools">
@@ -155,7 +186,8 @@ async function saveAdjust() {
           <tbody>
             <tr v-for="r in archived" :key="r.id">
               <td class="cell-main">{{ r.emoji }} {{ r.name }}</td>
-              <td class="nowrap">{{ r.cost }} 分</td>
+              <td class="nowrap">{{ rate(r) }}</td>
+              <td class="nowrap cell-sub">{{ r.kind === 'item' ? '' : `余额 ${r.wallet_balance ?? 0} ${r.unit}` }}</td>
               <td class="actions"><button class="btn btn-sm" type="button" @click="restore(r)"><AppIcon name="refresh" :size="14" /><span>恢复</span></button></td>
             </tr>
           </tbody>
@@ -166,13 +198,43 @@ async function saveAdjust() {
 
   <ModalDialog :open="rewardOpen" :title="editing ? '编辑奖励' : '新奖励'" @close="rewardOpen = false">
     <div class="form-grid">
-      <label class="field"><span class="field-label">名称</span><input v-model="form.name" class="input" type="text" maxlength="40" placeholder="看电视 30 分钟" /></label>
-      <label class="field"><span class="field-label">需要多少分</span><input v-model.number="form.cost" class="input" type="number" min="1" max="100000" /></label>
-      <label class="field"><span class="field-label">图标(可选)</span><input v-model="form.emoji" class="input" type="text" maxlength="8" placeholder="📺" /></label>
+      <label class="field"><span class="field-label">名称</span><input v-model="form.name" class="input" type="text" maxlength="40" placeholder="玩游戏" /></label>
+      <label class="field"><span class="field-label">种类</span>
+        <select v-model="form.kind" class="select">
+          <option v-for="k in KINDS" :key="k.key" :value="k.key">{{ k.label }}</option>
+        </select>
+        <span class="field-hint">{{ KINDS.find((k) => k.key === form.kind)?.hint }}{{ editing ? '。兑换过的奖励不能再改种类' : '' }}</span>
+      </label>
+      <label class="field"><span class="field-label">一份要多少分</span><input v-model.number="form.cost" class="input" type="number" min="1" max="100000" /></label>
+      <label v-if="form.kind !== 'item'" class="field"><span class="field-label">一份换多少{{ unitOf(form.kind) }}</span>
+        <input v-model.number="form.amount" class="input" type="number" :min="form.kind === 'money' ? 0.01 : 1" :step="form.kind === 'money' ? 0.01 : 1" max="100000" />
+        <span class="field-hint">{{ form.cost || '?' }} 分 = {{ form.amount || '?' }} {{ unitOf(form.kind) }}</span>
+      </label>
+      <label class="field"><span class="field-label">图标(可选)</span><input v-model="form.emoji" class="input" type="text" maxlength="8" placeholder="🎮" /></label>
     </div>
     <template #footer>
       <button class="btn" type="button" @click="rewardOpen = false">取消</button>
       <button class="btn btn-primary" type="button" @click="saveReward">保存</button>
+    </template>
+  </ModalDialog>
+
+  <ModalDialog :open="redeemOpen" :title="redeeming ? `兑换「${redeeming.name}」` : '兑换'" @close="redeemOpen = false">
+    <template v-if="redeeming">
+      <p class="muted" style="margin: 0 0 12px">{{ rate(redeeming) }},按整份兑换。现在有 {{ balance }} 分,最多换 {{ most(redeeming) }} 份。</p>
+      <div class="stepper" role="group" aria-label="份数">
+        <button class="btn btn-sm btn-icon" type="button" aria-label="少一份" :disabled="portions <= 1" @click="portions -= 1"><span aria-hidden="true">−</span></button>
+        <span class="stepper-value">{{ portions }} 份</span>
+        <button class="btn btn-sm btn-icon" type="button" aria-label="多一份" :disabled="portions >= most(redeeming)" @click="portions += 1"><AppIcon name="plus" :size="14" /></button>
+      </div>
+      <p class="redeem-sum">
+        扣 <strong>{{ redeeming.cost * portions }}</strong> 分
+        <template v-if="redeeming.kind !== 'item'"> → 得 <strong>{{ times(redeeming, portions) }}</strong> {{ redeeming.unit }}</template>
+        ,兑换后剩 {{ balance - redeeming.cost * portions }} 分
+      </p>
+    </template>
+    <template #footer>
+      <button class="btn" type="button" @click="redeemOpen = false">取消</button>
+      <button class="btn btn-primary" type="button" @click="redeem">兑换</button>
     </template>
   </ModalDialog>
 
@@ -198,5 +260,9 @@ async function saveAdjust() {
 .reward-emoji { font-size: 34px; line-height: 1; }
 .reward-name { font-weight: 600; }
 .reward-cost { color: var(--muted); font-variant-numeric: tabular-nums; }
+.reward-left { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stepper { display: flex; align-items: center; gap: 12px; }
+.stepper-value { min-width: 64px; text-align: center; font-weight: 700; font-size: 18px; font-variant-numeric: tabular-nums; }
+.redeem-sum { margin: 14px 0 0; font-variant-numeric: tabular-nums; }
 .reward-tools { gap: 2px; }
 </style>

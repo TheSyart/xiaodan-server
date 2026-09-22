@@ -17,6 +17,13 @@ import { toastError } from '../../ui';
 const { mac } = useCreditChild();
 const range = ref<7 | 30>(7);
 const data = ref<CreditStats | null>(null);
+/** 这段时间没兑换、只用掉了(用的是以前换的)的账户,也要列出来 */
+const usedOnly = computed(() => (data.value?.wallets ?? []).filter((w) => !data.value?.redeemed.some((r) => r.reward_id === w.reward_id)));
+/** 某个时间 / 零花钱奖励这段时间用掉多少;物品没有这一栏 */
+function usedOf(rewardId: number): string {
+  const wallet = data.value?.wallets.find((w) => w.reward_id === rewardId);
+  return wallet ? `${wallet.used} ${wallet.unit}` : '—';
+}
 const hover = ref<number | null>(null);
 
 async function load() {
@@ -126,6 +133,30 @@ const showLabel = (index: number, total: number) => total <= 10 || index % 5 ===
                 <td>{{ t.assigned }}</td><td>{{ t.done }}</td><td>{{ t.missed }}</td><td>{{ t.ontime }}</td>
                 <td class="nowrap">{{ t.avg_minutes == null ? '—' : `${t.avg_minutes} 分钟` }}</td>
                 <td>{{ t.avg_points == null ? '—' : t.avg_points }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2><AppIcon name="gift" :size="18" />兑换</h2><p>这段时间换了什么、换了多少;零花钱和时间用掉了多少。撤销过的不算。</p></div></div>
+        <EmptyState v-if="!data.redeemed.length && !data.wallets.length" title="这段时间没有兑换" />
+        <div v-else class="table-wrap">
+          <table class="table">
+            <thead><tr><th>奖励</th><th>兑换次数</th><th>份数</th><th>换到</th><th>花掉的分</th><th>用掉</th></tr></thead>
+            <tbody>
+              <tr v-for="r in data.redeemed" :key="r.reward_id">
+                <td class="cell-main">{{ r.emoji }} {{ r.name }}</td>
+                <td>{{ r.count }}</td><td>{{ r.times }}</td>
+                <td class="nowrap">{{ r.quantity }} {{ r.unit }}</td>
+                <td>{{ r.points }}</td>
+                <td class="nowrap">{{ usedOf(r.reward_id) }}</td>
+              </tr>
+              <tr v-for="w in usedOnly" :key="`w${w.reward_id}`">
+                <td class="cell-main">{{ w.emoji }} {{ w.name }}</td>
+                <td>0</td><td>0</td><td>—</td><td>0</td>
+                <td class="nowrap">{{ w.used }} {{ w.unit }}</td>
               </tr>
             </tbody>
           </table>

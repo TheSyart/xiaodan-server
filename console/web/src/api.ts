@@ -631,13 +631,55 @@ export interface CreditScore {
   explain: string;
 }
 
+export type CreditRewardKind = 'item' | 'time' | 'money';
+
 export interface CreditReward {
   id: number;
   mac: string;
   name: string;
+  /** 一份要多少分 */
   cost: number;
   emoji: string;
   archived: number;
+  kind: CreditRewardKind;
+  /** 一份换多少,自然单位(分钟 / 元;物品恒为 1) */
+  amount: number;
+  unit: string;
+  /** 时间 / 零花钱奖励的账户余额 */
+  wallet_balance?: number;
+}
+
+/** 一个时间 / 零花钱账户的汇总 */
+export interface CreditWallet {
+  reward_id: number;
+  name: string;
+  emoji: string;
+  kind: CreditRewardKind;
+  unit: string;
+  archived: number;
+  balance: number;
+  redeemed: number;
+  used: number;
+}
+
+export interface CreditWalletEntry {
+  id: number;
+  reward_id: number;
+  reward_name: string;
+  reward_emoji: string;
+  reward_kind: CreditRewardKind;
+  unit: string;
+  kind: 'redeem' | 'use' | 'adjust' | 'revert';
+  /** 带正负号,自然单位 */
+  amount: number;
+  balance_after: number;
+  ledger_id: number | null;
+  title: string;
+  note: string;
+  reverted_by: number | null;
+  source: 'admin' | 'api' | 'agent';
+  actor: string;
+  created_at: string;
 }
 
 export interface CreditLedgerItem {
@@ -671,6 +713,7 @@ export interface CreditChild {
   balance: number;
   today: { total: number; done: number; points: number };
   pending_claims: number;
+  wallets: { reward_id: number; name: string; emoji: string; kind: CreditRewardKind; unit: string; balance: number }[];
 }
 
 export interface CreditApiKey {
@@ -692,4 +735,6 @@ export interface CreditStats {
   tasks: { name: string; assigned: number; done: number; missed: number; ontime: number; avg_minutes: number | null; avg_points: number | null }[];
   completion_rate: number | null;
   ontime_rate: number | null;
+  redeemed: { reward_id: number; name: string; emoji: string; kind: CreditRewardKind; unit: string; count: number; times: number; quantity: number; points: number }[];
+  wallets: { reward_id: number; name: string; emoji: string; kind: CreditRewardKind; unit: string; redeemed: number; used: number }[];
 }

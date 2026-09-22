@@ -23,6 +23,7 @@ const router = createRouter({
     { path: '/credits', redirect: '/credits/tasks' },
     { path: '/credits/tasks', component: () => import('./views/credits/Tasks.vue'), meta: { title: '今日作业' } },
     { path: '/credits/rewards', component: () => import('./views/credits/Rewards.vue'), meta: { title: '兑换奖励' } },
+    { path: '/credits/wallets', component: () => import('./views/credits/Wallets.vue'), meta: { title: '钱与时间' } },
     { path: '/credits/rules', component: () => import('./views/credits/Rules.vue'), meta: { title: '作业规则' } },
     { path: '/credits/ledger', component: () => import('./views/credits/Ledger.vue'), meta: { title: '学分流水' } },
     { path: '/credits/stats', component: () => import('./views/credits/Stats.vue'), meta: { title: '学分统计' } },

@@ -561,18 +561,22 @@ describe('智能体的学分工具', () => {
     }
   });
 
-  test('查学分:余额、每项作业的状态、每个奖励还差多少', async () => {
+  test('查学分:余额、每项作业的状态、每个奖励的比例与能换多少、换到手的余额', async () => {
     enable();
     const app = newApp();
     await api(app, 'POST', '/examples', { mac: MAC });
+    await api(app, 'POST', '/rewards', { mac: MAC, name: '买个小玩具', cost: 200, emoji: '🧸' });
     const rules = (await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items;
     await api(app, 'POST', '/tasks', { mac: MAC, items: [{ rule_id: rules[0].id }, { rule_id: rules[1].id }] });
-    await api(app, 'POST', '/adjust', { mac: MAC, delta: 18, reason: '奖励' });
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 38, reason: '奖励' });
+    const money = (await api(app, 'GET', `/rewards?mac=${COMPACT}`)).data.items.find((r: any) => r.name === '零花钱');
+    await api(app, 'POST', '/redeem', { mac: MAC, reward_id: money.id, times: 2 });
     const result = await (await tool('credits_status')).run(agentCtx(), {});
     assert.match(result.content, /现在有 18 分/u);
     assert.match(result.content, /语文作业\(编号 \d+\):还没做/u);
-    assert.match(result.content, /玩手机 15 分钟:要 15 分,现在就够了/u);
-    assert.match(result.content, /看电视 30 分钟:要 20 分,还差 2 分/u);
+    assert.match(result.content, /🎮 玩游戏:10 分换 5 分钟,现在最多能换 1 份\(5 分钟\)/u);
+    assert.match(result.content, /🧸 买个小玩具:要 200 分,还差 182 分/u);
+    assert.match(result.content, /💰 零花钱还有 10 元/u);
   });
 
   test('报完成按名字模糊匹配,只记申报不加分;对上多项时列出候选', async () => {
@@ -611,12 +615,13 @@ describe('智能体的学分工具', () => {
 
     const short = await redeemTool.run(agentCtx(), { reward: '看电视' });
     assert.equal(short.ok, false);
-    assert.match(short.content, /还差 20 分/u);
+    assert.match(short.content, /还差 10 分/u);
 
     await api(app, 'POST', '/adjust', { mac: MAC, delta: 25, reason: '奖励' });
     const ok = await redeemTool.run(agentCtx(), { reward: '看电视' });
     assert.equal(ok.ok, true);
-    assert.match(ok.content, /还剩 5 分/u);
+    assert.match(ok.content, /还剩 15 分/u);
+    assert.match(ok.content, /看电视现在有 10 分钟/u);
     const last = (await api(app, 'GET', `/ledger?mac=${COMPACT}&kind=redeem`)).data.items[0];
     assert.deepEqual([last.source, last.actor], ['agent', '小单伴学']);
   });
@@ -703,11 +708,11 @@ describe('智能体的大人版学分工具', () => {
     assert.equal((await tools()).filter((t) => t.name.startsWith('credits_')).length, 0);
     enable();
     const names = (await tools()).filter((t) => t.name.startsWith('credits_')).map((t) => t.name);
-    assert.equal(names.length, 11);
+    assert.equal(names.length, 12);
     enable('credits');
     const both = (await tools()).filter((t) => t.name.startsWith('credits_')).map((t) => t.name);
-    assert.equal(both.length, 14);
-    assert.equal(new Set(both).size, 14);
+    assert.equal(both.length, 15);
+    assert.equal(new Set(both).size, 15);
   });
 
   test('操作哪个孩子:玩具上默认它自己;App 上只有一个孩子就用他;多个孩子要问;App 不算孩子', async () => {
@@ -781,13 +786,13 @@ describe('智能体的大人版学分工具', () => {
     assert.equal((await (await tool('credits_adjust')).run(agentCtx(), { points: 0, reason: 'x' })).ok, false);
     assert.equal((await (await tool('credits_adjust')).run(agentCtx(), { points: 5 })).ok, false, '要写原因');
     assert.match((await (await tool('credits_adjust')).run(agentCtx(), { points: 30, reason: '帮忙洗碗' })).content, /现在有 30 分/u);
-    assert.match((await (await tool('credits_redeem_for')).run(agentCtx(), { reward: '看电视' })).content, /还剩 10 分/u);
-    const tooMuch = await (await tool('credits_redeem_for')).run(agentCtx(), { reward: '小玩具' });
+    assert.match((await (await tool('credits_redeem_for')).run(agentCtx(), { reward: '看电视' })).content, /还剩 20 分/u);
+    const tooMuch = await (await tool('credits_redeem_for')).run(agentCtx(), { reward: '零花钱', amount: 25 });
     assert.equal(tooMuch.ok, false);
-    assert.match(tooMuch.content, /还差 190 分/u);
+    assert.match(tooMuch.content, /换 5 份要 50 分,还差 30 分/u);
 
     const undo = await tool('credits_undo');
-    assert.match((await undo.run(agentCtx(), {})).content, /撤销流水 \d+「📺 看电视 30 分钟」.*现在有 30 分/u);
+    assert.match((await undo.run(agentCtx(), {})).content, /撤销流水 \d+「📺 看电视\(10 分钟\)」.*现在有 30 分.*余额现在 0 分钟/u);
     assert.match((await undo.run(agentCtx(), {})).content, /帮忙洗碗.*现在有 0 分/u);
     assert.equal((await undo.run(agentCtx(), {})).ok, false, '没有能撤的了');
 
@@ -821,5 +826,235 @@ describe('智能体的大人版学分工具', () => {
     const history = await (await tool('credits_history')).run(agentCtx(), { days: 3 });
     assert.match(history.content, /最近 3 天.*挣 6/u);
     assert.match(history.content, /流水 \d+.*智能体「家长助手」.*整理房间 \+6/u);
+  });
+});
+
+describe('按份兑换与时间 / 零花钱余额', () => {
+  const rewardsByName = async (app: App) =>
+    Object.fromEntries((await api(app, 'GET', `/rewards?mac=${COMPACT}`)).data.items.map((r: any) => [r.name, r]));
+  const wallet = async (app: App, name: string) =>
+    (await api(app, 'GET', `/wallets?mac=${COMPACT}`)).data.items.find((w: any) => w.name === name);
+
+  test('示例就是 10 分 = 5 分钟游戏 / 5 元 / 10 分钟电视;时间与零花钱要填一份换多少,钱最多两位小数', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    assert.deepEqual(['玩游戏', '零花钱', '看电视'].map((n) => [r[n].kind, r[n].cost, r[n].amount, r[n].unit, r[n].wallet_balance]),
+      [['time', 10, 5, '分钟', 0], ['money', 10, 5, '元', 0], ['time', 10, 10, '分钟', 0]]);
+
+    const noAmount = await api(app, 'POST', '/rewards', { mac: MAC, name: '看动画', cost: 10, kind: 'time' });
+    assert.deepEqual([noAmount.status, noAmount.data.code], [400, 'invalid']);
+    assert.equal((await api(app, 'POST', '/rewards', { mac: MAC, name: '半分钟', cost: 1, kind: 'time', amount: 2.5 })).status, 400);
+    assert.equal((await api(app, 'POST', '/rewards', { mac: MAC, name: '一厘钱', cost: 1, kind: 'money', amount: 0.001 })).status, 400);
+    const cents = (await api(app, 'POST', '/rewards', { mac: MAC, name: '硬币', cost: 1, kind: 'money', amount: 0.5 })).data.item;
+    assert.deepEqual([cents.amount, cents.unit], [0.5, '元']);
+    const item = (await api(app, 'POST', '/rewards', { mac: MAC, name: '贴纸', cost: 3, amount: 9 })).data.item;
+    assert.deepEqual([item.kind, item.amount, item.unit, 'wallet_balance' in item], ['item', 1, '份', false], '物品不看 amount、没有余额');
+  });
+
+  test('整份兑换:扣 cost × times、进账 amount × times、流水记份数;分不够 409;份数越界 400', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 50, reason: '攒的' });
+
+    const game = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['玩游戏'].id, times: 3 });
+    assert.equal(game.status, 200);
+    assert.deepEqual([game.data.balance, game.data.ledger.delta, game.data.ledger.times, game.data.ledger.title],
+      [20, -30, 3, '🎮 玩游戏 ×3(15 分钟)']);
+    assert.deepEqual([game.data.wallet.balance, game.data.wallet.unit, game.data.wallet.entry.amount, game.data.wallet.entry.kind],
+      [15, '分钟', 15, 'redeem']);
+
+    const cash = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['零花钱'].id, times: 2 });
+    assert.deepEqual([cash.data.balance, cash.data.wallet.balance, cash.data.wallet.unit], [0, 10, '元']);
+
+    const short = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['看电视'].id });
+    assert.deepEqual([short.status, short.data.code], [409, 'insufficient_balance']);
+    assert.equal((await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['看电视'].id, times: 101 })).status, 400);
+    assert.equal((await wallet(app, '看电视')).balance, 0, '没换成的不进账');
+  });
+
+  test('用掉 / 花掉不能超过余额;调整不能调成负数;钱精确到分;撤销用掉把余额加回来;兑换进账只能从学分流水撤', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 20, reason: '攒的' });
+    const cash = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['零花钱'].id, times: 2 });
+
+    const spend = await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['零花钱'].id, amount: 3.5, reason: '买文具' });
+    assert.deepEqual([spend.status, spend.data.balance, spend.data.entry.amount, spend.data.entry.balance_after], [200, 6.5, -3.5, 6.5]);
+    const over = await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['零花钱'].id, amount: 7, reason: '买零食' });
+    assert.deepEqual([over.status, over.data.code], [409, 'insufficient_wallet']);
+    assert.match(over.data.error, /只剩 6\.5 元,不够 7 元/u);
+    assert.equal((await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['零花钱'].id, amount: 0.005, reason: 'x' })).status, 400);
+    assert.equal((await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['零花钱'].id, amount: 1, reason: '' })).status, 400, '要写用在哪');
+    const itemReward = (await api(app, 'POST', '/rewards', { mac: MAC, name: '贴纸', cost: 1 })).data.item;
+    assert.equal((await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: itemReward.id, amount: 1, reason: 'x' })).status, 400, '物品没有余额');
+
+    assert.equal((await api(app, 'POST', '/wallets/adjust', { mac: MAC, reward_id: r['零花钱'].id, amount: -7, reason: '记错了' })).data.code, 'insufficient_wallet');
+    const gift = await api(app, 'POST', '/wallets/adjust', { mac: MAC, reward_id: r['零花钱'].id, amount: 20, reason: '奶奶给的' });
+    assert.equal(gift.data.balance, 26.5);
+
+    const back = await api(app, 'POST', `/wallets/entries/${spend.data.entry.id}/revert`, {});
+    assert.deepEqual([back.data.balance, back.data.entry.kind, back.data.entry.amount], [30, 'revert', 3.5]);
+    assert.equal((await api(app, 'POST', `/wallets/entries/${spend.data.entry.id}/revert`, {})).data.code, 'already_reverted');
+    const income = await api(app, 'POST', `/wallets/entries/${cash.data.wallet.entry.id}/revert`, {});
+    assert.deepEqual([income.status, income.data.code], [409, 'not_revertible']);
+
+    const summary = await wallet(app, '零花钱');
+    assert.deepEqual([summary.balance, summary.redeemed, summary.used, summary.unit], [30, 10, 0, '元'], '撤销过的用掉不算累计');
+    const page = (await api(app, 'GET', `/wallets/entries?mac=${COMPACT}&reward_id=${r['零花钱'].id}&kind=use`)).data;
+    assert.deepEqual(page.items.map((e: any) => [e.title, e.amount, e.reverted_by !== null]), [['买文具', -3.5, true]]);
+    assert.equal((await api(app, 'GET', `/wallets/entries/${gift.data.entry.id}`)).data.item.title, '奶奶给的');
+  });
+
+  test('撤销时间 / 零花钱的兑换:分和余额一起退;已经用掉了就先撤用掉的', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 20, reason: '攒的' });
+    const game = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['玩游戏'].id, times: 2 });
+    const played = await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['玩游戏'].id, amount: 6, reason: '玩了一局' });
+
+    const blocked = await api(app, 'POST', `/ledger/${game.data.ledger.id}/revert`, {});
+    assert.deepEqual([blocked.status, blocked.data.code], [409, 'insufficient_wallet']);
+    assert.match(blocked.data.error, /10 分钟.*只剩 4 分钟/u);
+    assert.equal(balanceOf(), 0, '被拦下时一分都没退');
+
+    await api(app, 'POST', `/wallets/entries/${played.data.entry.id}/revert`, {});
+    const ok = await api(app, 'POST', `/ledger/${game.data.ledger.id}/revert`, {});
+    assert.deepEqual([ok.status, ok.data.balance, ok.data.wallet.balance, ok.data.wallet.entry.kind], [200, 20, 0, 'revert']);
+    assert.equal((await wallet(app, '玩游戏')).redeemed, 0, '撤销过的兑换不算累计');
+  });
+
+  test('种类:换过就不能改,没换过可以改;份价与一份换多少随时改;记过账的删除只停用,余额还在就照样列出', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 10, reason: '攒的' });
+    await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['看电视'].id });
+
+    const locked = await api(app, 'PATCH', `/rewards/${r['看电视'].id}`, { kind: 'money', amount: 1 });
+    assert.equal(locked.status, 409);
+    const cheaper = await api(app, 'PATCH', `/rewards/${r['看电视'].id}`, { cost: 5, amount: 15 });
+    assert.deepEqual([cheaper.data.item.cost, cheaper.data.item.amount, cheaper.data.item.wallet_balance], [5, 15, 10]);
+    const game = await api(app, 'PUT', `/rewards/${r['玩游戏'].id}`, { kind: 'item' });
+    assert.deepEqual([game.status, game.data.item.kind, game.data.item.amount], [200, 'item', 1]);
+    const back = await api(app, 'PATCH', `/rewards/${r['玩游戏'].id}`, { kind: 'time' });
+    assert.equal(back.status, 400, '改回时间要重新说一份换多少');
+
+    assert.equal((await api(app, 'DELETE', `/rewards/${r['看电视'].id}`)).data.result, 'archived');
+    assert.equal((await wallet(app, '看电视')).balance, 10, '停用了余额照样能看、能用');
+    assert.equal((await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['看电视'].id, amount: 10, reason: '看完了' })).status, 200);
+    assert.equal(await wallet(app, '看电视'), undefined, '停用且用完的就不再列');
+  });
+
+  test('孩子概览带余额;统计有兑换汇总与用掉多少,撤销过的不计', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 60, reason: '攒的' });
+    await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['玩游戏'].id, times: 2 });
+    await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['零花钱'].id, times: 3 });
+    const undone = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: r['看电视'].id });
+    await api(app, 'POST', `/ledger/${undone.data.ledger.id}/revert`, {});
+    await api(app, 'POST', '/wallets/use', { mac: MAC, reward_id: r['零花钱'].id, amount: 4.2, reason: '买冰棍' });
+
+    const child = (await api(app, 'GET', `/children/${COMPACT}`)).data.item;
+    assert.deepEqual(child.wallets.map((w: any) => [w.name, w.balance, w.unit]), [['玩游戏', 10, '分钟'], ['零花钱', 10.8, '元'], ['看电视', 0, '分钟']]);
+
+    const s = (await api(app, 'GET', `/stats?mac=${COMPACT}`)).data;
+    assert.deepEqual(s.redeemed.map((x: any) => [x.name, x.count, x.times, x.quantity, x.unit, x.points]),
+      [['零花钱', 1, 3, 15, '元', 30], ['玩游戏', 1, 2, 10, '分钟', 20]]);
+    assert.deepEqual(s.wallets.map((w: any) => [w.name, w.redeemed, w.used]), [['玩游戏', 10, 0], ['零花钱', 15, 4.2]]);
+    assert.equal(s.totals.spent, 50, '花掉的分照旧只算没撤销的兑换');
+  });
+
+  test('外部接口:App 设备身份能记用掉,流水记 App 名;openapi 写着新端点与错误码', async () => {
+    const { hashClientId } = await import('../src/identity.ts');
+    const APP_MAC = '02:5a:00:00:00:01';
+    const SECRET = '0123456789abcdef'.repeat(4);
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias, board, secret_hash) VALUES (?, ?, ?, ?, ?)',
+      APP_MAC, DEFAULT_AGENT_ID, '妈妈的 App', 'xiaodan-app', hashClientId(SECRET));
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const r = await rewardsByName(app);
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 10, reason: '攒的' });
+    const headers = { 'device-id': APP_MAC, 'client-id': SECRET };
+    const redeemed = await call(app, 'POST', `${OPEN}/redeem`, { mac: COMPACT, reward_id: r['零花钱'].id }, headers);
+    assert.equal(redeemed.data.wallet.entry.actor, '妈妈的 App');
+    const spent = await call(app, 'POST', `${OPEN}/wallets/use`, { mac: COMPACT, reward_id: r['零花钱'].id, amount: 2, reason: '买本子' }, headers);
+    assert.deepEqual([spent.status, spent.data.balance, spent.data.entry.source, spent.data.entry.actor], [200, 3, 'api', '妈妈的 App']);
+
+    const spec = (await call(app, 'GET', `${OPEN}/openapi.json`)).data;
+    for (const path of ['/wallets', '/wallets/entries', '/wallets/entries/{id}', '/wallets/use', '/wallets/adjust', '/wallets/entries/{id}/revert']) {
+      assert.ok(spec.paths[path], path);
+    }
+    assert.ok(spec.components.responses.Error.content['application/json'].schema.properties.code.enum.includes('insufficient_wallet'));
+    assert.deepEqual(spec.paths['/redeem'].post.requestBody.content['application/json'].schema.properties.times.maximum, 100);
+  });
+});
+
+describe('智能体工具:按份兑换与余额', () => {
+  const agentCtx = (mac: string | null = MAC) => ({
+    deps: { conn, now: () => clock },
+    agent: { id: DEFAULT_AGENT_ID, name: '家长助手' },
+    device: { mac, sessionId: null, turnId: null, clientIp: null, features: {} },
+  }) as any;
+  const enable = (code: string) =>
+    run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, ?, '{}')", DEFAULT_AGENT_ID, code);
+  const tool = async (name: string) => {
+    const { collectTools } = await import('../src/agent/registry.ts');
+    await import('../src/agent/index.ts');
+    return (await collectTools(agentCtx())).find((t) => t.name === name)!;
+  };
+
+  test('孩子说换多少分钟 / 多少钱:凑成整份就换,凑不成列出能换的;孩子不能记用掉', async () => {
+    enable('credits');
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 40, reason: '攒的' });
+    const redeemTool = await tool('credits_redeem');
+
+    const odd = await redeemTool.run(agentCtx(), { reward: '游戏', amount: 12 });
+    assert.equal(odd.ok, false);
+    assert.match(odd.content, /凑不成整份.*10 分钟\(2 份,20 分\) 或 15 分钟\(3 份,30 分\)/u);
+    assert.equal(balanceOf(), 40);
+
+    const ok = await redeemTool.run(agentCtx(), { reward: '游戏', amount: 15 });
+    assert.match(ok.content, /🎮 玩游戏 ×3\(15 分钟\),扣了 30 分,还剩 10 分.*玩游戏现在有 15 分钟/u);
+    const cash = await redeemTool.run(agentCtx(), { reward: '零花钱', times: 1 });
+    assert.match(cash.content, /零花钱现在有 5 元/u);
+
+    const names = (await (await import('../src/agent/registry.ts')).collectTools(agentCtx())).map((t) => t.name);
+    assert.ok(!names.includes('credits_wallet'), '孩子的工具里没有记用掉的函数');
+  });
+
+  test('家长 credits_wallet:看余额、记花费、超了被拒、调整、撤销最近一笔', async () => {
+    enable('credits_parent');
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    await (await tool('credits_adjust')).run(agentCtx(), { points: 30, reason: '攒的' });
+    await (await tool('credits_redeem_for')).run(agentCtx(), { reward: '零花钱', amount: 10 });
+    const w = await tool('credits_wallet');
+
+    const which = await w.run(agentCtx(), { action: 'use', amount: 3, reason: '买文具' });
+    assert.equal(which.ok, false);
+    assert.match(which.content, /哪个账户/u);
+    assert.match((await w.run(agentCtx(), { action: 'use', reward: '零花钱', amount: 3.5, reason: '买文具' })).content, /用掉 -3\.5 元\(买文具\),余额现在 6\.5 元/u);
+    const over = await w.run(agentCtx(), { action: 'use', reward: '零花钱', amount: 100, reason: '买玩具' });
+    assert.equal(over.ok, false);
+    assert.match(over.content, /只剩 6\.5 元/u);
+    assert.match((await w.run(agentCtx(), { action: 'adjust', reward: '零花钱', amount: 20, reason: '奶奶给的' })).content, /余额现在 26\.5 元/u);
+
+    const status = await w.run(agentCtx(), { action: 'status', reward: '零花钱' });
+    assert.match(status.content, /零花钱:余额 26\.5 元,累计兑换 10 元,累计用掉 3\.5 元/u);
+    assert.match(status.content, /记录 \d+.*智能体「家长助手」.*调整 \+20 元「奶奶给的」/u);
+
+    assert.match((await w.run(agentCtx(), { action: 'undo' })).content, /已撤销记录 \d+「奶奶给的」.*余额现在 6\.5 元/u);
+    assert.match((await (await tool('credits_manage_reward')).run(agentCtx(), { action: 'create', name: '看动画', cost: 10, kind: 'time' })).content, /一份换多少分钟/u);
+    assert.match((await (await tool('credits_manage_reward')).run(agentCtx(), { action: 'create', name: '看动画', cost: 10, kind: 'time', amount: 20 })).content,
+      /看动画\(编号 \d+,时间\):10 分换 20 分钟/u);
+    assert.match((await (await tool('credits_overview')).run(agentCtx(), {})).content, /余额账户:.*💰 零花钱还有 6\.5 元/u);
   });
 });

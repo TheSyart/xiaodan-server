@@ -92,6 +92,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     items: [
       { path: '/credits/tasks', label: '今日作业', icon: 'calendar' },
       { path: '/credits/rewards', label: '兑换奖励', icon: 'gift' },
+      { path: '/credits/wallets', label: '钱与时间', icon: 'wallet' },
       { path: '/credits/rules', label: '作业规则', icon: 'sliders' },
       { path: '/credits/ledger', label: '流水', icon: 'clock' },
       { path: '/credits/stats', label: '统计', icon: 'chart' },

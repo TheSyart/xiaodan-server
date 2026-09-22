@@ -8,6 +8,7 @@ import { z } from 'zod';
 import {
   adjustBody, examplesBody, redeemBody, reorderBody, rewardCreate, rewardUpdate, ruleCreate, rulePreview, ruleUpdate,
   taskAssign, taskClaim, taskCustom, taskMissed, taskResult, taskUpdate, TASK_STATUSES, LEDGER_KINDS,
+  WALLET_KINDS, walletAdjustBody, walletUseBody,
 } from './schemas.ts';
 
 type Method = 'get' | 'post' | 'patch' | 'put' | 'delete';
@@ -60,15 +61,23 @@ export const ENDPOINTS: Endpoint[] = [
   { method: 'post', path: '/tasks/:id/claim', tag: '作业', summary: '孩子报完成:只记申报,不加分', body: taskClaim },
   { method: 'delete', path: '/tasks/:id/claim', tag: '作业', summary: '驳回孩子的申报' },
 
-  { method: 'get', path: '/rewards', tag: '奖励', summary: '奖励列表(附当前余额)', query: [MAC_Q, { name: 'archived', description: '1 = 连已停用的一起列' }] },
-  { method: 'post', path: '/rewards', tag: '奖励', summary: '新建奖励', body: rewardCreate },
+  {
+    method: 'get', path: '/rewards', tag: '奖励',
+    summary: '奖励列表(附当前学分余额)。每项带 kind、amount(一份换多少,自然单位)、unit;时间 / 零花钱奖励另带 wallet_balance',
+    query: [MAC_Q, { name: 'archived', description: '1 = 连已停用的一起列' }],
+  },
+  { method: 'post', path: '/rewards', tag: '奖励', summary: '新建奖励:cost 分换一份;time / money 要填 amount(10 分 = 5 分钟 → cost 10、amount 5)', body: rewardCreate },
   { method: 'post', path: '/rewards/reorder', tag: '奖励', summary: '按给定顺序重排', body: reorderBody },
   { method: 'get', path: '/rewards/:id', tag: '奖励', summary: '读取一个奖励' },
-  { method: 'patch', path: '/rewards/:id', tag: '奖励', summary: '改奖励', body: rewardUpdate },
-  { method: 'delete', path: '/rewards/:id', tag: '奖励', summary: '删除;兑换过的改为停用,返回 result=archived' },
+  { method: 'patch', path: '/rewards/:id', tag: '奖励', summary: '改奖励(只影响以后的兑换);兑换或记过账之后不能改 kind', body: rewardUpdate },
+  { method: 'delete', path: '/rewards/:id', tag: '奖励', summary: '删除;兑换或记过账的改为停用,返回 result=archived' },
   { method: 'post', path: '/rewards/:id/restore', tag: '奖励', summary: '恢复已停用的奖励' },
 
-  { method: 'post', path: '/redeem', tag: '兑换与奖惩', summary: '兑换奖励;余额不够回 409 insufficient_balance', body: redeemBody },
+  {
+    method: 'post', path: '/redeem', tag: '兑换与奖惩',
+    summary: '按整份兑换 times 份,扣 cost × times 分;时间 / 零花钱同时进账 amount × times,返回里带 wallet。分不够回 409 insufficient_balance',
+    body: redeemBody,
+  },
   { method: 'post', path: '/adjust', tag: '兑换与奖惩', summary: '手动加减分(必须写原因)', body: adjustBody },
 
   {
@@ -77,7 +86,24 @@ export const ENDPOINTS: Endpoint[] = [
       { name: 'to', description: 'YYYY-MM-DD' }, ...CURSOR],
   },
   { method: 'get', path: '/ledger/:id', tag: '流水', summary: '读取一笔流水' },
-  { method: 'post', path: '/ledger/:id/revert', tag: '流水', summary: '撤销一笔:追加反向记录;作业打分被撤销时作业回到待完成' },
+  {
+    method: 'post', path: '/ledger/:id/revert', tag: '流水',
+    summary: '撤销一笔:追加反向记录;作业打分被撤销时作业回到待完成;撤销时间 / 零花钱的兑换时进账一起退回,已经用掉了回 409 insufficient_wallet',
+  },
+
+  { method: 'get', path: '/wallets', tag: '钱与时间', summary: '各时间 / 零花钱账户(一个奖励一个):余额 balance、累计兑换 redeemed、累计用掉 used,自然单位', query: [MAC_Q] },
+  {
+    method: 'get', path: '/wallets/entries', tag: '钱与时间', summary: '账户流水,按 id 倒序翻页;amount 带正负号,每条带当时余额 balance_after',
+    query: [MAC_Q, { name: 'reward_id', description: '只看某个账户' }, { name: 'kind', description: '按类型筛选', enum: WALLET_KINDS },
+      { name: 'from', description: 'YYYY-MM-DD' }, { name: 'to', description: 'YYYY-MM-DD' }, ...CURSOR],
+  },
+  { method: 'get', path: '/wallets/entries/:id', tag: '钱与时间', summary: '读取一笔账户流水' },
+  { method: 'post', path: '/wallets/use', tag: '钱与时间', summary: '记一笔用掉时间 / 花掉零花钱;超过余额回 409 insufficient_wallet', body: walletUseBody },
+  { method: 'post', path: '/wallets/adjust', tag: '钱与时间', summary: '调整账户:加填正数、减填负数;调完不能小于 0', body: walletAdjustBody },
+  {
+    method: 'post', path: '/wallets/entries/:id/revert', tag: '钱与时间',
+    summary: '撤销一笔用掉 / 调整(追加反向记录);兑换进账要在 /ledger/:id/revert 撤销那次兑换,这里回 409 not_revertible',
+  },
 
   {
     method: 'get', path: '/stats', tag: '统计', summary: '每天挣/扣/花的分、各作业完成率按时率与平均用时;默认最近 7 天,最长一年',
@@ -86,7 +112,7 @@ export const ENDPOINTS: Endpoint[] = [
 ];
 
 const ERROR_CODES = ['invalid', 'not_found', 'device_not_found', 'already_scored', 'archived', 'insufficient_balance',
-  'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized', 'not_app_device'];
+  'insufficient_wallet', 'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized', 'not_app_device'];
 
 const toOpenApiPath = (path: string) => path.replace(/:(\w+)/gu, '{$1}');
 
@@ -145,6 +171,8 @@ export function buildOpenApi(basePath: string): Record<string, unknown> {
         '- MAC 冒号、连字符、12 位紧凑写法都认;拼进 URL 请用紧凑写法。',
         '- 规则的数值在布置作业时抄进作业快照:改规则不影响已布置的作业和已算过的分。',
         '- 余额是流水之和,可以因为惩罚变成负数;兑换必须够分。撤销是追加一条反向流水,原记录保留。',
+        '- 奖励按整份兑换:cost 分换一份。kind=time 的一份是 amount 分钟、kind=money 的一份是 amount 元,兑换后进这个奖励自己的余额账户;'
+        + '用掉 / 花掉时记一笔,不能超过余额。数额一律自然单位:时间整数分钟,钱是元、最多两位小数。',
       ].join('\n'),
     },
     servers: [{ url: basePath }],

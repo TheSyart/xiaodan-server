@@ -19,9 +19,12 @@ import {
   CreditError, PARAM_KEYS, adjust, assignTasks, balance, createCustomTask, createReward, createRule, deleteReward, deleteRule,
   deleteTask, ledgerById, ledgerPage, listRewards, listRules, listTasks, missTask, queryTasks, redeem, restoreReward,
   restoreRule, revert, scoreTask, shiftDay, stats, taskById, today, unclaimTask, updateReward, updateRule, updateTask,
+  walletBalance, walletById, walletRows, walletSummary,
   type Actor, type LedgerRow, type RewardRow, type RuleInput, type RuleRow, type TaskRow,
 } from './store.ts';
-import { match, norm, signed } from './tools.ts';
+import { match, norm, redeemTimes, rewardRate, signed, walletLine } from './tools.ts';
+import { formatQty, KIND_LABEL, REWARD_KINDS, toBase, UNIT, type RewardKind } from './units.ts';
+import { walletAdjust, walletOut, walletRevert, walletUse, type WalletEntry } from './wallet.ts';
 
 export const CREDITS_PARENT_PLUGIN = 'credits_parent';
 
@@ -58,7 +61,16 @@ function taskLine(task: TaskRow): string {
 }
 
 function rewardLine(reward: RewardRow): string {
-  return `- ${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}(编号 ${reward.id}${reward.archived ? ',已停用' : ''}):${reward.cost} 分`;
+  const tags = [`编号 ${reward.id}`, KIND_LABEL[reward.kind], ...(reward.archived ? ['已停用'] : [])].join(',');
+  return `- ${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}(${tags}):${rewardRate(reward)}`;
+}
+
+function walletEntryLine(entry: WalletEntry): string {
+  const what = { redeem: '兑换进账', use: '用掉', adjust: '调整', revert: '撤销' }[entry.kind];
+  const who = entry.source === 'agent' ? `智能体${entry.actor ? `「${entry.actor}」` : ''}` : entry.source === 'api' ? (entry.actor || '外部接口') : '控制台';
+  const sign = entry.amount > 0 ? '+' : '';
+  return `- 记录 ${entry.id}(${entry.created_at} UTC,${who}):${entry.reward_emoji} ${entry.reward_name} ${what} ${sign}${entry.amount} ${entry.unit}`
+    + `「${entry.title}」${entry.reverted_by ? ',已撤销' : ''},之后余额 ${entry.balance_after} ${entry.unit}`;
 }
 
 function ledgerLine(row: LedgerRow): string {
@@ -182,7 +194,8 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     label: '查看学分',
     hint: '正在查学分',
     description:
-      '家长查看孩子的学分:余额、某天每项作业(编号、状态、孩子有没有说做完)、所有待检查的申报、作业规则和奖励清单。'
+      '家长查看孩子的学分:余额、某天每项作业(编号、状态、孩子有没有说做完)、所有待检查的申报、作业规则、奖励清单(兑换比例)、'
+      + '零花钱与游戏 / 电视时间的余额。'
       + '操作前拿不准作业、规则、奖励叫什么时先调这个。',
     parameters: { type: 'object', properties: { ...CHILD_PROP, ...DAY_PROP } },
     async run(toolCtx, args) {
@@ -198,7 +211,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       lines.push(tasks.length ? `${day} 的作业:` : `${day} 还没有布置作业。`, ...tasks.map(taskLine));
       if (claims.length) lines.push('其他日子孩子说做完、还没检查的:', ...claims.map(taskLine));
       lines.push(rules.length ? '作业规则:' : '还没有作业规则。', ...rules.map(ruleLine));
-      lines.push(rewards.length ? '奖励:' : '还没有奖励。', ...rewards.map(rewardLine));
+      lines.push(rewards.length ? '奖励(按整份兑换):' : '还没有奖励。', ...rewards.map(rewardLine));
+      const wallets = walletSummary(conn, child.mac);
+      if (wallets.length) lines.push(`余额账户:${wallets.map(walletLine).join(';')}。`);
       return { ok: true, content: lines.join('\n') };
     },
   });
@@ -400,15 +415,31 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     name: 'credits_redeem_for',
     label: '代兑换奖励',
     hint: '正在兑换奖励',
-    description: '替孩子用学分兑换奖励,分够才能换。',
-    parameters: { type: 'object', properties: { ...CHILD_PROP, reward: { type: 'string', description: '奖励名或编号' }, note: { type: 'string' } }, required: ['reward'] },
+    description: '替孩子用学分兑换奖励,按整份换,分够才能换。时间和零花钱换到后存进余额账户,用掉 / 花掉时用 credits_wallet 记。',
+    parameters: {
+      type: 'object',
+      properties: {
+        ...CHILD_PROP,
+        reward: { type: 'string', description: '奖励名或编号' },
+        amount: { type: 'number', description: '换多少:时间填分钟数,零花钱填元;要凑成整份' },
+        times: { type: 'integer', minimum: 1, maximum: 100, description: '换几份;和 amount 二选一,都不填就是一份' },
+        note: { type: 'string' },
+      },
+      required: ['reward'],
+    },
     async run(toolCtx, args) {
       const child = resolveChild(toolCtx, args);
       if (isResult(child)) return child;
       const reward = findNamed(listRewards(conn, child.mac), str(args['reward']), '奖励', rewardLine);
       if (isResult(reward)) return reward;
-      const result = redeem(conn, child.mac, reward.id, str(args['note']).slice(0, 200) || '家长代兑换', by(toolCtx));
-      return { ok: true, content: `已兑换「${reward.name}」,扣 ${reward.cost} 分,${childName(child)}还剩 ${result.balance} 分。(流水 ${result.ledger.id})` };
+      const times = redeemTimes(reward, args['amount'], args['times']);
+      if (typeof times === 'string') return fail(times);
+      const result = redeem(conn, child.mac, reward.id, times, str(args['note']).slice(0, 200) || '家长代兑换', by(toolCtx));
+      const got = result.wallet ? `「${reward.name}」余额现在 ${formatQty(reward.kind, result.wallet.balance)}。` : '';
+      return {
+        ok: true,
+        content: `已兑换:${result.ledger.title},扣 ${reward.cost * times} 分,${childName(child)}还剩 ${result.balance} 分。${got}(流水 ${result.ledger.id})`,
+      };
     },
   });
 
@@ -436,7 +467,8 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       return {
         ok: true,
         content: `已撤销流水 ${target.id}「${target.title}」(${signed(target.delta)}),${childName(child)}现在有 ${result.balance} 分。`
-          + (result.task ? `「${result.task.name}」回到待完成,可以重新打分。` : ''),
+          + (result.task ? `「${result.task.name}」回到待完成,可以重新打分。` : '')
+          + (result.wallet ? `换到的也退回了,账户余额现在 ${formatQty(result.wallet.entry.reward_kind, result.wallet.balance)}。` : ''),
       };
     },
   });
@@ -492,7 +524,10 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     name: 'credits_manage_reward',
     label: '管理奖励',
     hint: '正在修改奖励',
-    description: '新建 / 修改 / 删除 / 恢复奖励。删除时兑换过的奖励改为停用(可恢复)。新建要名字和所需分数。' + CONFIRM,
+    description:
+      '新建 / 修改 / 删除 / 恢复奖励。奖励按整份兑换:cost 分换一份。种类 kind:item 物品(买个小玩具,换了就完事)、'
+      + 'time 时间(「10 分 = 5 分钟游戏」→ cost 10、amount 5)、money 零花钱(「10 分 = 5 元」→ cost 10、amount 5);'
+      + '时间和零花钱换到后存进余额账户。换过的奖励不能再改种类。删除时兑换过的改为停用(可恢复)。' + CONFIRM,
     parameters: {
       type: 'object',
       properties: {
@@ -500,7 +535,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
         action: { type: 'string', enum: ['create', 'update', 'delete', 'restore'] },
         name: { type: 'string', description: '奖励名(新建时是新名字;其他操作用来找奖励,也可以填编号)' },
         new_name: { type: 'string', description: 'update:改成的新名字' },
-        cost: { type: 'integer', minimum: 1, maximum: 100000, description: '兑换要多少分' },
+        cost: { type: 'integer', minimum: 1, maximum: 100000, description: '一份要多少分' },
+        kind: { type: 'string', enum: [...REWARD_KINDS], description: '新建时不填是 item' },
+        amount: { type: 'number', description: 'time / money 一份换多少:分钟数或元' },
         emoji: { type: 'string', description: '一个表情,可不填' },
       },
       required: ['action', 'name'],
@@ -515,11 +552,19 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
         return fail('所需分数要是 1~100000 的整数。');
       }
       const emoji = args['emoji'] === undefined ? undefined : str(args['emoji']).slice(0, 8);
+      const kindArg = str(args['kind']);
+      if (kindArg && !(REWARD_KINDS as readonly string[]).includes(kindArg)) return fail('kind 要是 item、time、money 之一。');
+      const amountArg = args['amount'] === undefined || args['amount'] === null || args['amount'] === '' ? undefined : Number(args['amount']);
+      /** 自然单位换成库里的基本单位;物品不用 amount */
+      const amountFor = (kind: RewardKind) => (kind === 'item' || amountArg === undefined ? undefined : toBase(kind, amountArg, '一份换多少'));
       if (action === 'create') {
         if (!name) return fail('新奖励要有名字。');
-        if (cost === undefined) return fail(`「${name}」要多少分才能换?问家长。`);
+        if (cost === undefined) return fail(`「${name}」一份要多少分?问家长。`);
+        const kind = (kindArg || 'item') as RewardKind;
+        if (kind !== 'item' && amountArg === undefined) return fail(`「${name}」一份换多少${UNIT[kind]}?问家长。`);
         if (listRewards(conn, child.mac).some((r) => norm(r.name) === norm(name))) return fail(`已经有「${name}」这个奖励了,要改就用 update。`);
-        return { ok: true, content: `已新建奖励:\n${rewardLine(createReward(conn, child.mac, { name: name.slice(0, 40), cost, emoji }))}` };
+        const created = createReward(conn, child.mac, { name: name.slice(0, 40), cost, emoji, kind, amount: amountFor(kind) });
+        return { ok: true, content: `已新建奖励:\n${rewardLine(created)}` };
       }
       const reward = findNamed(listRewards(conn, child.mac, action === 'restore'), name, action === 'restore' ? '奖励(含已停用)' : '奖励', rewardLine);
       if (isResult(reward)) return reward;
@@ -530,9 +575,86 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       if (action === 'restore') return { ok: true, content: `已恢复:\n${rewardLine(restoreReward(conn, reward.id))}` };
       if (action !== 'update') return fail('action 要是 create、update、delete、restore 之一。');
       const newName = str(args['new_name']);
-      if (!newName && cost === undefined && emoji === undefined) return fail('要说明改什么。');
-      const updated = updateReward(conn, reward.id, { ...(newName ? { name: newName.slice(0, 40) } : {}), cost, emoji });
+      if (!newName && cost === undefined && emoji === undefined && !kindArg && amountArg === undefined) return fail('要说明改什么。');
+      const kind = (kindArg || reward.kind) as RewardKind;
+      const updated = updateReward(conn, reward.id, {
+        ...(newName ? { name: newName.slice(0, 40) } : {}), cost, emoji, ...(kindArg ? { kind } : {}), amount: amountFor(kind),
+      });
       return { ok: true, content: `已修改:\n${rewardLine(updated)}` };
+    },
+  });
+
+  const walletTool = tool({
+    name: 'credits_wallet',
+    label: '零花钱与时间',
+    hint: '正在记账',
+    description:
+      '孩子换到手的零花钱和游戏 / 电视时间的余额账户(一个奖励一个账户)。action:'
+      + 'status 看余额和最近记录(「零花钱还有多少、最近怎么花的」);'
+      + 'use 记一笔用掉 / 花掉(「买文具花了 3.5 元」「游戏玩了 10 分钟」),不能超过余额;'
+      + 'adjust 调整,加填正数、减填负数(「奶奶给了 20 元存进零花钱」),调完不能小于 0;'
+      + 'undo 撤销一笔用掉或调整,不填 entry 就撤最近一笔(兑换进来的要用 credits_undo 撤销那次兑换)。'
+      + '撤销,以及一次调整 50 元或 60 分钟以上之前,先跟家长复述一遍、得到确认再调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        ...CHILD_PROP,
+        action: { type: 'string', enum: ['status', 'use', 'adjust', 'undo'] },
+        reward: { type: 'string', description: '哪个账户:奖励名(「零花钱」「玩游戏」)或编号;只有一个账户时可以不填' },
+        amount: { type: 'number', description: 'use:用掉多少(分钟 / 元,大于 0);adjust:加减多少' },
+        reason: { type: 'string', description: 'use / adjust:用在哪了、为什么调,会记进账' },
+        entry: { type: 'integer', description: 'undo:记录编号(status 里的「记录 N」),不填 = 最近一笔' },
+      },
+      required: ['action'],
+    },
+    async run(toolCtx, args) {
+      const child = resolveChild(toolCtx, args);
+      if (isResult(child)) return child;
+      const action = str(args['action']);
+      const accounts = listRewards(conn, child.mac, true)
+        .filter((r) => r.kind !== 'item' && (!r.archived || walletBalance(conn, r.id) !== 0));
+      if (!accounts.length) return fail(`${childName(child)}还没有时间或零花钱类的奖励,没有余额账户。可以用 credits_manage_reward 建一个。`);
+      const query = str(args['reward']);
+      const account = query ? findNamed(accounts, query, '账户', rewardLine) : accounts.length === 1 ? accounts[0]! : undefined;
+      if (account && isResult(account)) return account;
+      const entries = (rewardId?: number, limit = 10) => walletRows(conn,
+        rewardId ? 'w.mac = ? AND w.reward_id = ?' : 'w.mac = ?', rewardId ? [child.mac, rewardId] : [child.mac], limit).map(walletOut);
+
+      if (action === 'status') {
+        const summary = walletSummary(conn, child.mac).filter((w) => !account || w.reward_id === account.id);
+        const lines = summary.map((w) => `- ${w.emoji ? `${w.emoji} ` : ''}${w.name}:余额 ${w.balance} ${w.unit},累计兑换 ${w.redeemed} ${w.unit},累计用掉 ${w.used} ${w.unit}`);
+        const recent = entries(account?.id);
+        lines.push(recent.length ? '最近的记录(新的在前):' : '还没有记录。', ...recent.map(walletEntryLine));
+        return { ok: true, content: lines.join('\n') };
+      }
+      if (action === 'undo') {
+        const entryId = intArg(args['entry']);
+        let target: WalletEntry | undefined;
+        if (entryId !== undefined) {
+          const row = walletById(conn, entryId);
+          if (!row || row.mac !== child.mac) return fail(`${childName(child)}没有编号 ${entryId} 的记录。`);
+          target = walletOut(row);
+        } else {
+          target = entries(account?.id, 100).find((e) => (e.kind === 'use' || e.kind === 'adjust') && !e.reverted_by);
+          if (!target) return fail('没有可以撤销的用掉 / 调整记录。兑换进来的要用 credits_undo 撤销那次兑换。');
+        }
+        const result = walletRevert(conn, target.id, by(toolCtx));
+        return { ok: true, content: `已撤销记录 ${target.id}「${target.title}」,「${target.reward_name}」余额现在 ${result.balance} ${result.unit}。` };
+      }
+      if (action !== 'use' && action !== 'adjust') return fail('action 要是 status、use、adjust、undo 之一。');
+      if (!account) return fail(`要说明是哪个账户:${accounts.map((a) => a.name).join('、')}。`);
+      const amount = typeof args['amount'] === 'number' ? args['amount'] : Number.parseFloat(str(args['amount']));
+      if (!Number.isFinite(amount)) return fail(`要说明${action === 'use' ? '用掉' : '调整'}多少${UNIT[account.kind]}。`);
+      const reason = str(args['reason']).slice(0, 80);
+      if (!reason) return fail(action === 'use' ? '要说明用在哪了,问家长。' : '调整要写原因,问家长。');
+      const result = action === 'use'
+        ? walletUse(conn, child.mac, account.id, amount, reason, '', by(toolCtx))
+        : walletAdjust(conn, child.mac, account.id, amount, reason, by(toolCtx));
+      return {
+        ok: true,
+        content: `已记:「${account.name}」${action === 'use' ? '用掉' : '调整'} ${result.entry.amount > 0 ? '+' : ''}${result.entry.amount} ${result.unit}(${reason}),`
+          + `余额现在 ${result.balance} ${result.unit}。(记录 ${result.entry.id})`,
+      };
     },
   });
 
@@ -540,7 +662,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     name: 'credits_history',
     label: '学分历史',
     hint: '正在看学分记录',
-    description: '最近几天的学分统计(挣了、扣了、花了多少,完成率、按时率,各项作业表现)和最近的流水(带编号,撤销时用)。',
+    description: '最近几天的学分统计(挣了、扣了、花了多少,完成率、按时率,各项作业表现,各奖励换了多少、零花钱和时间用掉多少)和最近的流水(带编号,撤销时用)。',
     parameters: { type: 'object', properties: { ...CHILD_PROP, days: { type: 'integer', minimum: 1, maximum: 366, description: '看最近几天,默认 7' } } },
     async run(toolCtx, args) {
       const child = resolveChild(toolCtx, args);
@@ -557,11 +679,17 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
         lines.push('各项作业:', ...s.tasks.map((t) => `- ${t.name}:布置 ${t.assigned},完成 ${t.done},没完成 ${t.missed},按时 ${t.ontime}`
           + `${t.avg_minutes !== null ? `,平均 ${t.avg_minutes} 分钟` : ''}${t.avg_points !== null ? `,平均 ${t.avg_points} 分` : ''}`));
       }
+      if (s.redeemed.length) {
+        lines.push(`兑换:${s.redeemed.map((r) => `${r.emoji ? `${r.emoji} ` : ''}${r.name} ${r.quantity} ${r.unit}(${r.points} 分)`).join(';')}。`);
+      }
+      if (s.wallets.length) {
+        lines.push(`用掉:${s.wallets.map((w) => `${w.emoji ? `${w.emoji} ` : ''}${w.name} ${w.used} ${w.unit}`).join(';')}。`);
+      }
       const recent = ledgerPage(conn, child.mac, null, 15).items;
       lines.push(recent.length ? '最近的流水(新的在前):' : '还没有流水。', ...recent.map(ledgerLine));
       return { ok: true, content: lines.join('\n') };
     },
   });
 
-  return [overview, assign, score, missed, editTask, adjustTool, redeemTool, undo, manageRule, manageReward, history];
+  return [overview, assign, score, missed, editTask, adjustTool, redeemTool, undo, manageRule, manageReward, walletTool, history];
 });
