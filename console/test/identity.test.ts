@@ -4,9 +4,10 @@ import { strict as assert } from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { all, one, openMemoryDb, run, type Db } from '../src/db.ts';
-import { seed } from '../src/seed.ts';
+import { DEFAULT_AGENT_ID, seed } from '../src/seed.ts';
 import {
-  MAX_EVENT_FPS_PER_MAC, canonicalMac, hashClientId, newBindCode, parseClientId, recordIdentityEvent, sameHash,
+  MAX_EVENT_FPS_PER_MAC, bindByCode, canonicalMac, ensurePendingCode, hashClientId, newBindCode, parseClientId,
+  recordIdentityEvent, sameHash,
 } from '../src/identity.ts';
 
 describe('MAC 规范化', () => {
@@ -146,5 +147,50 @@ describe('身份异常记录', () => {
       one<{ n: number }>(conn, "SELECT COUNT(*) AS n FROM identity_events WHERE mac = ? AND client_fp = '*'", mac)!.n,
       0,
     );
+  });
+});
+
+// 家长 App 和玩具走同一套绑定流程,只看 OTA 里报的 board.type。
+describe('新设备绑到哪个智能体', () => {
+  let conn: Db;
+  beforeEach(() => {
+    conn = openMemoryDb();
+    seed(conn);
+  });
+
+  const addAgent = (id: string, name: string, roleTemplate = '') =>
+    run(conn, 'INSERT INTO agents (id, name, role_template) VALUES (?, ?, ?)', id, name, roleTemplate);
+
+  /** 走一遍「设备轮询拿码 → 控制台输码」,返回落库后的设备 */
+  const bind = (mac: string, board: string, agentId: string | null = null) => {
+    const pending = ensurePendingCode(conn, { mac, hash: hashClientId(`${mac}-secret`), board, version: '1.0.0' });
+    assert.ok(pending.ok);
+    assert.ok(bindByCode(conn, { code: pending.code, agentId, alias: '' }).ok);
+    return one<{ agent_id: string; board: string }>(conn, 'SELECT agent_id, board FROM devices WHERE mac = ?', mac)!;
+  };
+
+  test('家长 App 默认绑到角色模板建的家长智能体', () => {
+    addAgent('agent_parent', '家长', 'parent');
+    assert.equal(bind('aa:bb:cc:dd:ee:20', 'xiaodan-app').agent_id, 'agent_parent');
+  });
+
+  test('手工建的家长智能体也认', () => {
+    addAgent('agent_by_name', '家长助手');
+    assert.equal(bind('aa:bb:cc:dd:ee:21', 'xiaodan-app').agent_id, 'agent_by_name');
+  });
+
+  test('没有家长智能体时退回默认智能体', () => {
+    assert.equal(bind('aa:bb:cc:dd:ee:22', 'xiaodan-app').agent_id, DEFAULT_AGENT_ID);
+  });
+
+  test('玩具不受影响,照旧绑默认智能体', () => {
+    addAgent('agent_parent', '家长', 'parent');
+    assert.equal(bind('aa:bb:cc:dd:ee:23', 'ai-passport').agent_id, DEFAULT_AGENT_ID);
+  });
+
+  test('绑定页显式选了智能体就以选的为准', () => {
+    addAgent('agent_parent', '家长', 'parent');
+    addAgent('agent_by_hand', '手工建的');
+    assert.equal(bind('aa:bb:cc:dd:ee:24', 'xiaodan-app', 'agent_by_hand').agent_id, 'agent_by_hand');
   });
 });

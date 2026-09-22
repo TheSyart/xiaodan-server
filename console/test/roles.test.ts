@@ -8,6 +8,7 @@ import { createApp } from '../src/app.ts';
 import '../src/agent/index.ts';
 import { Bridge } from '../src/agent/bridge.ts';
 import { conversations } from '../src/agent/context.ts';
+import { parentAgentId } from '../src/identity.ts';
 import { runTurn } from '../src/agent/loop.ts';
 import { loadAgent } from '../src/agent/routes.ts';
 import { applyTemplate, ROLE_TEMPLATES, templateById } from '../src/agent/roles/templates.ts';
@@ -106,6 +107,20 @@ describe('角色模板', () => {
     assert.equal(one<{ name: string }>(conn, 'SELECT name FROM agents WHERE id = ?', again.id)!.name, '童童二号');
   });
 
+  test('家长模板:完全权限的学分工具加记忆,音色是大人音;家长 App 会自动绑到它', () => {
+    const result = applyTemplate(conn, templateById('parent')!);
+    const agent = one<Record<string, unknown>>(conn, 'SELECT * FROM agents WHERE id = ?', result.id)!;
+    assert.equal(agent['name'], '家长');
+    assert.equal(agent['safety_level'], 'standard');
+    assert.equal(agent['max_steps'], 8);
+    assert.equal(agent['role_template'], 'parent');
+    assert.equal(agent['tts_voice_id'], 'TTS_QWEN__longanfengyue', '不带说话设置时直接用系统音色');
+    assert.match(String(agent['system_prompt']), /家长手边管作业与学分的助手/u);
+    assert.deepEqual(result.plugins, ['credits_parent', 'memory']);
+    assert.deepEqual(result.missing, []);
+    assert.equal(parentAgentId(conn), result.id, '家长 App 的默认落点就是这个角色');
+  });
+
   test('缺的东西如实列出:没有千问合成就没有音色,没配的 MCP', () => {
     run(conn, "UPDATE models SET enabled = 0 WHERE id = 'TTS_QWEN'");
     const result = applyTemplate(conn, templateById('ai-news')!);
@@ -129,7 +144,7 @@ describe('角色模板', () => {
   test('管理接口', async () => {
     const app = createApp(conn, { agent: { fetch: async () => new Response('{}'), bridge: new FakeBridge(), log: () => {} } });
     const list = await (await app.request('http://localhost/api/role-templates')).json() as { items: { id: string; created: number }[] };
-    assert.deepEqual(list.items.map((t) => t.id), ['xiaodan', 'tongtong', 'english-teacher', 'ai-news']);
+    assert.deepEqual(list.items.map((t) => t.id), ['xiaodan', 'parent', 'tongtong', 'english-teacher', 'ai-news']);
     const created = await app.request('http://localhost/api/role-templates/english-teacher/apply', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Lily 老师' }),
     });

@@ -354,7 +354,7 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
               <option value="">默认智能体</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
             </select>
-            <span class="field-hint">重新配对的旧设备会保留原来的智能体。</span>
+            <span class="field-hint">家长 App 不选时自动绑到「家长」智能体;重新配对的旧设备会保留原来的智能体。</span>
           </label>
           <label class="field">
             <span class="field-label">设备名称</span>

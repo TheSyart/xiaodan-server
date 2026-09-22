@@ -46,7 +46,7 @@ device ──wss──> xiaozhi server ──HTTP (Bearer)──> Xiaodan Consol
 ```
 
 Every field of that contract was checked against the upstream Java implementation and
-against the Python code that consumes it, and 240 tests hold it in place
+against the Python code that consumes it, and 355 tests hold it in place
 (`console/test/`). Read those test comments before changing an endpoint: each assertion
 records which server behaviour it protects.
 
@@ -244,8 +244,9 @@ in one click. Migration v11 removed the three former built-in skills (unchanged 
   `features.xiaodan ≥ 2`. Each chunk carries 512 bytes, so a whole message stays under the firmware's 1024-byte receive buffer. The
   Gallery page compares the original with the pixel art and can resend it to a device.
 
-- **Role templates**: "Create from template" on the Agents page builds a ready-made role. There are four templates:
+- **Role templates**: "Create from template" on the Agents page builds a ready-made role. There are five templates:
   - 小单: a general assistant.
+  - 家长: for parents — the full-permission credits tool plus long-term memory, brisk and un-coddling; the parent app binds to it by default.
   - 童童: a children's companion with child safety rules and a child voice.
   - 英语老师: an English tutor.
   - AI资讯官: an AI news presenter that links an MCP server whose name contains `aihot`.
@@ -400,7 +401,9 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
   - **Parent app identity**: the parent app binds like a device (OTA with `board.type = "xiaodan-app"`, bind code on the devices page)
     and then calls `/open/v1/credits` with the same `Device-Id` + `Client-Id` headers instead of a key: verified and an app device →
     read/write, recorded under the device's name; a toy's identity → 403 `not_app_device`; wrong or unbound → 401. App devices are
-    not children: they are left out of every child list and cannot be addressed by MAC (`credits/devices.ts`).
+    not children: they are left out of every child list and cannot be addressed by MAC (`credits/devices.ts`). Binding one without
+    picking an agent lands on the parent agent (`defaultAgentForBoard` in `identity.ts`: `role_template = 'parent'` first, then any
+    agent whose name contains 家长, then the default agent) — the app is for credits work, which a child's role cannot answer.
 - **Agent tool "学分"** (`console/src/credits/tools.ts`, enabled per role on the agents page). Whoever talks to the device is usually the
   child, so there are exactly three functions: `credits_status` (balance, today's homework, how far each reward is), `credits_report_done`
   (the child says "maths is done": a claim only, **no points**; the parent checks and scores it, with the claimed minutes prefilled) and
@@ -423,6 +426,12 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
   }
   ```
   Without it the page works as usual; only the external API is unreachable from the internet.
+  The panel's security fingerprint refuses a new `auth_request off` in the source editor **unless** the prefix is already registered
+  as a public path of that application: `serverOpsSecurityEnvelope` only skips bypass directives inside locations listed in
+  `publicPaths`. The panel UI has no public-path editor yet, so the order is: register `/open` in the application's `public_paths`
+  first (the panel's own table; the value has **no** trailing slash — that is what approves the `^~ /open/` prefix form), then add the
+  block above in the source editor and hit "apply" — validation, auditing and rollback still run through the panel.
+  `/xiaozhi/ota/` and `/xiaozhi/v1/` were added by the first-time takeover import, which skips the fingerprint comparison.
 
 ## Layout
 
@@ -670,7 +679,7 @@ and onnxruntime both work under the default profile.
 ## Tests
 
 ```bash
-npm test        # 240 tests: API contract, authorisation boundaries, device identity and binding, migrations, voices, agent runtime
+npm test        # 355 tests: API contract, authorisation boundaries, device identity and binding, migrations, voices, agent runtime
 npm run check   # typecheck plus tests
 python3 -m unittest discover -s server/tests -v   # 116 unit tests: plugin cards, weather parsing, tool-call text, Qwen speech and emotion tags
 ```

@@ -13,6 +13,7 @@
 import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import type { Db } from './db.ts';
 import { one, run } from './db.ts';
+import { APP_BOARD } from './credits/devices.ts';
 
 /** 待绑定行的空闲有效期。同一身份每轮询一次就顺延一次,所以设备一直开着码就一直有效。 */
 export const PENDING_IDLE_TTL_MINUTES = 10;
@@ -229,10 +230,32 @@ export function recordIdentityEvent(
 export type BindResult = { ok: true; mac: string } | { ok: false; status: 400 | 404 | 409; error: string };
 
 /**
+ * 家长 App 该用哪个智能体:先认角色模板建出来的「家长」(role_template = 'parent'),
+ * 再退到名字里带「家长」的智能体(手工建的也算),都没有就返回 undefined。
+ */
+export function parentAgentId(conn: Db): string | undefined {
+  const pick = (sql: string, ...params: unknown[]) => one<{ id: string }>(conn, sql, ...params)?.id;
+  return pick("SELECT id FROM agents WHERE role_template = 'parent' ORDER BY created_at LIMIT 1")
+    ?? pick("SELECT id FROM agents WHERE name LIKE '%家长%' ORDER BY is_default DESC, created_at LIMIT 1");
+}
+
+/**
+ * 新设备没指定智能体时的落点。家长 App(OTA 里报 board.type = xiaodan-app)默认绑到家长智能体——
+ * 它要办的是学分那摊事,落到孩子的角色上会答不出「给妹妹留作业」这种话。
+ */
+export function defaultAgentForBoard(conn: Db, board: string): string | undefined {
+  if (board === APP_BOARD) {
+    const parent = parentAgentId(conn);
+    if (parent) return parent;
+  }
+  return one<{ id: string }>(conn, 'SELECT id FROM agents ORDER BY is_default DESC, created_at LIMIT 1')?.id;
+}
+
+/**
  * 按设备屏幕上的六位码绑定。
  *
  * 身份机制上线前就已绑定的旧行没有哈希,这里原地写入哈希;别名为空、未指定智能体时保留原值,
- * 用户不必先解绑再绑。新设备未指定智能体时绑到默认智能体。
+ * 用户不必先解绑再绑。新设备未指定智能体时绑到默认智能体(家长 App 绑到家长智能体)。
  * 已经带哈希的设备行不允许被覆盖,必须先解绑。
  */
 export function bindByCode(conn: Db, bind: { code: string; agentId: string | null; alias: string }): BindResult {
@@ -260,8 +283,7 @@ export function bindByCode(conn: Db, bind: { code: string; agentId: string | nul
       pending.board, pending.board, pending.app_version, pending.app_version, pending.mac,
     );
   } else {
-    const agentId = bind.agentId
-      ?? one<{ id: string }>(conn, 'SELECT id FROM agents ORDER BY is_default DESC, created_at LIMIT 1')?.id;
+    const agentId = bind.agentId ?? defaultAgentForBoard(conn, pending.board);
     if (!agentId) return { ok: false, status: 400, error: '还没有任何智能体,请先创建一个' };
     run(
       conn,
