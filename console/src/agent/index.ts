@@ -12,3 +12,4 @@ import './memory/tools.ts';
 import './roles/tools.ts';
 import './intro.ts';
 import '../credits/tools.ts';
+import '../credits/parent-tools.ts';

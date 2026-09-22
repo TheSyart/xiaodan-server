@@ -14,11 +14,11 @@ import {
 
 export const CREDITS_PLUGIN = 'credits';
 
-const signed = (n: number) => (n > 0 ? `+${n}` : String(n));
+export const signed = (n: number) => (n > 0 ? `+${n}` : String(n));
 /** 名字比对前去掉空白与「作业」「的」这类虚字:「数学」能对上「数学作业」 */
-const norm = (text: string) => text.replace(/\s+/gu, '').replace(/作业|的/gu, '').toLowerCase();
+export const norm = (text: string) => text.replace(/\s+/gu, '').replace(/作业|的/gu, '').toLowerCase();
 
-function match<T extends { id: number; name: string }>(items: readonly T[], query: string): T[] {
+export function match<T extends { id: number; name: string }>(items: readonly T[], query: string): T[] {
   const q = norm(query);
   if (!q) return [];
   if (/^\d+$/u.test(query.trim())) {

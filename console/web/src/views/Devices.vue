@@ -472,7 +472,10 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
         <tbody>
           <tr v-for="device in devices" :key="device.mac">
             <td>
-              <div class="cell-main">{{ device.alias || '未命名设备' }}</div>
+              <div class="row" style="gap: 6px">
+                <span class="cell-main">{{ device.alias || '未命名设备' }}</span>
+                <span v-if="device.board === 'xiaodan-app'" class="tag" title="手机上的家长 App,不计学分">家长 App</span>
+              </div>
               <div class="row" style="gap: 2px; margin-top: 3px">
                 <span class="chip-mono">{{ device.mac }}</span>
                 <button

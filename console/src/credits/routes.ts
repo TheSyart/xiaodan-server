@@ -12,8 +12,8 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import type { Db } from '../db.ts';
-import { all, one } from '../db.ts';
 import { canonicalMac } from '../identity.ts';
+import { childDevice, childDevices } from './devices.ts';
 import { buildOpenApi } from './openapi.ts';
 import { createKey, keyById, listKeys, renameKey, revokeKey } from './open-key.ts';
 import { QUALITIES, QUALITY_LABEL, scoreResult } from './score.ts';
@@ -75,18 +75,17 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
     return parsed.data;
   }
 
-  /** 已绑定的设备;MAC 不认识或设备不存在都返回 undefined */
+  /** 已绑定的孩子(玩具设备);MAC 不认识、设备不存在、或者是家长 App 都返回 undefined */
   const device = (raw: unknown) => {
     const mac = typeof raw === 'string' && raw ? canonicalMac(raw) : null;
-    return mac ? one<{ mac: string; alias: string }>(conn, 'SELECT mac, alias FROM devices WHERE mac = ?', mac) : undefined;
+    return mac ? childDevice(conn, mac) : undefined;
   };
   const requireDevice = (raw: unknown) => {
     const found = device(raw);
     if (!found) throw new CreditError('设备不存在', 404, 'device_not_found');
     return { ...found };
   };
-  const allDevices = () => all<{ mac: string; alias: string }>(conn,
-    'SELECT mac, alias FROM devices ORDER BY last_connected_at DESC').map((row) => ({ ...row }));
+  const allDevices = () => childDevices(conn);
   /** 同一个处理函数同时挂 PATCH 与 PUT */
   const patch = (path: string, fn: (c: Context) => Response | Promise<Response>) => {
     app.patch(path, handle(fn));

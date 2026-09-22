@@ -3,6 +3,9 @@
 // 与 /api/credits 是同一份路由(routes.ts),这里只多套一层外部调用需要的东西:
 //   - CORS 放开所有来源:认的是 Bearer 密钥、不带 Cookie,开放来源不会让别的网页借用户的登录态;
 //   - openapi.json 不需要密钥,App 开发时直接拉;
+//   - 两种身份:命名密钥(Authorization: Bearer,给脚本、快捷指令),或者家长 App 自己的设备身份
+//     (Device-Id + Client-Id,与玩具连引擎时带的是同一对头)。App 已经像设备一样绑定过控制塔,
+//     不必再让家长去建密钥;只认 board = xiaodan-app 的设备,玩具的身份调不了这套接口;
 //   - 只读密钥做写操作回 403 read_only_key;
 //   - 写操作带 Idempotency-Key 时,同一把密钥、同一个值 24 小时内再来,回放第一次的结果不再写库——
 //     手机网络抖一下重试,不会扣两次分。
@@ -13,7 +16,9 @@ import type { Hono, MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import type { Db } from '../db.ts';
 import { one, run } from '../db.ts';
-import { anyActiveKey, findKey, requestKey, setRequestKey } from './open-key.ts';
+import { canonicalMac, hashClientId, parseClientId, resolveDevice } from '../identity.ts';
+import { isAppDevice } from './devices.ts';
+import { anyActiveKey, findKey, requestKey, setRequestKey, type ApiKey } from './open-key.ts';
 import { buildOpenApi } from './openapi.ts';
 import { creditRoutes } from './routes.ts';
 
@@ -25,7 +30,7 @@ export function mountOpenCredits(app: Hono, conn: Db, now: () => Date): void {
   app.use(`${OPEN_BASE}/*`, cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
+    allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'Device-Id', 'Client-Id'],
     exposeHeaders: ['Idempotent-Replayed'],
     maxAge: 600,
   }));
@@ -42,9 +47,35 @@ export function mountOpenCredits(app: Hono, conn: Db, now: () => Date): void {
   }));
 }
 
+/** 家长 App 的设备身份:核对 Client-Id 的哈希,且必须是 App 设备 */
+function appIdentity(conn: Db, deviceId: string, clientId: string): ApiKey | 'unauthorized' | 'not_app_device' {
+  const mac = canonicalMac(deviceId);
+  const secret = parseClientId(clientId);
+  if (!mac || !secret || resolveDevice(conn, mac, hashClientId(secret)).kind !== 'verified') return 'unauthorized';
+  const row = one<{ alias: string; board: string; rowid: number; created_at: string }>(conn,
+    'SELECT alias, board, rowid, created_at FROM devices WHERE mac = ?', mac);
+  if (!row || !isAppDevice(row)) return 'not_app_device';
+  // 防重复表按 key_id 分;设备用负的 rowid,和命名密钥的正 id 不会撞
+  return {
+    id: -row.rowid, name: row.alias || '家长 App', prefix: '', scope: 'write',
+    created_at: row.created_at, last_used_at: null, revoked_at: null,
+  };
+}
+
 function keyGuard(conn: Db, now: () => Date): MiddlewareHandler {
   return async (c, next) => {
     if (c.req.method === 'OPTIONS') return next();
+    const deviceId = c.req.header('device-id');
+    const clientId = c.req.header('client-id');
+    if (deviceId && clientId && !c.req.header('authorization')) {
+      const app = appIdentity(conn, deviceId, clientId);
+      if (app === 'unauthorized') return c.json({ error: '设备身份不对,或者这台设备还没绑定', code: 'unauthorized' }, 401);
+      if (app === 'not_app_device') {
+        return c.json({ error: '只有家长 App(OTA 里报 board.type = xiaodan-app 的设备)能用设备身份调这套接口', code: 'not_app_device' }, 403);
+      }
+      setRequestKey(c.req.raw, app);
+      return next();
+    }
     if (!anyActiveKey(conn)) {
       return c.json({ error: '外部接口未开启:先在控制台「学分 → 开放接口」创建密钥', code: 'unauthorized' }, 404);
     }

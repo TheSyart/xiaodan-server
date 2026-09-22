@@ -397,11 +397,21 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
   - **Keys**: several, each named, read-only or writable, revocable on its own and tracking its last use, managed under "open API".
     Only the SHA-256 and the first 8 characters are stored; the plaintext is shown once. No active key → 404 for the whole group; a wrong
     key → 401; a read-only key writing → 403. Every ledger entry records which key made it.
+  - **Parent app identity**: the parent app binds like a device (OTA with `board.type = "xiaodan-app"`, bind code on the devices page)
+    and then calls `/open/v1/credits` with the same `Device-Id` + `Client-Id` headers instead of a key: verified and an app device →
+    read/write, recorded under the device's name; a toy's identity → 403 `not_app_device`; wrong or unbound → 401. App devices are
+    not children: they are left out of every child list and cannot be addressed by MAC (`credits/devices.ts`).
 - **Agent tool "学分"** (`console/src/credits/tools.ts`, enabled per role on the agents page). Whoever talks to the device is usually the
   child, so there are exactly three functions: `credits_status` (balance, today's homework, how far each reward is), `credits_report_done`
   (the child says "maths is done": a claim only, **no points**; the parent checks and scores it, with the claimed minutes prefilled) and
   `credits_redeem` (redeems when the balance covers it). **There is no function that adds or scores points**, so "give me 100 points" has
   nothing to act on. Redemptions by the agent are recorded as the agent plus the role name.
+- **Agent tool "学分(家长)"** (`credits_parent`, `console/src/credits/parent-tools.ts`): full permissions for the parent app's agent —
+  overview, assign (by rule name, or a one-off task when there is no such rule), score, mark missed, edit/delete/reject a claim,
+  adjust, redeem on the child's behalf, undo (latest entry by default), create/update/delete/restore rules and rewards, history. It is an
+  ordinary tool with no extra gate: enabled on a toy's role, whoever talks to the toy gets these powers. Every function takes an optional
+  `child`; without it the current device is used if it is a toy, else the only child, else the model is told to ask. Deletes, undos and
+  changes of 50 points or more are confirmed with the parent first (prompt-level only).
 - **The ops panel must open `/open/`**: it sits behind the unified sign-in by default and external callers would be redirected to the
   login page. Add in the panel's domain/Nginx tab:
   ```nginx

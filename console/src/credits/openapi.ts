@@ -86,7 +86,7 @@ export const ENDPOINTS: Endpoint[] = [
 ];
 
 const ERROR_CODES = ['invalid', 'not_found', 'device_not_found', 'already_scored', 'archived', 'insufficient_balance',
-  'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized'];
+  'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized', 'not_app_device'];
 
 const toOpenApiPath = (path: string) => path.replace(/:(\w+)/gu, '{$1}');
 
@@ -136,7 +136,8 @@ export function buildOpenApi(basePath: string): Record<string, unknown> {
         '作业规则 → 每天布置 → 录入用时与质量算分 → 分数兑换奖励。按设备记账,一台设备就是一个孩子。',
         '',
         '约定:',
-        '- 鉴权 `Authorization: Bearer <密钥>`,密钥在控制台「学分 → 开放接口」创建,分只读与可写;只读密钥做写操作回 403 read_only_key。',
+        '- 鉴权两种:① `Authorization: Bearer <密钥>`,密钥在控制台「学分 → 开放接口」创建,分只读与可写,只读密钥做写操作回 403 read_only_key;'
+        + '② 家长 App 用自己的设备身份 `Device-Id` + `Client-Id`(与连引擎时同一对头),需先像设备一样绑定控制塔,且 OTA 里报 board.type = xiaodan-app。',
         '- 改动同时认 PATCH 与 PUT,都是部分更新。',
         '- 错误体 `{"error": "中文说明", "code": "机器可读代码"}`。',
         '- 列表返回 `{items, next}`,把 next 作为 before 传回去取下一页。',
@@ -147,9 +148,13 @@ export function buildOpenApi(basePath: string): Record<string, unknown> {
       ].join('\n'),
     },
     servers: [{ url: basePath }],
-    security: [{ bearer: [] }],
+    security: [{ bearer: [] }, { deviceId: [], clientId: [] }],
     components: {
-      securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } },
+      securitySchemes: {
+        bearer: { type: 'http', scheme: 'bearer' },
+        deviceId: { type: 'apiKey', in: 'header', name: 'Device-Id', description: '家长 App 的设备 MAC' },
+        clientId: { type: 'apiKey', in: 'header', name: 'Client-Id', description: '家长 App 的设备密钥(64 位十六进制)' },
+      },
       responses: {
         Error: {
           description: '出错',

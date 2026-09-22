@@ -277,9 +277,18 @@ export const PLUGINS: PluginDef[] = [
   },
   {
     code: 'credits',
-    label: '学分',
+    label: '学分(孩子)',
     description: '孩子问「我有多少分」「还差多少能看电视」时查学分;说「数学写完了」时记下来等爸爸妈妈检查打分;'
       + '分够时直接兑换奖励。智能体【不能加分、打分】,那些只能家长在「学分」页或 App 上做。',
+    keyless: true,
+    group: '学习',
+    fields: [],
+  },
+  {
+    code: 'credits_parent',
+    label: '学分(家长)',
+    description: '给家长用的完全权限:说话就能布置作业、打分、记没完成、改删作业、驳回申报、加减分、代兑换、撤销、'
+      + '增删改规则与奖励、看历史。适合开在家长 App 的智能体上;开在孩子玩具的角色上时,对着玩具说话的人都拥有这些权限。',
     keyless: true,
     group: '学习',
     fields: [],
