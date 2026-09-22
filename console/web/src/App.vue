@@ -81,6 +81,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     items: [
       { path: '/devices', label: '设备', icon: 'device' },
       { path: '/memory', label: '记忆', icon: 'brain' },
+      { path: '/credits', label: '学分', icon: 'medal' },
       { path: '/agents', label: '智能体', icon: 'bot' },
       { path: '/voices', label: '音色', icon: 'volume' },
       { path: '/playground', label: '试聊', icon: 'message' },

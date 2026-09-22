@@ -363,6 +363,45 @@ How emotion tags flow:
    the device have every tag removed, and a fragment that is only tags is carried into the next one. Upstream's post-split trimming strips
    square brackets, so the provider overrides that step (`qwen_audio.trim_segment`), and segments are never split inside a tag.
 
+## Homework credits
+
+**Kept per device** (one device = one child), under "学分" in the console navigation. **Not wired to the agent yet** — a page and an API
+only. Unbinding a device deletes its credits.
+
+- **Homework rules** (one set per device, values adjustable any time): a target duration; points for finishing on time; overtime counted
+  in steps of N minutes, each step costing some points, capped; points for each quality grade (excellent/good/fair/poor, may be
+  negative); points deducted for marking an assignment as not done.
+- **Scoring** (`console/src/credits/score.ts`, shared by the page preview and the stored result):
+  ```
+  time    = actual <= target ? on-time points : -min(cap, ceil((actual - target) / step) * per-step)
+  total   = time + quality            not done = -missed penalty
+  ```
+  Rounding up means one minute over already costs a step. Every score carries a one-sentence explanation.
+- **Rules are snapshotted when homework is assigned**: every value is copied onto the task row, so changing a rule only affects homework
+  assigned afterwards and past scores never move. The target duration can also be overridden for a single assignment.
+- **Balance = sum of the ledger**; there is no stored balance. Penalties may push it below zero; **redeeming requires enough points**
+  (409 "N short" otherwise). The ledger is append-only: undoing appends an equal and opposite entry and marks the original; undoing a
+  homework score puts the task back to pending so it can be re-entered.
+- **Two entry points, one router** (`console/src/credits/routes.ts`):
+  - `/api/credits/*` for the page, behind the console login (the ops panel's unified sign-in);
+  - `/open/credits/*` for external programs (phone shortcuts, scripts, the agent later), with `Authorization: Bearer <key>`. One key per
+    household, generated, rotated and disabled on the page; only its SHA-256 is stored and the plaintext is shown once. Without a key the
+    whole group answers 404; a wrong key gets 401. Key management exists only under `/api`, so an external key cannot replace itself.
+  - Main endpoints: `GET overview`, `GET/POST/PUT/DELETE rules`, `POST rules/preview`, `GET/POST tasks`, `POST tasks/:id/result`
+    (`preview: true` computes without storing), `POST tasks/:id/missed`, `GET/POST/PUT/DELETE rewards`, `POST redeem`, `POST adjust`,
+    `GET ledger`, `POST ledger/:id/revert`. Put MACs in URLs without colons (`4c11ae317a30`).
+- **The ops panel must open `/open/`**: it sits behind the unified sign-in by default and external callers would be redirected to the
+  login page. Add in the panel's domain/Nginx tab:
+  ```nginx
+  location ^~ /open/ {
+      auth_request off;
+      proxy_pass http://127.0.0.1:8002;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+  }
+  ```
+  Without it the page works as usual; only the external API is unreachable from the internet.
+
 ## Layout
 
 ```
@@ -376,10 +415,12 @@ console/            the console (Node + Vue)
     schema.sql        ← v0 baseline schema
     migrations.ts     ← later schema changes, applied in order via PRAGMA user_version; long ones live in migrations/
     voice/            ← voices: speaking settings (pure functions), system voice list and sync, Model Studio preview, voice design and cloning, one-time sample links
+    credits/          ← homework credits: scoring, rule snapshots, ledger and undo, the two entry points and the external key
     agent/            ← agent runtime: turn endpoint, multi-step loop, prompts, context, tool registry, device-bridge client;
                         one subdirectory per capability (search, mcp, skills, reminders, media, vocab, image, roles, memory)
     cli.ts            ← CLI: set a password, import keys from an old config
-  web/                frontend: devices, agents, voices, playground, models, chat logs, pronunciation fixes, settings;
+  web/                frontend: devices, memory, credits, agents, voices, playground, tools, skills, MCP, content, gallery, reminders,
+                      models, pronunciation fixes, settings;
                       light and dark themes, no external assets (same-origin Content-Security-Policy)
   test/               contract tests
 server/             companion files for the xiaozhi server

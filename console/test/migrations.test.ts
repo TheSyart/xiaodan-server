@@ -415,6 +415,45 @@ test('v12:老记忆一条不少并带上分类,新表与定位开关就位,服�
   assert.throws(() => exec(conn, "INSERT INTO service_providers (id, kind, name, provider) VALUES ('svc_3', 'nope', 'x', 'x')"));
 });
 
+test('v13:学分四张表就位,CHECK 挡住非法值,删设备连学分一起清掉', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(12));
+  seed(conn);
+  const MAC = '4c:11:ae:31:7a:30';
+  exec(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', MAC, DEFAULT_AGENT_ID);
+
+  runMigrations(conn);
+
+  for (const table of ['credit_rules', 'credit_tasks', 'credit_rewards', 'credit_ledger']) {
+    assert.ok(tableExists(conn, table), table);
+  }
+  assert.ok(indexes(conn, 'credit_tasks').includes('idx_credit_tasks_day'));
+  assert.ok(indexes(conn, 'credit_ledger').includes('idx_credit_ledger_mac'));
+
+  exec(conn, "INSERT INTO credit_rules (mac, name, target_minutes) VALUES (?, '数学', 40)", MAC);
+  const rule = one<{ ontime_points: number; overtime_step: number; q_poor: number; missed_penalty: number }>(
+    conn, 'SELECT * FROM credit_rules')!;
+  assert.deepEqual([rule.ontime_points, rule.overtime_step, rule.q_poor, rule.missed_penalty], [5, 10, -2, 5], '默认值');
+  exec(conn, "INSERT INTO credit_rewards (mac, name, cost) VALUES (?, '看电视', 20)", MAC);
+  exec(conn, "INSERT INTO credit_ledger (mac, delta, kind) VALUES (?, 5, 'adjust')", MAC);
+  exec(conn,
+    `INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes, ontime_points, overtime_step, overtime_penalty,
+       overtime_cap, q_excellent, q_good, q_fair, q_poor, missed_penalty)
+     VALUES (?, '2026-09-22', 1, '数学', 40, 5, 10, 1, 5, 5, 3, 0, -2, 5)`, MAC);
+
+  assert.throws(() => exec(conn, "INSERT INTO credit_rewards (mac, name, cost) VALUES (?, '白送', 0)", MAC), '兑换至少 1 分');
+  assert.throws(() => exec(conn, "INSERT INTO credit_rules (mac, name, target_minutes) VALUES (?, '太长', 601)", MAC));
+  assert.throws(() => exec(conn, "UPDATE credit_tasks SET quality = 'great'"), '质量只有四档');
+  assert.throws(() => exec(conn, "INSERT INTO credit_ledger (mac, delta, kind) VALUES (?, 1, 'gift')", MAC));
+  assert.throws(() => exec(conn, "UPDATE credit_tasks SET day = '9/22'"), '日期必须是 YYYY-MM-DD');
+
+  exec(conn, 'DELETE FROM devices WHERE mac = ?', MAC);
+  for (const table of ['credit_rules', 'credit_tasks', 'credit_rewards', 'credit_ledger']) {
+    assert.equal(one<{ n: number }>(conn, `SELECT COUNT(*) AS n FROM ${table}`)!.n, 0, `${table} 随设备删除`);
+  }
+});
+
 describe('关外键执行的迁移', () => {
   const withMigration = (up: (db: Db) => void) => [...MIGRATIONS, { version: LATEST + 1, name: 'fk-off', disableForeignKeys: true, up }];
 

@@ -11,6 +11,7 @@ import { migrateQwenOnly } from './migrations/v8-qwen-only.ts';
 import { migrateCapabilityPages } from './migrations/v10-capability-pages.ts';
 import { migrateRetireBuiltinSkills } from './migrations/v11-retire-builtin-skills.ts';
 import { migrateMemoryAndLocation } from './migrations/v12-memory-and-location.ts';
+import { migrateCredits } from './migrations/v13-credits.ts';
 
 export interface Migration {
   version: number;
@@ -364,5 +365,11 @@ export const MIGRATIONS: readonly Migration[] = [
     disableForeignKeys: true,
     // 记忆独立成页(热记忆分类、冷记忆档案、变更留痕)与设备定位。重建了 device_memory 与 service_providers。见迁移文件开头
     up: migrateMemoryAndLocation,
+  },
+  {
+    version: 13,
+    name: 'credits',
+    // 学分奖惩:作业规则、每天的作业(布置时抄规则快照)、奖励目录、流水。只建新表。见迁移文件开头
+    up: migrateCredits,
   },
 ];

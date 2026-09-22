@@ -576,3 +576,89 @@ export interface VocabProgress {
   right: number;
   wrong: number;
 }
+
+// ---- 学分奖惩 ----
+
+export type CreditQuality = 'excellent' | 'good' | 'fair' | 'poor';
+
+/** 规则上的数值;布置作业时整份抄进作业的快照 */
+export interface CreditParams {
+  target_minutes: number;
+  ontime_points: number;
+  overtime_step: number;
+  overtime_penalty: number;
+  overtime_cap: number;
+  q_excellent: number;
+  q_good: number;
+  q_fair: number;
+  q_poor: number;
+  missed_penalty: number;
+}
+
+export interface CreditRule extends CreditParams {
+  id: number;
+  mac: string;
+  name: string;
+  archived: number;
+}
+
+export interface CreditTask extends CreditParams {
+  id: number;
+  mac: string;
+  day: string;
+  rule_id: number | null;
+  name: string;
+  status: 'pending' | 'done' | 'missed';
+  actual_minutes: number | null;
+  quality: CreditQuality | null;
+  note: string;
+  time_points: number | null;
+  quality_points: number | null;
+  total_points: number | null;
+  scored_at: string | null;
+  ledger_id: number | null;
+}
+
+export interface CreditScore {
+  time_points: number;
+  quality_points: number;
+  total: number;
+  explain: string;
+}
+
+export interface CreditReward {
+  id: number;
+  mac: string;
+  name: string;
+  cost: number;
+  emoji: string;
+}
+
+export interface CreditLedgerItem {
+  id: number;
+  delta: number;
+  kind: 'task' | 'missed' | 'redeem' | 'adjust' | 'revert';
+  ref_id: number | null;
+  title: string;
+  note: string;
+  reverted_by: number | null;
+  created_at: string;
+  balance_after: number;
+}
+
+export interface CreditOverview {
+  devices: { mac: string; alias: string }[];
+  device: { mac: string; alias: string } | null;
+  today: string;
+  balance?: number;
+  today_summary?: { total: number; done: number; points: number };
+  counts?: { rules: number; rewards: number };
+  qualities?: { key: CreditQuality; label: string }[];
+}
+
+export interface CreditKeyStatus {
+  enabled: boolean;
+  created_at: string | null;
+  last_used_at: string | null;
+  key?: string;
+}
