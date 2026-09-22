@@ -10,7 +10,6 @@ import { EDITABLE_MODEL_TYPES, MODEL_TYPES, PLUGINS, PROVIDERS, providerDef, typ
 import { DEFAULT_SETTINGS, readAllSettings } from './settings.ts';
 import { SECRET_KEY } from './seed.ts';
 import { creditRoutes } from './credits/routes.ts';
-import { OPEN_KEY_SETTING } from './credits/open-key.ts';
 import {
   authMode, authorized, clearCookie, isInitialized, issueCookie, login, logout, requireAuth,
   sessionToken, setAdmin,
@@ -194,7 +193,7 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     tx(conn, () => {
       for (const [key, value] of Object.entries(parsed.data)) {
         // 密钥有专用的轮换接口,不允许从这里改成任意值
-        if (key === SECRET_KEY || key === OPEN_KEY_SETTING) continue;
+        if (key === SECRET_KEY) continue;
         run(
           conn,
           "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = ?",
@@ -389,8 +388,8 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     app.route('/devices', locateRoutes(deps.agent));
   }
 
-  // ---- 学分奖惩(不依赖智能体;同一份路由另挂在 /open/credits 给外部程序,见 app.ts) ----
-  app.route('/credits', creditRoutes(conn, { now: deps.agent?.now, keyAdmin: true }));
+  // ---- 学分奖惩(不依赖智能体;同一份路由另挂在 /open/v1/credits 给外部程序,见 credits/open-api.ts) ----
+  app.route('/credits', creditRoutes(conn, { now: deps.agent?.now, keyAdmin: true, basePath: '/api/credits' }));
 
   // ---- 智能体 ----
 

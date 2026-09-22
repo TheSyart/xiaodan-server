@@ -281,7 +281,7 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
 
 ## 学分奖惩
 
-**按设备记账**(一台设备 = 一个孩子),控制台导航「学分」。**这一期不接智能体**,只有页面与接口。解绑设备时学分一并删除。
+**按设备记账**(一台设备 = 一个孩子)。控制台导航里「学分」单独一组:今日作业、兑换奖励、作业规则、流水、统计、开放接口。解绑设备时学分一并删除。
 
 - **作业规则**(每台设备自己一套,数值随时可调):规定用时;按时完成得几分;超时每几分钟算一档、每档扣几分、最多扣几分;
   质量优/良/中/差各得几分(可以是负分);标记「没完成」扣几分。
@@ -295,14 +295,23 @@ OTA 响应恒为 HTTP 200,结果看顶层 `status`:`bound`、`unbound`、`identi
   布置时还可以为这一次临时改规定用时。
 - **余额 = 流水之和**,不另存余额。惩罚可以把余额扣成负数;**兑换必须够分**,不够时回 409「还差 N 分」。
   流水只追加:撤销是追加一条等额反向的记录并在原记录上注明;撤销的是作业打分时,作业回到「待完成」可以重新录入。
-- **两套接口入口、同一份路由**(`console/src/credits/routes.ts`):
-  - `/api/credits/*`:页面用,走控制台的登录(运维面板统一登录);
-  - `/open/credits/*`:给外部程序(手机快捷指令、别的程序、以后的智能体),`Authorization: Bearer <密钥>`。
-    密钥全家一把,在学分页生成、轮换、关闭;库里只存 SHA-256,明文只在生成时显示一次;没生成时整组 404,错密钥 401。
-    密钥管理接口只在 `/api` 下,外部密钥不能自己换自己。
-  - 主要接口:`GET overview`、`GET/POST/PUT/DELETE rules`、`POST rules/preview`、`GET/POST tasks`、`POST tasks/:id/result`
-    (带 `preview: true` 只算不存)、`POST tasks/:id/missed`、`GET/POST/PUT/DELETE rewards`、`POST redeem`、`POST adjust`、
-    `GET ledger`、`POST ledger/:id/revert`。MAC 拼进 URL 请用去冒号的紧凑写法(`4c11ae317a30`)。
+- **两套接口入口、同一份路由**(`console/src/credits/routes.ts`):页面用 `/api/credits/*`(控制台登录);
+  App、快捷指令、脚本用 **`/open/v1/credits/*`**(`Authorization: Bearer <密钥>`,挂载与守卫在 `credits/open-api.ts`)。
+  - **完整说明在 `/open/v1/credits/openapi.json`**(OpenAPI 3.1,不需要密钥)。请求体的结构与取值范围由路由校验用的同一批 zod 定义生成
+    (`credits/schemas.ts` → `credits/openapi.ts`),测试会核对它与实际注册的端点一一对应。
+  - 资源:孩子(只读)、规则、作业(含临时作业、孩子报完成/驳回)、奖励、兑换、手动奖惩、流水、统计、元信息;
+    规则与奖励支持按 id 读取、部分更新、停用后恢复、排序。
+  - 约定:修改同时认 PATCH 与 PUT,都是部分更新;错误体 `{error, code}`(`code` 机器可读,如 `insufficient_balance`、
+    `already_scored`、`read_only_key`);列表 `{items, next}` 游标翻页;MAC 拼进 URL 用紧凑写法。
+  - **防重复提交**:写操作可带 `Idempotency-Key`,同一把密钥、同一个值 24 小时内再来就回放第一次的结果(响应头
+    `Idempotent-Replayed: true`),网络抖动重试不会重复记分;同一个值换了请求回 422。
+  - **CORS** 对 `/open/v1/*` 放开所有来源:认的是 Bearer 密钥、不带 Cookie,开放来源不会让别的网页借用户的登录态。
+  - **密钥**:多把,各自起名、分只读/可写、单独吊销、各记最后使用时间,在「学分 → 开放接口」管理;库里只存 SHA-256 与前 8 位,
+    明文只在创建时显示一次。一把都没有时整组 404,错密钥 401,只读密钥写入 403。流水记下每一笔来自哪把密钥。
+- **智能体工具「学分」**(`console/src/credits/tools.ts`,在智能体页给角色打开):对着设备说话的多半是孩子本人,所以只有三个函数——
+  `credits_status`(余额、今天的作业、每个奖励还差多少)、`credits_report_done`(孩子说「数学写完了」:只记申报,**不加分**,
+  家长在今日作业页检查打分,录入时用时预填孩子报的)、`credits_redeem`(够分直接兑换)。**没有任何加分、打分的函数**,
+  孩子说「给我加 100 分」时模型手里根本没有能照做的工具。智能体做的兑换在流水里记成「智能体」加角色名。
 - **外部接口要在运维面板放行 `/open/`**:它默认在统一登录后面,外部程序会被 302 到登录页。在面板「域名与 Nginx」加:
   ```nginx
   location ^~ /open/ {

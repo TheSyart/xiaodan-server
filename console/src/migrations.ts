@@ -12,6 +12,7 @@ import { migrateCapabilityPages } from './migrations/v10-capability-pages.ts';
 import { migrateRetireBuiltinSkills } from './migrations/v11-retire-builtin-skills.ts';
 import { migrateMemoryAndLocation } from './migrations/v12-memory-and-location.ts';
 import { migrateCredits } from './migrations/v13-credits.ts';
+import { migrateCreditsApi } from './migrations/v14-credits-api.ts';
 
 export interface Migration {
   version: number;
@@ -371,5 +372,11 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'credits',
     // 学分奖惩:作业规则、每天的作业(布置时抄规则快照)、奖励目录、流水。只建新表。见迁移文件开头
     up: migrateCredits,
+  },
+  {
+    version: 14,
+    name: 'credits-api',
+    // 学分二期:多把外部密钥(一期那把搬过来)、孩子报完成、流水记来源、外部写接口防重复。只加表加列。见迁移文件开头
+    up: migrateCreditsApi,
   },
 ];

@@ -11,3 +11,4 @@ import './image/tool.ts';
 import './memory/tools.ts';
 import './roles/tools.ts';
 import './intro.ts';
+import '../credits/tools.ts';

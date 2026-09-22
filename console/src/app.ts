@@ -17,8 +17,7 @@ import { adminApi, type AdminDeps } from './admin-api.ts';
 import { managerApi } from './manager-api.ts';
 import { otaApi } from './ota.ts';
 import { sampleRoutes } from './voice/samples.ts';
-import { creditRoutes } from './credits/routes.ts';
-import { keyEnabled, verifyKey } from './credits/open-key.ts';
+import { mountOpenCredits } from './credits/open-api.ts';
 
 export interface AppOptions {
   /** 前端构建产物目录。不存在时只提供接口,便于纯后端开发与测试。 */
@@ -99,17 +98,8 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
 
   app.route('/api', adminApi(conn, { ...options.admin, agent: agentDeps }));
 
-  // 学分的外部接口:与 /api/credits 同一份路由,但按 Bearer 密钥鉴权(密钥在学分页生成)。
-  // 失败按常规回 HTTP 401,不学 manager-api 那套「200 + body code」——那是为了兼容上游引擎。
-  // nginx 上 /open/ 要单独放行统一登录,否则外部程序会被 302 到登录页(README「学分奖惩」一节)。
-  app.use('/open/credits/*', async (c, next) => {
-    if (!keyEnabled(conn)) return c.json({ error: '外部接口未开启:先在控制台「学分」页生成密钥' }, 404);
-    const auth = c.req.header('authorization') ?? '';
-    const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (!verifyKey(conn, key, agentDeps.now?.() ?? new Date())) return c.json({ error: 'unauthorized' }, 401);
-    return next();
-  });
-  app.route('/open/credits', creditRoutes(conn, { now: agentDeps.now }));
+  // 学分的外部接口 /open/v1/credits:与 /api/credits 同一份路由,外加 CORS、密钥守卫与防重复提交(见 credits/open-api.ts)
+  mountOpenCredits(app, conn, () => agentDeps.now?.() ?? new Date());
 
   // 前端。SPA 路由要求"找不到文件就回 index.html",否则刷新子页面会 404。
   const webRoot = options.webRoot;

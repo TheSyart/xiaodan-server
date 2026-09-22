@@ -48,6 +48,7 @@ export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
+  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
   /** 提交 JSON、拿回二进制(音频试听) */
   async postForBlob(path: string, body: unknown): Promise<Blob> {
@@ -617,6 +618,10 @@ export interface CreditTask extends CreditParams {
   total_points: number | null;
   scored_at: string | null;
   ledger_id: number | null;
+  /** 孩子通过智能体说「做完了」的时间;还没打分时页面据此提示家长检查 */
+  claimed_at: string | null;
+  claim_note: string;
+  claimed_minutes: number | null;
 }
 
 export interface CreditScore {
@@ -632,6 +637,7 @@ export interface CreditReward {
   name: string;
   cost: number;
   emoji: string;
+  archived: number;
 }
 
 export interface CreditLedgerItem {
@@ -642,6 +648,9 @@ export interface CreditLedgerItem {
   title: string;
   note: string;
   reverted_by: number | null;
+  /** 谁动的:页面 / 外部密钥 / 智能体 */
+  source: 'admin' | 'api' | 'agent';
+  actor: string;
   created_at: string;
   balance_after: number;
 }
@@ -656,9 +665,31 @@ export interface CreditOverview {
   qualities?: { key: CreditQuality; label: string }[];
 }
 
-export interface CreditKeyStatus {
-  enabled: boolean;
-  created_at: string | null;
+export interface CreditChild {
+  mac: string;
+  alias: string;
+  balance: number;
+  today: { total: number; done: number; points: number };
+  pending_claims: number;
+}
+
+export interface CreditApiKey {
+  id: number;
+  name: string;
+  prefix: string;
+  scope: 'read' | 'write';
+  created_at: string;
   last_used_at: string | null;
-  key?: string;
+  revoked_at: string | null;
+}
+
+export interface CreditStats {
+  from: string;
+  to: string;
+  balance: number;
+  days: { day: string; earned: number; penalty: number; spent: number; net: number }[];
+  totals: { earned: number; penalty: number; spent: number; net: number };
+  tasks: { name: string; assigned: number; done: number; missed: number; ontime: number; avg_minutes: number | null; avg_points: number | null }[];
+  completion_rate: number | null;
+  ontime_rate: number | null;
 }

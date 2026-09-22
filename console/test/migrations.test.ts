@@ -454,6 +454,49 @@ test('v13:学分四张表就位,CHECK 挡住非法值,删设备连学分一起�
   }
 });
 
+test('v14:一期那把单密钥搬成「默认密钥」且原明文照样能用;新列默认值;来源 CHECK', async () => {
+  const { createHash } = await import('node:crypto');
+  const { findKey } = await import('../src/credits/open-key.ts');
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(13));
+  seed(conn);
+  const MAC = '4c:11:ae:31:7a:30';
+  exec(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', MAC, DEFAULT_AGENT_ID);
+  const plaintext = 'xdc_phase-one-key';
+  exec(conn, "INSERT INTO settings (key, value, value_type, internal) VALUES ('credits.open_key', ?, 'json', 1)",
+    JSON.stringify({ hash: createHash('sha256').update(plaintext).digest('hex'), created_at: '2026-09-22T01:00:00.000Z', last_used_at: null }));
+  exec(conn, "INSERT INTO credit_ledger (mac, delta, kind, title) VALUES (?, 5, 'adjust', '一期的流水')", MAC);
+  exec(conn,
+    `INSERT INTO credit_tasks (mac, day, name, target_minutes, ontime_points, overtime_step, overtime_penalty,
+       overtime_cap, q_excellent, q_good, q_fair, q_poor, missed_penalty)
+     VALUES (?, '2026-09-22', '数学', 40, 5, 10, 1, 5, 5, 3, 0, -2, 5)`, MAC);
+
+  runMigrations(conn);
+
+  const keys = all<{ name: string; scope: string; prefix: string }>(conn, 'SELECT name, scope, prefix FROM credit_api_keys').map((r) => ({ ...r }));
+  assert.deepEqual(keys, [{ name: '默认密钥', scope: 'write', prefix: 'xdc_' }]);
+  assert.equal(findKey(conn, plaintext)?.name, '默认密钥', '一期发出去的密钥照样能用');
+  assert.equal(value(conn, 'credits.open_key'), undefined, '旧 settings 行删掉了');
+
+  const ledger = one<{ source: string; actor: string }>(conn, 'SELECT source, actor FROM credit_ledger')!;
+  assert.deepEqual({ ...ledger }, { source: 'admin', actor: '' }, '老流水都算页面上做的');
+  const task = one<{ claimed_at: string | null; claim_note: string }>(conn, 'SELECT claimed_at, claim_note FROM credit_tasks')!;
+  assert.deepEqual({ ...task }, { claimed_at: null, claim_note: '' });
+  assert.throws(() => exec(conn, "INSERT INTO credit_ledger (mac, delta, kind, source) VALUES (?, 1, 'adjust', 'robot')", MAC));
+  assert.throws(() => exec(conn, "INSERT INTO credit_api_keys (name, hash, scope) VALUES ('x', ?, 'admin')", 'a'.repeat(64)));
+  assert.ok(tableExists(conn, 'credit_idempotency'));
+});
+
+test('v14:一期没开过外部接口时不凭空造密钥', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(13));
+  seed(conn);
+  runMigrations(conn);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_api_keys')!.n, 0);
+});
+
 describe('关外键执行的迁移', () => {
   const withMigration = (up: (db: Db) => void) => [...MIGRATIONS, { version: LATEST + 1, name: 'fk-off', disableForeignKeys: true, up }];
 

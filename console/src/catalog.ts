@@ -276,6 +276,15 @@ export const PLUGINS: PluginDef[] = [
     fields: [{ key: 'book', label: '单词书', type: 'select', optionsFrom: 'vocab_books', hint: '留空用内容库里排第一的那本' }],
   },
   {
+    code: 'credits',
+    label: '学分',
+    description: '孩子问「我有多少分」「还差多少能看电视」时查学分;说「数学写完了」时记下来等爸爸妈妈检查打分;'
+      + '分够时直接兑换奖励。智能体【不能加分、打分】,那些只能家长在「学分」页或 App 上做。',
+    keyless: true,
+    group: '学习',
+    fields: [],
+  },
+  {
     code: 'image',
     label: '画画',
     description: '按描述画一幅画:设备屏幕显示 128×128 的像素画版本(需要新固件),原图保存在画廊。文生图模型在「模型」页添加。',

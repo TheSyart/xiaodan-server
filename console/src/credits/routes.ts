@@ -1,72 +1,79 @@
-// 学分接口。同一份路由挂两次:
-//   /api/credits/*   控制台页面用,走 /api 的登录守卫(运维面板的统一登录);
-//   /open/credits/*  外部程序用(家长手机快捷指令、别的程序、以后的智能体),按 Bearer 密钥鉴权,见 app.ts。
-// 密钥的生成、轮换、关闭只挂在 /api 下:外部密钥不能自己换掉自己。
+// 学分接口 v1。同一份路由挂两处:
+//   /api/credits/*      控制台页面用,走 /api 的登录守卫(运维面板的统一登录);
+//   /open/v1/credits/*  外部程序用(App、手机快捷指令、脚本),按 Bearer 密钥鉴权,见 app.ts。
+// 密钥的增删改只挂在 /api 下:外部密钥不能自己给自己换权限。
 //
-// 约定与控制台其他接口一致:参数 zod 校验,错误回 {error: 中文} + 400/404/409;
-// MAC 先过 canonicalMac(冒号、连字符、12 位紧凑形式都认——外部调用拼 URL 建议用紧凑形式)。
+// 给调用方的约定(openapi.json 里也写着):
+//   - 改动同时认 PATCH 与 PUT,都是部分更新;
+//   - 错误体 {error: 中文说明, code: 机器可读代码},HTTP 状态 400/403/404/409/422;
+//   - 列表 {items, next},带 before 游标翻页,limit 最大 100;
+//   - MAC 冒号、连字符、12 位紧凑写法都认,拼进 URL 请用紧凑写法(运维面板会误判 %3A)。
 
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import type { Db } from '../db.ts';
 import { all, one } from '../db.ts';
 import { canonicalMac } from '../identity.ts';
-import { disableKey, keyStatus, rotateKey } from './open-key.ts';
+import { buildOpenApi } from './openapi.ts';
+import { createKey, keyById, listKeys, renameKey, revokeKey } from './open-key.ts';
 import { QUALITIES, QUALITY_LABEL, scoreResult } from './score.ts';
 import {
-  CreditError, PARAM_KEYS, adjust, assignTasks, balance, createReward, createRule, daySummary, deleteReward, deleteRule,
-  deleteTask, ledgerPage, listRewards, listRules, listTasks, missTask, previewTask, redeem, revert, scoreTask,
-  seedExamples, taskById, today, updateReward, updateRule, updateTask,
+  adjustBody, examplesBody, keyCreate, keyUpdate, LEDGER_KINDS, redeemBody, reorderBody, rewardCreate, rewardUpdate,
+  RULE_RANGES, ruleCreate, rulePreview, ruleUpdate, taskAssign, taskClaim, taskCustom, taskMissed, taskResult,
+  TASK_STATUSES, taskUpdate, day as daySchema,
+} from './schemas.ts';
+import {
+  ADMIN, CreditError, adjust, assignTasks, balance, childView, claimTask, createCustomTask, createReward, createRule,
+  daySummary, deleteReward, deleteRule, deleteTask, ledgerById, ledgerPage, listRewards, listRules, listTasks, missTask,
+  pendingClaims, previewTask, queryTasks, redeem, reorder, requireReward, requireRule, requireTask, restoreReward,
+  restoreRule, revert, scoreTask, seedExamples, shiftDay, stats, today, unclaimTask, updateReward, updateRule, updateTask,
+  type Actor, type LedgerKind, type TaskStatusFilter,
 } from './store.ts';
 
 export interface CreditRouteOptions {
   now?: (() => Date) | undefined;
   /** 只在 /api 下为 true:挂上密钥管理接口 */
   keyAdmin?: boolean;
+  /** 这一次请求是谁:页面、哪把外部密钥。写流水时记下来 */
+  actorOf?: (c: Context) => Actor;
+  /** 挂载的前缀,写进 openapi.json 的 servers */
+  basePath?: string;
 }
 
-const DAY = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, '日期格式应为 YYYY-MM-DD');
-const int = (min: number, max: number) => z.number().int().min(min).max(max);
-const name = z.string().trim().min(1, '名称不能为空').max(40, '名称最多 40 个字');
-
-const RULE_RANGES: Record<(typeof PARAM_KEYS)[number], [number, number]> = {
-  target_minutes: [1, 600],
-  ontime_points: [-100, 100],
-  overtime_step: [1, 120],
-  overtime_penalty: [0, 100],
-  overtime_cap: [0, 100],
-  q_excellent: [-100, 100],
-  q_good: [-100, 100],
-  q_fair: [-100, 100],
-  q_poor: [-100, 100],
-  missed_penalty: [0, 100],
-};
-const ruleParams = z.object(
-  Object.fromEntries(PARAM_KEYS.map((key) => [key, int(...RULE_RANGES[key]).optional()])) as {
-    [K in (typeof PARAM_KEYS)[number]]: z.ZodOptional<z.ZodNumber>
-  },
-);
-
-const body = async (c: Context) => c.req.json().catch(() => ({}));
 const firstIssue = (error: z.ZodError) => error.issues[0]?.message ?? '参数不正确';
 const idParam = (c: Context) => {
   const id = Number(c.req.param('id'));
-  return Number.isInteger(id) && id > 0 ? id : 0;
+  if (!Number.isInteger(id) || id <= 0) throw new CreditError('id 不对', 404, 'not_found');
+  return id;
 };
+const limitParam = (c: Context) => Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 30) || 30));
 
 export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
   const app = new Hono({ strict: false });
   const now = () => options.now?.() ?? new Date();
+  const actorOf = (c: Context) => options.actorOf?.(c) ?? ADMIN;
 
-  /** 业务错误统一转成 {error} */
+  /** 业务错误统一转成 {error, code} */
   const handle = (fn: (c: Context) => Response | Promise<Response>) => async (c: Context) => {
     try {
       return await fn(c);
     } catch (error) {
-      if (error instanceof CreditError) return c.json({ error: error.message }, error.status);
+      if (error instanceof CreditError) return c.json({ error: error.message, code: error.code }, error.status);
       throw error;
     }
   };
+
+  /** 按 zod 定义解析请求体;不合法抛 400 invalid */
+  async function parse<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> {
+    const parsed = schema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new CreditError(firstIssue(parsed.error), 400, 'invalid');
+    return parsed.data;
+  }
+  function query<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) throw new CreditError(firstIssue(parsed.error), 400, 'invalid');
+    return parsed.data;
+  }
 
   /** 已绑定的设备;MAC 不认识或设备不存在都返回 undefined */
   const device = (raw: unknown) => {
@@ -75,15 +82,33 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
   };
   const requireDevice = (raw: unknown) => {
     const found = device(raw);
-    if (!found) throw new CreditError('设备不存在', 404);
-    return found;
+    if (!found) throw new CreditError('设备不存在', 404, 'device_not_found');
+    return { ...found };
+  };
+  const allDevices = () => all<{ mac: string; alias: string }>(conn,
+    'SELECT mac, alias FROM devices ORDER BY last_connected_at DESC').map((row) => ({ ...row }));
+  /** 同一个处理函数同时挂 PATCH 与 PUT */
+  const patch = (path: string, fn: (c: Context) => Response | Promise<Response>) => {
+    app.patch(path, handle(fn));
+    app.put(path, handle(fn));
   };
 
-  // ---- 概览 ----
+  // ---- 接口描述、元信息 ----
+
+  app.get('/openapi.json', (c) => c.json(buildOpenApi(options.basePath ?? '/open/v1/credits')));
+
+  app.get('/meta', (c) => c.json({
+    today: today(now()),
+    qualities: QUALITIES.map((key) => ({ key, label: QUALITY_LABEL[key] })),
+    task_statuses: TASK_STATUSES,
+    ledger_kinds: LEDGER_KINDS,
+    ranges: { ...RULE_RANGES, cost: [1, 100000], adjust: [-1000, 1000], actual_minutes: [0, 1440] },
+  }));
+
+  // ---- 孩子(= 设备,只读) ----
 
   app.get('/overview', handle((c) => {
-    const devices = all<{ mac: string; alias: string }>(conn,
-      'SELECT mac, alias FROM devices ORDER BY last_connected_at DESC').map((row) => ({ ...row }));
+    const devices = allDevices();
     const found = device(c.req.query('mac')) ?? (devices[0] ? device(devices[0].mac) : undefined);
     const day = today(now());
     if (!found) return c.json({ devices, device: null, today: day });
@@ -93,19 +118,31 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
       today: day,
       balance: balance(conn, found.mac),
       today_summary: daySummary(conn, found.mac, day),
-      counts: {
-        rules: listRules(conn, found.mac).length,
-        rewards: listRewards(conn, found.mac).length,
-      },
+      pending_claims: pendingClaims(conn, found.mac),
+      counts: { rules: listRules(conn, found.mac).length, rewards: listRewards(conn, found.mac).length },
       qualities: QUALITIES.map((key) => ({ key, label: QUALITY_LABEL[key] })),
+    });
+  }));
+
+  app.get('/children', handle((c) => {
+    const day = today(now());
+    return c.json({ items: allDevices().map((d) => childView(conn, d, day)), today: day });
+  }));
+
+  app.get('/children/:mac', handle((c) => {
+    const found = requireDevice(c.req.param('mac'));
+    const day = today(now());
+    return c.json({
+      item: childView(conn, found, day),
+      counts: { rules: listRules(conn, found.mac).length, rewards: listRewards(conn, found.mac).length },
+      today: day,
     });
   }));
 
   /** 什么都还没有时一键建好示例规则与奖励 */
   app.post('/examples', handle(async (c) => {
-    const { mac } = await body(c) as { mac?: unknown };
-    const found = requireDevice(mac);
-    return c.json({ ok: true, ...seedExamples(conn, found.mac) });
+    const body = await parse(c, examplesBody);
+    return c.json({ ok: true, ...seedExamples(conn, requireDevice(body.mac).mac) });
   }));
 
   // ---- 作业规则 ----
@@ -116,72 +153,70 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
   }));
 
   app.post('/rules', handle(async (c) => {
-    const parsed = ruleParams.extend({
-      mac: z.string().min(1).max(32),
-      name,
-      target_minutes: int(1, 600),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const { mac, ...input } = parsed.data;
-    const found = requireDevice(mac);
-    return c.json({ ok: true, item: createRule(conn, found.mac, input) });
+    const { mac, ...input } = await parse(c, ruleCreate);
+    return c.json({ ok: true, item: createRule(conn, requireDevice(mac).mac, input) });
   }));
 
   /** 编辑规则时的示例:数值还没保存,也要能看到「用了多久、质量几档 → 得几分」 */
   app.post('/rules/preview', handle(async (c) => {
-    const full = z.object(Object.fromEntries(PARAM_KEYS.map((key) => [key, int(...RULE_RANGES[key])])) as {
-      [K in (typeof PARAM_KEYS)[number]]: z.ZodNumber
-    });
-    const parsed = z.object({
-      params: full,
-      actual_minutes: int(0, 1440),
-      quality: z.enum(QUALITIES),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    return c.json({ score: scoreResult(parsed.data.params, parsed.data.actual_minutes, parsed.data.quality) });
+    const body = await parse(c, rulePreview);
+    return c.json({ score: scoreResult(body.params, body.actual_minutes, body.quality) });
   }));
 
-  app.put('/rules/:id', handle(async (c) => {
-    const parsed = ruleParams.extend({ name: name.optional() }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const item = updateRule(conn, idParam(c), parsed.data);
-    if (!item) return c.json({ error: '规则不存在' }, 404);
-    return c.json({ ok: true, item });
+  app.post('/rules/reorder', handle(async (c) => {
+    const body = await parse(c, reorderBody);
+    const mac = requireDevice(body.mac).mac;
+    reorder(conn, 'credit_rules', mac, body.ids);
+    return c.json({ ok: true, items: listRules(conn, mac) });
   }));
 
-  app.delete('/rules/:id', handle((c) => {
-    const result = deleteRule(conn, idParam(c));
-    if (!result) return c.json({ error: '规则不存在' }, 404);
-    return c.json({ ok: true, result });
-  }));
+  app.get('/rules/:id', handle((c) => c.json({ item: requireRule(conn, idParam(c)) })));
 
-  // ---- 每天的作业 ----
+  patch('/rules/:id', async (c) => {
+    const input = await parse(c, ruleUpdate);
+    return c.json({ ok: true, item: updateRule(conn, idParam(c), input) });
+  });
 
+  app.delete('/rules/:id', handle((c) => c.json({ ok: true, result: deleteRule(conn, idParam(c)) })));
+
+  app.post('/rules/:id/restore', handle((c) => c.json({ ok: true, item: restoreRule(conn, idParam(c)) })));
+
+  // ---- 作业 ----
+
+  /** 带 day(或什么都不带)= 某一天的清单;带 from/to/status/before = 历史查询,倒序翻页 */
   app.get('/tasks', handle((c) => {
     const found = requireDevice(c.req.query('mac'));
-    const raw = c.req.query('day');
-    const parsed = DAY.safeParse(raw ?? today(now()));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    return c.json({ day: parsed.data, items: listTasks(conn, found.mac, parsed.data), summary: daySummary(conn, found.mac, parsed.data) });
+    const { from, to, status, before } = c.req.query();
+    if (from || to || status || before) {
+      return c.json(queryTasks(conn, found.mac, {
+        from: from ? query(daySchema, from) : undefined,
+        to: to ? query(daySchema, to) : undefined,
+        status: status ? query(z.enum(TASK_STATUSES), status) as TaskStatusFilter : undefined,
+        before,
+      }, limitParam(c)));
+    }
+    const day = query(daySchema, c.req.query('day') ?? today(now()));
+    return c.json({ day, items: listTasks(conn, found.mac, day), summary: daySummary(conn, found.mac, day) });
   }));
 
   app.post('/tasks', handle(async (c) => {
-    const parsed = z.object({
-      mac: z.string().min(1).max(32),
-      day: DAY.optional(),
-      items: z.array(z.object({ rule_id: z.number().int().positive(), target_minutes: int(1, 600).optional() }))
-        .min(1, '至少选一项作业').max(30, '一次最多布置 30 项'),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const found = requireDevice(parsed.data.mac);
-    return c.json({ ok: true, items: assignTasks(conn, found.mac, parsed.data.day ?? today(now()), parsed.data.items) });
+    const body = await parse(c, taskAssign);
+    const mac = requireDevice(body.mac).mac;
+    return c.json({ ok: true, items: assignTasks(conn, mac, body.day ?? today(now()), body.items) });
   }));
 
-  app.put('/tasks/:id', handle(async (c) => {
-    const parsed = z.object({ name: name.optional(), target_minutes: int(1, 600).optional() }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    return c.json({ ok: true, item: updateTask(conn, idParam(c), parsed.data) });
+  /** 不挂规则的临时作业 */
+  app.post('/tasks/custom', handle(async (c) => {
+    const { mac, day, ...input } = await parse(c, taskCustom);
+    return c.json({ ok: true, item: createCustomTask(conn, requireDevice(mac).mac, day ?? today(now()), input) });
   }));
+
+  app.get('/tasks/:id', handle((c) => c.json({ item: requireTask(conn, idParam(c)) })));
+
+  patch('/tasks/:id', async (c) => {
+    const input = await parse(c, taskUpdate);
+    return c.json({ ok: true, item: updateTask(conn, idParam(c), input) });
+  });
 
   app.delete('/tasks/:id', handle((c) => {
     deleteTask(conn, idParam(c));
@@ -190,109 +225,123 @@ export function creditRoutes(conn: Db, options: CreditRouteOptions = {}): Hono {
 
   /** 录入结果;preview=true 只算不存(页面边输边预览) */
   app.post('/tasks/:id/result', handle(async (c) => {
-    const parsed = z.object({
-      actual_minutes: int(0, 1440),
-      quality: z.enum(QUALITIES, { message: '质量要选优、良、中、差之一' }),
-      note: z.string().max(200).optional(),
-      preview: z.boolean().optional(),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
     const id = idParam(c);
-    const { actual_minutes: minutes, quality, note, preview } = parsed.data;
-    if (preview) return c.json({ preview: true, score: previewTask(conn, id, minutes, quality) });
-    return c.json({ ok: true, ...scoreTask(conn, id, minutes, quality, note ?? '') });
+    const body = await parse(c, taskResult);
+    if (body.preview) return c.json({ preview: true, score: previewTask(conn, id, body.actual_minutes, body.quality) });
+    return c.json({ ok: true, ...scoreTask(conn, id, body.actual_minutes, body.quality, body.note ?? '', actorOf(c)) });
   }));
 
   app.post('/tasks/:id/missed', handle(async (c) => {
-    const parsed = z.object({ note: z.string().max(200).optional() }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    return c.json({ ok: true, ...missTask(conn, idParam(c), parsed.data.note ?? '') });
+    const id = idParam(c);
+    const body = await parse(c, taskMissed);
+    return c.json({ ok: true, ...missTask(conn, id, body.note ?? '', actorOf(c)) });
   }));
 
-  app.get('/tasks/:id', handle((c) => {
-    const task = taskById(conn, idParam(c));
-    if (!task) return c.json({ error: '作业不存在' }, 404);
-    return c.json({ item: task });
+  /** 孩子报完成(只记申报,不加分) / 家长驳回申报 */
+  app.post('/tasks/:id/claim', handle(async (c) => {
+    const id = idParam(c);
+    return c.json({ ok: true, item: claimTask(conn, id, await parse(c, taskClaim)) });
   }));
+  app.delete('/tasks/:id/claim', handle((c) => c.json({ ok: true, item: unclaimTask(conn, idParam(c)) })));
 
   // ---- 奖励 ----
 
-  const rewardFields = { name, cost: int(1, 100000), emoji: z.string().max(8).optional() };
-
   app.get('/rewards', handle((c) => {
     const found = requireDevice(c.req.query('mac'));
-    return c.json({ items: listRewards(conn, found.mac), balance: balance(conn, found.mac) });
+    return c.json({ items: listRewards(conn, found.mac, c.req.query('archived') === '1'), balance: balance(conn, found.mac) });
   }));
 
   app.post('/rewards', handle(async (c) => {
-    const parsed = z.object({ mac: z.string().min(1).max(32), ...rewardFields }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const { mac, ...input } = parsed.data;
-    const found = requireDevice(mac);
-    return c.json({ ok: true, item: createReward(conn, found.mac, input) });
+    const { mac, ...input } = await parse(c, rewardCreate);
+    return c.json({ ok: true, item: createReward(conn, requireDevice(mac).mac, input) });
   }));
 
-  app.put('/rewards/:id', handle(async (c) => {
-    const parsed = z.object({ name: name.optional(), cost: int(1, 100000).optional(), emoji: z.string().max(8).optional() })
-      .safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const item = updateReward(conn, idParam(c), parsed.data);
-    if (!item) return c.json({ error: '奖励不存在' }, 404);
-    return c.json({ ok: true, item });
+  app.post('/rewards/reorder', handle(async (c) => {
+    const body = await parse(c, reorderBody);
+    const mac = requireDevice(body.mac).mac;
+    reorder(conn, 'credit_rewards', mac, body.ids);
+    return c.json({ ok: true, items: listRewards(conn, mac) });
   }));
 
-  app.delete('/rewards/:id', handle((c) => {
-    const result = deleteReward(conn, idParam(c));
-    if (!result) return c.json({ error: '奖励不存在' }, 404);
-    return c.json({ ok: true, result });
-  }));
+  app.get('/rewards/:id', handle((c) => c.json({ item: requireReward(conn, idParam(c)) })));
+
+  patch('/rewards/:id', async (c) => {
+    const input = await parse(c, rewardUpdate);
+    return c.json({ ok: true, item: updateReward(conn, idParam(c), input) });
+  });
+
+  app.delete('/rewards/:id', handle((c) => c.json({ ok: true, result: deleteReward(conn, idParam(c)) })));
+
+  app.post('/rewards/:id/restore', handle((c) => c.json({ ok: true, item: restoreReward(conn, idParam(c)) })));
+
+  // ---- 兑换与手动奖惩 ----
 
   app.post('/redeem', handle(async (c) => {
-    const parsed = z.object({
-      mac: z.string().min(1).max(32),
-      reward_id: z.number().int().positive(),
-      note: z.string().max(200).optional(),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const found = requireDevice(parsed.data.mac);
-    return c.json({ ok: true, ...redeem(conn, found.mac, parsed.data.reward_id, parsed.data.note ?? '') });
+    const body = await parse(c, redeemBody);
+    const mac = requireDevice(body.mac).mac;
+    return c.json({ ok: true, ...redeem(conn, mac, body.reward_id, body.note ?? '', actorOf(c)) });
   }));
 
-  /** 家长手动奖惩 */
   app.post('/adjust', handle(async (c) => {
-    const parsed = z.object({
-      mac: z.string().min(1).max(32),
-      delta: int(-1000, 1000).refine((n) => n !== 0, '分数不能是 0'),
-      reason: z.string().trim().min(1, '要写明原因').max(80),
-    }).safeParse(await body(c));
-    if (!parsed.success) return c.json({ error: firstIssue(parsed.error) }, 400);
-    const found = requireDevice(parsed.data.mac);
-    return c.json({ ok: true, ...adjust(conn, found.mac, parsed.data.delta, parsed.data.reason) });
+    const body = await parse(c, adjustBody);
+    const mac = requireDevice(body.mac).mac;
+    return c.json({ ok: true, ...adjust(conn, mac, body.delta, body.reason, actorOf(c)) });
   }));
 
   // ---- 流水 ----
 
   app.get('/ledger', handle((c) => {
     const found = requireDevice(c.req.query('mac'));
+    const { kind, from, to } = c.req.query();
     const before = Number(c.req.query('before') ?? 0);
-    const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 30) || 30));
     return c.json({
       balance: balance(conn, found.mac),
-      ...ledgerPage(conn, found.mac, Number.isInteger(before) && before > 0 ? before : null, limit),
+      ...ledgerPage(conn, found.mac, Number.isInteger(before) && before > 0 ? before : null, limitParam(c), {
+        kind: kind ? query(z.enum(LEDGER_KINDS), kind) as LedgerKind : undefined,
+        from: from ? query(daySchema, from) : undefined,
+        to: to ? query(daySchema, to) : undefined,
+      }),
     });
   }));
 
-  app.post('/ledger/:id/revert', handle((c) => c.json({ ok: true, ...revert(conn, idParam(c)) })));
+  app.get('/ledger/:id', handle((c) => {
+    const item = ledgerById(conn, idParam(c));
+    if (!item) throw new CreditError('流水不存在', 404, 'not_found');
+    return c.json({ item });
+  }));
+
+  app.post('/ledger/:id/revert', handle((c) => c.json({ ok: true, ...revert(conn, idParam(c), actorOf(c)) })));
+
+  // ---- 统计 ----
+
+  /** 默认最近 7 天(含今天);日期段最长 366 天 */
+  app.get('/stats', handle((c) => {
+    const found = requireDevice(c.req.query('mac'));
+    const to = query(daySchema, c.req.query('to') ?? today(now()));
+    const from = query(daySchema, c.req.query('from') ?? shiftDay(to, -6));
+    if (from > to) throw new CreditError('开始日期不能晚于结束日期', 400, 'invalid');
+    if (shiftDay(from, 366) < to) throw new CreditError('日期段最长一年', 400, 'invalid');
+    return c.json(stats(conn, found.mac, from, to));
+  }));
 
   // ---- 外部接口密钥(只在 /api 下) ----
 
   if (options.keyAdmin) {
-    app.get('/key', (c) => c.json(keyStatus(conn)));
-    app.post('/key/rotate', (c) => c.json({ ok: true, key: rotateKey(conn, now()), ...keyStatus(conn) }));
-    app.delete('/key', (c) => {
-      disableKey(conn);
-      return c.json({ ok: true, ...keyStatus(conn) });
+    app.get('/keys', (c) => c.json({ items: listKeys(conn) }));
+    app.post('/keys', handle(async (c) => {
+      const body = await parse(c, keyCreate);
+      return c.json({ ok: true, ...createKey(conn, body.name, body.scope) });
+    }));
+    patch('/keys/:id', async (c) => {
+      const id = idParam(c);
+      if (!keyById(conn, id)) throw new CreditError('密钥不存在', 404, 'not_found');
+      return c.json({ ok: true, item: renameKey(conn, id, (await parse(c, keyUpdate)).name) });
     });
+    app.delete('/keys/:id', handle((c) => {
+      const id = idParam(c);
+      if (!keyById(conn, id)) throw new CreditError('密钥不存在', 404, 'not_found');
+      return c.json({ ok: true, item: revokeKey(conn, id) });
+    }));
   }
 
   return app;

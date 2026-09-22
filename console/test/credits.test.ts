@@ -8,7 +8,6 @@ import { createApp } from '../src/app.ts';
 import { Bridge } from '../src/agent/bridge.ts';
 import { scoreMissed, scoreResult, type ScoreParams } from '../src/credits/score.ts';
 import { today } from '../src/credits/store.ts';
-import { OPEN_KEY_SETTING } from '../src/credits/open-key.ts';
 
 const MAC = '4c:11:ae:31:7a:30';
 const COMPACT = '4c11ae317a30';
@@ -298,55 +297,333 @@ describe('奖励与流水', () => {
   });
 });
 
-describe('外部接口', () => {
-  test('没生成密钥时整组 404;没带或带错密钥 401;带对了与页面接口一致', async () => {
-    const app = newApp();
-    assert.equal((await call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`)).status, 404);
+// ---------------------------------------------------------------- v1 接口补齐
 
-    const rotated = await api(app, 'POST', '/key/rotate');
-    const key = rotated.data.key as string;
+describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () => {
+  test('按 id 读取;PATCH 与 PUT 都是部分更新;错误带 code', async () => {
+    const app = newApp();
+    const rule = await mathRule(app);
+    assert.equal((await api(app, 'GET', `/rules/${rule.id}`)).data.item.name, '数学作业');
+    const patched = await api(app, 'PATCH', `/rules/${rule.id}`, { q_good: 4 });
+    assert.equal(patched.data.item.q_good, 4);
+    assert.equal(patched.data.item.target_minutes, 40, '没传的字段不动');
+    const put = await api(app, 'PUT', `/rules/${rule.id}`, { name: '数学练习' });
+    assert.deepEqual([put.data.item.name, put.data.item.q_good], ['数学练习', 4]);
+
+    const missing = await api(app, 'GET', '/rules/9999');
+    assert.equal(missing.status, 404);
+    assert.equal(missing.data.code, 'not_found');
+    const invalid = await api(app, 'PATCH', `/rules/${rule.id}`, { q_good: 999 });
+    assert.equal(invalid.data.code, 'invalid');
+    const noDevice = await api(app, 'GET', '/rules?mac=aabbccddee99');
+    assert.equal(noDevice.data.code, 'device_not_found');
+  });
+
+  test('停用的规则与奖励可以恢复;排序按给定顺序', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const rules = (await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items as { id: number; name: string }[];
+    await assign(app, rules[0]!.id);
+    await api(app, 'DELETE', `/rules/${rules[0]!.id}`);
+    assert.equal((await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items.length, 2);
+    assert.equal((await api(app, 'GET', `/rules?mac=${COMPACT}&archived=1`)).data.items.length, 3);
+    await api(app, 'POST', `/rules/${rules[0]!.id}/restore`);
+    assert.equal((await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items.length, 3);
+
+    const reversed = rules.map((r) => r.id).reverse();
+    const reordered = await api(app, 'POST', '/rules/reorder', { mac: COMPACT, ids: reversed });
+    assert.deepEqual(reordered.data.items.map((r: any) => r.id), reversed);
+
+    const rewards = (await api(app, 'GET', `/rewards?mac=${COMPACT}`)).data.items as { id: number }[];
+    const rewardOrder = rewards.map((r) => r.id).reverse();
+    assert.deepEqual((await api(app, 'POST', '/rewards/reorder', { mac: MAC, ids: rewardOrder })).data.items.map((r: any) => r.id), rewardOrder);
+  });
+
+  test('临时作业不挂规则、参数现填;按日期段与状态查历史并翻页', async () => {
+    const app = newApp();
+    const custom = await api(app, 'POST', '/tasks/custom', { mac: MAC, day: '2026-09-20', name: '练钢琴', target_minutes: 30, ontime_points: 8 });
+    assert.equal(custom.data.item.rule_id, null);
+    assert.equal(custom.data.item.ontime_points, 8);
+    assert.equal(custom.data.item.q_good, 3, '没填的用默认');
+
+    const rule = await mathRule(app);
+    for (const day of ['2026-09-20', '2026-09-21', '2026-09-22']) {
+      await api(app, 'POST', '/tasks', { mac: MAC, day, items: [{ rule_id: rule.id }] });
+    }
+    const t21 = (await api(app, 'GET', `/tasks?mac=${COMPACT}&day=2026-09-21`)).data.items[0];
+    await api(app, 'POST', `/tasks/${t21.id}/result`, { actual_minutes: 30, quality: 'good' });
+
+    const page1 = await api(app, 'GET', `/tasks?mac=${COMPACT}&from=2026-09-20&to=2026-09-22&limit=2`);
+    assert.deepEqual(page1.data.items.map((t: any) => t.day), ['2026-09-22', '2026-09-21']);
+    const page2 = await api(app, 'GET', `/tasks?mac=${COMPACT}&from=2026-09-20&to=2026-09-22&limit=2&before=${page1.data.next}`);
+    assert.deepEqual(page2.data.items.map((t: any) => t.day), ['2026-09-20', '2026-09-20']);
+    assert.equal(page2.data.next, null);
+
+    const done = await api(app, 'GET', `/tasks?mac=${COMPACT}&status=done`);
+    assert.deepEqual(done.data.items.map((t: any) => t.id), [t21.id]);
+    assert.equal((await api(app, 'GET', `/tasks?mac=${COMPACT}&status=bogus`)).data.code, 'invalid');
+  });
+
+  test('孩子报完成只记申报不加分;驳回后清掉;按 claimed 筛得出来', async () => {
+    const app = newApp();
+    const task = await assign(app, (await mathRule(app)).id);
+    const claimed = await api(app, 'POST', `/tasks/${task.id}/claim`, { minutes: 35, note: '写完啦' });
+    assert.ok(claimed.data.item.claimed_at);
+    assert.equal(claimed.data.item.claimed_minutes, 35);
+    assert.equal(claimed.data.item.status, 'pending');
+    assert.equal(balanceOf(), 0, '申报不加分');
+    assert.equal((await api(app, 'GET', `/tasks?mac=${COMPACT}&status=claimed`)).data.items.length, 1);
+    assert.equal((await api(app, 'GET', `/overview?mac=${COMPACT}`)).data.pending_claims, 1);
+
+    const rejected = await api(app, 'DELETE', `/tasks/${task.id}/claim`);
+    assert.equal(rejected.data.item.claimed_at, null);
+    assert.equal((await api(app, 'GET', `/tasks?mac=${COMPACT}&status=claimed`)).data.items.length, 0);
+  });
+
+  test('流水按类型、日期筛选;按 id 读取;每笔记下来源', async () => {
+    const app = newApp();
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 30, reason: '奖励' });
+    const tv = (await api(app, 'POST', '/rewards', { mac: MAC, name: '看电视', cost: 10 })).data.item;
+    const redeemed = await api(app, 'POST', '/redeem', { mac: MAC, reward_id: tv.id });
+    const onlyRedeem = await api(app, 'GET', `/ledger?mac=${COMPACT}&kind=redeem`);
+    assert.deepEqual(onlyRedeem.data.items.map((i: any) => i.kind), ['redeem']);
+    const one = await api(app, 'GET', `/ledger/${redeemed.data.ledger.id}`);
+    assert.equal(one.data.item.balance_after, 20);
+    assert.equal(one.data.item.source, 'admin');
+    assert.equal((await api(app, 'GET', `/ledger?mac=${COMPACT}&from=2099-01-01`)).data.items.length, 0);
+  });
+
+  test('统计:每天挣/扣/花与流水对得上,撤销过的不计;完成率与按时率', async () => {
+    const app = newApp();
+    const rule = await mathRule(app);
+    const a = await assign(app, rule.id);
+    const b = await assign(app, rule.id);
+    const c = await assign(app, rule.id);
+    await api(app, 'POST', `/tasks/${a.id}/result`, { actual_minutes: 30, quality: 'excellent' });   // +10
+    await api(app, 'POST', `/tasks/${b.id}/result`, { actual_minutes: 70, quality: 'poor' });        // -3 -2 = -5
+    await api(app, 'POST', `/tasks/${c.id}/missed`, {});                                              // -5
+    const wrong = await api(app, 'POST', '/adjust', { mac: MAC, delta: 50, reason: '手滑' });
+    await api(app, 'POST', `/ledger/${wrong.data.ledger.id}/revert`);
+
+    const s = (await api(app, 'GET', `/stats?mac=${COMPACT}`)).data;
+    assert.equal(s.days.length, 7, '默认最近 7 天');
+    const todayRow = s.days.at(-1);
+    assert.equal(todayRow.day, '2026-09-22');
+    assert.deepEqual([todayRow.earned, todayRow.penalty, todayRow.spent], [10, 10, 0], '手滑那笔撤销了不计');
+    assert.equal(s.balance, 0);
+    assert.equal(s.tasks[0].assigned, 3);
+    assert.equal(s.tasks[0].ontime, 1);
+    assert.equal(s.completion_rate, 0.667);
+    assert.equal(s.ontime_rate, 0.5);
+    assert.equal((await api(app, 'GET', `/stats?mac=${COMPACT}&from=2026-09-23&to=2026-09-22`)).status, 400);
+  });
+
+  test('meta 给出取值范围与今天', async () => {
+    const meta = (await api(newApp(), 'GET', '/meta')).data;
+    assert.equal(meta.today, '2026-09-22');
+    assert.deepEqual(meta.ranges.target_minutes, [1, 600]);
+    assert.equal(meta.qualities.length, 4);
+  });
+});
+
+// ---------------------------------------------------------------- 外部接口
+
+const OPEN = '/open/v1/credits';
+const open = (app: App, method: string, path: string, key: string, body?: unknown, extra: Record<string, string> = {}) =>
+  call(app, method, `${OPEN}${path}`, body, { authorization: `Bearer ${key}`, ...extra });
+const newKey = async (app: App, name: string, scope: 'read' | 'write' = 'write') =>
+  (await api(app, 'POST', '/keys', { name, scope })).data as { key: string; item: { id: number; prefix: string } };
+
+describe('外部接口 /open/v1/credits', () => {
+  test('一把都没有时整组 404;没带或带错密钥 401;带对了与页面接口一致;一期的旧路径不存在', async () => {
+    const app = newApp();
+    assert.equal((await call(app, 'GET', `${OPEN}/overview?mac=${COMPACT}`)).status, 404);
+    const { key } = await newKey(app, '妈妈的手机');
     assert.match(key, /^xdc_/u);
-    assert.equal(rotated.data.enabled, true);
+    assert.equal((await call(app, 'GET', `${OPEN}/overview?mac=${COMPACT}`)).status, 401);
+    assert.equal((await open(app, 'GET', `/overview?mac=${COMPACT}`, 'xdc_wrong')).status, 401);
 
-    assert.equal((await call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`)).status, 401);
-    assert.equal((await call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`, undefined, { authorization: 'Bearer xdc_wrong' })).status, 401);
-
-    const auth = { authorization: `Bearer ${key}` };
     await api(app, 'POST', '/adjust', { mac: MAC, delta: 7, reason: '页面加的' });
-    const overview = await call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`, undefined, auth);
-    assert.equal(overview.status, 200);
-    assert.equal(overview.data.balance, 7);
-    const viaOpen = await call(app, 'POST', '/open/credits/adjust', { mac: COMPACT, delta: 3, reason: '快捷指令加的' }, auth);
+    assert.equal((await open(app, 'GET', `/children/${COMPACT}`, key)).data.item.balance, 7);
+    const viaOpen = await open(app, 'POST', '/adjust', key, { mac: COMPACT, delta: 3, reason: 'App 加的' });
     assert.equal(viaOpen.data.balance, 10);
+    assert.deepEqual([viaOpen.data.ledger.source, viaOpen.data.ledger.actor], ['api', '妈妈的手机'], '流水记下是哪把密钥');
 
-    const status = await api(app, 'GET', '/key');
-    assert.ok(status.data.last_used_at, '记下最后使用时间');
+    const old = await call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`, undefined, { authorization: `Bearer ${key}` });
+    assert.notEqual(old.data?.balance, 10, '一期路径已经不再提供接口');
   });
 
-  test('库里只有哈希;轮换后旧密钥失效;关闭后整组 404', async () => {
+  test('多把密钥各自可用;只读的不能写;吊销后 401;列表里没有明文', async () => {
     const app = newApp();
-    const oldKey = (await api(app, 'POST', '/key/rotate')).data.key as string;
-    const stored = one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', OPEN_KEY_SETTING)!.value;
-    assert.ok(!stored.includes(oldKey), '明文不落库');
+    const mom = await newKey(app, '妈妈的手机');
+    const tablet = await newKey(app, '客厅平板', 'read');
+    assert.equal((await open(app, 'GET', '/children', tablet.key)).status, 200);
+    const denied = await open(app, 'POST', '/adjust', tablet.key, { mac: COMPACT, delta: 5, reason: 'x' });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.code, 'read_only_key');
 
-    const newKey = (await api(app, 'POST', '/key/rotate')).data.key as string;
-    assert.notEqual(newKey, oldKey);
-    const probe = (key: string) => call(app, 'GET', `/open/credits/overview?mac=${COMPACT}`, undefined, { authorization: `Bearer ${key}` });
-    assert.equal((await probe(oldKey)).status, 401);
-    assert.equal((await probe(newKey)).status, 200);
+    const list = (await api(app, 'GET', '/keys')).data.items as any[];
+    assert.equal(list.length, 2);
+    assert.ok(list.every((k) => !('hash' in k) && k.prefix.length === 8));
+    assert.ok(!JSON.stringify(list).includes(mom.key), '列表里没有明文');
 
-    await api(app, 'DELETE', '/key');
-    assert.equal((await probe(newKey)).status, 404);
+    await api(app, 'PATCH', `/keys/${mom.item.id}`, { name: '妈妈的新手机' });
+    await api(app, 'DELETE', `/keys/${mom.item.id}`);
+    assert.equal((await open(app, 'GET', '/children', mom.key)).status, 401, '吊销后不认');
+    assert.equal((await open(app, 'GET', '/children', tablet.key)).status, 200, '别的密钥不受影响');
+    const revoked = (await api(app, 'GET', '/keys')).data.items.find((k: any) => k.id === mom.item.id);
+    assert.ok(revoked.revoked_at);
+    assert.equal(revoked.name, '妈妈的新手机');
+
+    assert.equal((await open(app, 'GET', '/keys', tablet.key)).status, 404, '密钥管理不在外部接口上');
   });
 
-  test('密钥管理只在页面接口下;设置页的批量保存改不了它', async () => {
+  test('Idempotency-Key:同一个值重复兑换只扣一次、回放同样结果;换一把密钥不串;换个请求用同一个值 422', async () => {
     const app = newApp();
-    const key = (await api(app, 'POST', '/key/rotate')).data.key as string;
-    const auth = { authorization: `Bearer ${key}` };
-    assert.equal((await call(app, 'POST', '/open/credits/key/rotate', undefined, auth)).status, 404, '外部密钥不能自己换自己');
+    const { key } = await newKey(app, 'App');
+    const other = await newKey(app, '快捷指令');
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 100, reason: '起步' });
+    const tv = (await api(app, 'POST', '/rewards', { mac: MAC, name: '看电视', cost: 20 })).data.item;
+    const idem = { 'idempotency-key': 'order-001' };
 
-    const before = one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', OPEN_KEY_SETTING)!.value;
-    await call(app, 'PUT', '/api/settings', { [OPEN_KEY_SETTING]: '{"hash":"' + '0'.repeat(64) + '"}' });
-    assert.equal(one<{ value: string }>(conn, 'SELECT value FROM settings WHERE key = ?', OPEN_KEY_SETTING)!.value, before);
+    const first = await open(app, 'POST', '/redeem', key, { mac: COMPACT, reward_id: tv.id }, idem);
+    const again = await open(app, 'POST', '/redeem', key, { mac: COMPACT, reward_id: tv.id }, idem);
+    assert.equal(first.data.balance, 80);
+    assert.deepEqual(again.data, first.data, '回放第一次的结果');
+    assert.equal(balanceOf(), 80, '只扣了一次');
+
+    const otherKey = await open(app, 'POST', '/redeem', other.key, { mac: COMPACT, reward_id: tv.id }, idem);
+    assert.equal(otherKey.data.balance, 60, '别的密钥用同样的值是另一个请求');
+
+    const reused = await open(app, 'POST', '/adjust', key, { mac: COMPACT, delta: 1, reason: 'x' }, idem);
+    assert.equal(reused.status, 422);
+    assert.equal(reused.data.code, 'idempotency_key_reused');
+  });
+
+  test('CORS 预检不要密钥;响应带允许的来源与请求头', async () => {
+    const app = newApp();
+    await newKey(app, 'App');
+    const response = await app.request(`http://localhost${OPEN}/redeem`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://app.example', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,idempotency-key' },
+    });
+    assert.ok(response.status < 300);
+    assert.equal(response.headers.get('access-control-allow-origin'), '*');
+    assert.match(response.headers.get('access-control-allow-headers') ?? '', /Idempotency-Key/iu);
+  });
+
+  test('openapi.json 不要密钥;覆盖路由注册的每个端点;取值范围与校验一致', async () => {
+    const app = newApp();
+    const response = await call(app, 'GET', `${OPEN}/openapi.json`);
+    assert.equal(response.status, 200);
+    const spec = response.data;
+    assert.equal(spec.openapi, '3.1.0');
+    assert.equal(spec.servers[0].url, OPEN);
+
+    const { creditRoutes } = await import('../src/credits/routes.ts');
+    const registered = new Set(creditRoutes(conn).routes
+      .filter((r) => r.method !== 'ALL' && r.path !== '/openapi.json')
+      .map((r) => `${r.method.toLowerCase()} ${r.path.replace(/:(\w+)/gu, '{$1}')}`));
+    const documented = new Set(Object.entries(spec.paths as Record<string, Record<string, unknown>>)
+      .flatMap(([path, methods]) => Object.keys(methods).map((m) => `${m} ${path}`)));
+    assert.deepEqual([...registered].filter((r) => !documented.has(r)), [], '路由里有、文档里没有');
+    assert.deepEqual([...documented].filter((d) => !registered.has(d)), [], '文档里有、路由里没有');
+
+    const ruleBody = spec.paths['/rules'].post.requestBody.content['application/json'].schema;
+    assert.deepEqual([ruleBody.properties.target_minutes.minimum, ruleBody.properties.target_minutes.maximum], [1, 600]);
+    assert.ok(ruleBody.required.includes('mac'));
+  });
+});
+
+// ---------------------------------------------------------------- 智能体工具
+
+describe('智能体的学分工具', () => {
+  const agentCtx = (mac: string | null = MAC) => ({
+    deps: { conn, now: () => clock },
+    agent: { id: DEFAULT_AGENT_ID, name: '小单伴学' },
+    device: { mac, sessionId: null, turnId: null, clientIp: null, features: {} },
+  }) as any;
+  const enable = () => run(conn, "INSERT INTO agent_plugins (agent_id, plugin_code, params_json) VALUES (?, 'credits', '{}')", DEFAULT_AGENT_ID);
+  const tools = async () => {
+    const { collectTools } = await import('../src/agent/registry.ts');
+    await import('../src/agent/index.ts');
+    return collectTools(agentCtx());
+  };
+  const tool = async (name: string) => (await tools()).find((t) => t.name === name)!;
+
+  test('角色没开时没有;开了只有查、报完成、兑换三个,没有任何能加分打分的', async () => {
+    assert.equal((await tools()).filter((t) => t.name.startsWith('credits_')).length, 0);
+    enable();
+    const names = (await tools()).filter((t) => t.name.startsWith('credits_')).map((t) => t.name).sort();
+    assert.deepEqual(names, ['credits_redeem', 'credits_report_done', 'credits_status']);
+    for (const t of await tools()) {
+      if (t.name.startsWith('credits_')) assert.match(t.description, /只能由爸爸妈妈/u);
+    }
+  });
+
+  test('查学分:余额、每项作业的状态、每个奖励还差多少', async () => {
+    enable();
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const rules = (await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items;
+    await api(app, 'POST', '/tasks', { mac: MAC, items: [{ rule_id: rules[0].id }, { rule_id: rules[1].id }] });
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 18, reason: '奖励' });
+    const result = await (await tool('credits_status')).run(agentCtx(), {});
+    assert.match(result.content, /现在有 18 分/u);
+    assert.match(result.content, /语文作业\(编号 \d+\):还没做/u);
+    assert.match(result.content, /玩手机 15 分钟:要 15 分,现在就够了/u);
+    assert.match(result.content, /看电视 30 分钟:要 20 分,还差 2 分/u);
+  });
+
+  test('报完成按名字模糊匹配,只记申报不加分;对上多项时列出候选', async () => {
+    enable();
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const rules = (await api(app, 'GET', `/rules?mac=${COMPACT}`)).data.items;
+    await api(app, 'POST', '/tasks', { mac: MAC, items: rules.map((r: any) => ({ rule_id: r.id })) });
+    const report = await tool('credits_report_done');
+
+    const ok = await report.run(agentCtx(), { task: '数学', minutes: 35 });
+    assert.equal(ok.ok, true);
+    assert.match(ok.content, /还没有加分/u);
+    assert.equal(balanceOf(), 0);
+    const math = (await api(app, 'GET', `/tasks?mac=${COMPACT}&status=claimed`)).data.items;
+    assert.deepEqual([math.length, math[0].name, math[0].claimed_minutes], [1, '数学作业', 35]);
+
+    const again = await report.run(agentCtx(), { task: '数学作业' });
+    assert.match(again.content, /已经报过/u);
+    const unknown = await report.run(agentCtx(), { task: '体育' });
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.content, /语文作业/u);
+
+    // 去掉「作业」后完全对上的优先:「数学」认作「数学作业」,不和「数学口算」混
+    await api(app, 'POST', '/tasks/custom', { mac: MAC, name: '钢琴练习', target_minutes: 20 });
+    await api(app, 'POST', '/tasks/custom', { mac: MAC, name: '钢琴乐理', target_minutes: 20 });
+    const ambiguous = await report.run(agentCtx(), { task: '钢琴' });
+    assert.match(ambiguous.content, /好几项.*钢琴练习.*钢琴乐理/u);
+  });
+
+  test('兑换:够分直接扣、流水记是智能体;不够说差多少与还能挣分的作业', async () => {
+    enable();
+    const app = newApp();
+    await api(app, 'POST', '/examples', { mac: MAC });
+    const redeemTool = await tool('credits_redeem');
+
+    const short = await redeemTool.run(agentCtx(), { reward: '看电视' });
+    assert.equal(short.ok, false);
+    assert.match(short.content, /还差 20 分/u);
+
+    await api(app, 'POST', '/adjust', { mac: MAC, delta: 25, reason: '奖励' });
+    const ok = await redeemTool.run(agentCtx(), { reward: '看电视' });
+    assert.equal(ok.ok, true);
+    assert.match(ok.content, /还剩 5 分/u);
+    const last = (await api(app, 'GET', `/ledger?mac=${COMPACT}&kind=redeem`)).data.items[0];
+    assert.deepEqual([last.source, last.actor], ['agent', '小单伴学']);
+  });
+
+  test('没有设备时如实说', async () => {
+    enable();
+    const result = await (await tool('credits_status')).run(agentCtx(null), {});
+    assert.equal(result.ok, false);
   });
 });

@@ -365,8 +365,8 @@ How emotion tags flow:
 
 ## Homework credits
 
-**Kept per device** (one device = one child), under "学分" in the console navigation. **Not wired to the agent yet** — a page and an API
-only. Unbinding a device deletes its credits.
+**Kept per device** (one device = one child). Credits are their own group in the console navigation: today's homework, rewards, rules,
+ledger, statistics and the open API. Unbinding a device deletes its credits.
 
 - **Homework rules** (one set per device, values adjustable any time): a target duration; points for finishing on time; overtime counted
   in steps of N minutes, each step costing some points, capped; points for each quality grade (excellent/good/fair/poor, may be
@@ -382,14 +382,26 @@ only. Unbinding a device deletes its credits.
 - **Balance = sum of the ledger**; there is no stored balance. Penalties may push it below zero; **redeeming requires enough points**
   (409 "N short" otherwise). The ledger is append-only: undoing appends an equal and opposite entry and marks the original; undoing a
   homework score puts the task back to pending so it can be re-entered.
-- **Two entry points, one router** (`console/src/credits/routes.ts`):
-  - `/api/credits/*` for the page, behind the console login (the ops panel's unified sign-in);
-  - `/open/credits/*` for external programs (phone shortcuts, scripts, the agent later), with `Authorization: Bearer <key>`. One key per
-    household, generated, rotated and disabled on the page; only its SHA-256 is stored and the plaintext is shown once. Without a key the
-    whole group answers 404; a wrong key gets 401. Key management exists only under `/api`, so an external key cannot replace itself.
-  - Main endpoints: `GET overview`, `GET/POST/PUT/DELETE rules`, `POST rules/preview`, `GET/POST tasks`, `POST tasks/:id/result`
-    (`preview: true` computes without storing), `POST tasks/:id/missed`, `GET/POST/PUT/DELETE rewards`, `POST redeem`, `POST adjust`,
-    `GET ledger`, `POST ledger/:id/revert`. Put MACs in URLs without colons (`4c11ae317a30`).
+- **Two entry points, one router** (`console/src/credits/routes.ts`): the page uses `/api/credits/*` (console sign-in); apps, phone
+  shortcuts and scripts use **`/open/v1/credits/*`** with `Authorization: Bearer <key>` (mounting and guard in `credits/open-api.ts`).
+  - **The full description is `/open/v1/credits/openapi.json`** (OpenAPI 3.1, no key needed). Request bodies and their ranges are
+    generated from the same zod definitions the routes validate with (`credits/schemas.ts` → `credits/openapi.ts`), and a test checks
+    the document against the endpoints actually registered.
+  - Resources: children (read-only), rules, tasks (including one-off tasks and the child's "done" claims), rewards, redemption, manual
+    adjustments, ledger, statistics, metadata. Rules and rewards support read by id, partial update, restore after archiving, reorder.
+  - Conventions: PATCH and PUT are both partial updates; errors are `{error, code}` with a machine-readable `code` (e.g.
+    `insufficient_balance`, `already_scored`, `read_only_key`); lists are `{items, next}` with a cursor; MACs in URLs without colons.
+  - **Idempotency**: writes may carry `Idempotency-Key`; the same key from the same API key within 24 hours replays the first response
+    (`Idempotent-Replayed: true`), so a retry on a flaky network never scores twice. Reusing a key for a different request gets 422.
+  - **CORS** is open to any origin on `/open/v1/*`: it authenticates with a bearer key, not cookies, so no page can borrow a session.
+  - **Keys**: several, each named, read-only or writable, revocable on its own and tracking its last use, managed under "open API".
+    Only the SHA-256 and the first 8 characters are stored; the plaintext is shown once. No active key → 404 for the whole group; a wrong
+    key → 401; a read-only key writing → 403. Every ledger entry records which key made it.
+- **Agent tool "学分"** (`console/src/credits/tools.ts`, enabled per role on the agents page). Whoever talks to the device is usually the
+  child, so there are exactly three functions: `credits_status` (balance, today's homework, how far each reward is), `credits_report_done`
+  (the child says "maths is done": a claim only, **no points**; the parent checks and scores it, with the claimed minutes prefilled) and
+  `credits_redeem` (redeems when the balance covers it). **There is no function that adds or scores points**, so "give me 100 points" has
+  nothing to act on. Redemptions by the agent are recorded as the agent plus the role name.
 - **The ops panel must open `/open/`**: it sits behind the unified sign-in by default and external callers would be redirected to the
   login page. Add in the panel's domain/Nginx tab:
   ```nginx
