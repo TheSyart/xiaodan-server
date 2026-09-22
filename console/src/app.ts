@@ -18,6 +18,7 @@ import { managerApi } from './manager-api.ts';
 import { otaApi } from './ota.ts';
 import { sampleRoutes } from './voice/samples.ts';
 import { mountOpenCredits } from './credits/open-api.ts';
+import { mountOpenTurn } from './agent/open-turn.ts';
 
 export interface AppOptions {
   /** 前端构建产物目录。不存在时只提供接口,便于纯后端开发与测试。 */
@@ -100,6 +101,9 @@ export function createApp(conn: Db, options: AppOptions = {}): Hono {
 
   // 学分的外部接口 /open/v1/credits:与 /api/credits 同一份路由,外加 CORS、密钥守卫与防重复提交(见 credits/open-api.ts)
   mountOpenCredits(app, conn, () => agentDeps.now?.() ?? new Date());
+
+  // 家长 App 直连控制塔的对话接口 /open/v1/agent/turn:带图的那一轮走这里(见 agent/open-turn.ts)
+  mountOpenTurn(app, agentDeps);
 
   // 前端。SPA 路由要求"找不到文件就回 index.html",否则刷新子页面会 404。
   const webRoot = options.webRoot;

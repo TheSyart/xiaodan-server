@@ -151,6 +151,17 @@ device ─▶ engine: ASR → chat() (nointent) → LLM provider "xiaodan_agent"
 - **Images**: once a chat model has *supports images* switched on in the Models page, the Playground accepts image attachments
   (at most 3, shrunk to 1024 px in the browser) and images returned by MCP tools are passed to the model. Without it there is no
   image understanding: the prompt says so, and a turn with images carries a note that the model cannot see them.
+- **The parent app sending photos** (`console/src/agent/open-turn.ts`, `POST /open/v1/agent/turn`): the parent photographs homework
+  and asks the assistant about it. Not through the engine: the engine-facing `/xiaodan/agent/turn` takes text only, and the xiaozhi
+  `listen` message has no image field; the app already has an HTTPS channel straight to the console (the credits API), with device
+  identity and a public path already in place. So **text turns keep using the engine's WebSocket and only image turns use this HTTP
+  route**; both share one conversation (`device:<mac>`), so text after a photo continues the same thread. Authentication is the same
+  parent-app device identity as the credits API (only `board = xiaodan-app` devices). Request is `{text, images[]}` (data URLs, at
+  most 3, 3 MB each; an image-only turn gets the default sentence "看看这张图片。"). One turn per device at a time (409 when busy).
+  The response is `text/event-stream`: `{t:'text',v}` reply text (chunk by chunk, the client concatenates), `{t:'tool',name}` which
+  tool this turn is calling, `{t:'summary',steps,tool_calls,ms,error}`, `{t:'error',message}`. **No engine strips the leading emoji
+  and emotion tags on this route**, so the console does it in a streaming filter (`DisplayText`) that also holds back a tag, an emoji
+  or a story progress marker that arrived split across two chunks.
 - Text streams to the engine as it is generated, so the device starts speaking immediately; tools run in parallel with
   individual timeouts; when the step budget is used up, a final call without tools forces an answer. A heartbeat every
   2 seconds lets the provider notice interruptions; interrupting closes the request and the console cancels the model call and tools.

@@ -13,7 +13,7 @@
 import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import type { Db } from './db.ts';
 import { one, run } from './db.ts';
-import { APP_BOARD } from './credits/devices.ts';
+import { APP_BOARD, isAppDevice } from './credits/devices.ts';
 
 /** 待绑定行的空闲有效期。同一身份每轮询一次就顺延一次,所以设备一直开着码就一直有效。 */
 export const PENDING_IDLE_TTL_MINUTES = 10;
@@ -124,6 +124,45 @@ export function resolveDevice(conn: Db, mac: string, hash: string | null): Devic
   return sameHash(row.secret_hash, hash)
     ? { kind: 'verified', agentId: row.agent_id }
     : { kind: 'mismatch', agentId: row.agent_id };
+}
+
+export type AppDeviceCheck =
+  | { ok: true; mac: string; alias: string; agentId: string; rowid: number; createdAt: string }
+  | { ok: false; status: 401 | 403; code: 'unauthorized' | 'not_app_device'; error: string };
+
+/**
+ * 家长 App 的设备身份:Device-Id + Client-Id 核对通过,并且这台设备是 App(OTA 里报 board.type = xiaodan-app)。
+ *
+ * App 已经像设备一样绑过控制塔,不必再建密钥 —— 学分接口与 App 的对话接口(/open/v1/*)都用这一处判断。
+ * 玩具的身份核验也通过,但会被挡在 not_app_device:那些接口是给家长的,不是给孩子的。
+ */
+export function verifyAppDevice(conn: Db, deviceId: unknown, clientId: unknown): AppDeviceCheck {
+  const mac = canonicalMac(deviceId);
+  const secret = parseClientId(clientId);
+  if (!mac || !secret || resolveDevice(conn, mac, hashClientId(secret)).kind !== 'verified') {
+    return { ok: false, status: 401, code: 'unauthorized', error: '设备身份不对,或者这台设备还没绑定' };
+  }
+  const row = one<{ alias: string; board: string; agent_id: string; rowid: number; created_at: string }>(
+    conn,
+    'SELECT alias, board, agent_id, rowid, created_at FROM devices WHERE mac = ?',
+    mac,
+  );
+  if (!row || !isAppDevice(row)) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'not_app_device',
+      error: '只有家长 App(OTA 里报 board.type = xiaodan-app 的设备)能用设备身份调这套接口',
+    };
+  }
+  return {
+    ok: true,
+    mac,
+    alias: row.alias,
+    agentId: row.agent_id,
+    rowid: row.rowid,
+    createdAt: row.created_at,
+  };
 }
 
 export type PendingResult =

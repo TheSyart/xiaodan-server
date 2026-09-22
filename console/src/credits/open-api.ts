@@ -16,8 +16,8 @@ import type { Hono, MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import type { Db } from '../db.ts';
 import { one, run } from '../db.ts';
-import { canonicalMac, hashClientId, parseClientId, resolveDevice } from '../identity.ts';
-import { isAppDevice } from './devices.ts';
+import { verifyAppDevice } from '../identity.ts';
+import type { AppDeviceCheck } from '../identity.ts';
 import { anyActiveKey, findKey, requestKey, setRequestKey, type ApiKey } from './open-key.ts';
 import { buildOpenApi } from './openapi.ts';
 import { creditRoutes } from './routes.ts';
@@ -47,18 +47,12 @@ export function mountOpenCredits(app: Hono, conn: Db, now: () => Date): void {
   }));
 }
 
-/** 家长 App 的设备身份:核对 Client-Id 的哈希,且必须是 App 设备 */
-function appIdentity(conn: Db, deviceId: string, clientId: string): ApiKey | 'unauthorized' | 'not_app_device' {
-  const mac = canonicalMac(deviceId);
-  const secret = parseClientId(clientId);
-  if (!mac || !secret || resolveDevice(conn, mac, hashClientId(secret)).kind !== 'verified') return 'unauthorized';
-  const row = one<{ alias: string; board: string; rowid: number; created_at: string }>(conn,
-    'SELECT alias, board, rowid, created_at FROM devices WHERE mac = ?', mac);
-  if (!row || !isAppDevice(row)) return 'not_app_device';
+/** 家长 App 的设备身份 → 学分接口认的「密钥」形状。核验本身在 identity.ts(App 的对话接口也用同一处) */
+function appKeyOf(check: Extract<AppDeviceCheck, { ok: true }>): ApiKey {
   // 防重复表按 key_id 分;设备用负的 rowid,和命名密钥的正 id 不会撞
   return {
-    id: -row.rowid, name: row.alias || '家长 App', prefix: '', scope: 'write',
-    created_at: row.created_at, last_used_at: null, revoked_at: null,
+    id: -check.rowid, name: check.alias || '家长 App', prefix: '', scope: 'write',
+    created_at: check.createdAt, last_used_at: null, revoked_at: null,
   };
 }
 
@@ -68,12 +62,9 @@ function keyGuard(conn: Db, now: () => Date): MiddlewareHandler {
     const deviceId = c.req.header('device-id');
     const clientId = c.req.header('client-id');
     if (deviceId && clientId && !c.req.header('authorization')) {
-      const app = appIdentity(conn, deviceId, clientId);
-      if (app === 'unauthorized') return c.json({ error: '设备身份不对,或者这台设备还没绑定', code: 'unauthorized' }, 401);
-      if (app === 'not_app_device') {
-        return c.json({ error: '只有家长 App(OTA 里报 board.type = xiaodan-app 的设备)能用设备身份调这套接口', code: 'not_app_device' }, 403);
-      }
-      setRequestKey(c.req.raw, app);
+      const check = verifyAppDevice(conn, deviceId, clientId);
+      if (!check.ok) return c.json({ error: check.error, code: check.code }, check.status);
+      setRequestKey(c.req.raw, appKeyOf(check));
       return next();
     }
     if (!anyActiveKey(conn)) {
