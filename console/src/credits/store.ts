@@ -10,7 +10,7 @@ import type { Db } from '../db.ts';
 import { all, one, run, tx } from '../db.ts';
 import { formatBeijing } from '../agent/reminders/time.ts';
 import { CreditError } from './errors.ts';
-import { scoreMissed, scoreResult, type Quality, type ScoreParams, type ScoreResult } from './score.ts';
+import { gradeResult, missedResult, type Quality, type ScoreResult, type StoredQuality } from './score.ts';
 import { formatQty, fromBase, UNIT, type RewardKind } from './units.ts';
 
 export { CreditError, type CreditErrorCode } from './errors.ts';
@@ -22,38 +22,34 @@ export interface Actor {
 }
 export const ADMIN: Actor = { source: 'admin', actor: '' };
 
-/** 规则上可以调的数值,也是布置作业时要抄进快照的那一组 */
-export const PARAM_KEYS = [
-  'target_minutes', 'ontime_points', 'overtime_step', 'overtime_penalty', 'overtime_cap',
-  'q_excellent', 'q_good', 'q_fair', 'q_poor', 'missed_penalty',
-] as const satisfies readonly (keyof ScoreParams)[];
-
-export const DEFAULT_PARAMS: Omit<ScoreParams, 'target_minutes'> = {
-  ontime_points: 5, overtime_step: 10, overtime_penalty: 1, overtime_cap: 5,
-  q_excellent: 5, q_good: 3, q_fair: 0, q_poor: -2, missed_penalty: 5,
-};
-
-export interface RuleRow extends ScoreParams {
+/** 作业模板(原来叫「规则」):只有名字与参考用时,不再有任何分值 */
+export interface RuleRow {
   id: number;
   mac: string;
   name: string;
   sort: number;
   archived: number;
+  /** 参考用时(分钟):布置时抄进作业,界面上与实际用时对照,不参与算分 */
+  target_minutes: number;
   created_at: string;
   updated_at: string;
 }
 
-export interface TaskRow extends ScoreParams {
+export interface TaskRow {
   id: number;
   mac: string;
   day: string;
   rule_id: number | null;
   name: string;
+  /** 布置时抄下的参考用时 */
+  target_minutes: number;
   status: 'pending' | 'done' | 'missed';
   actual_minutes: number | null;
-  quality: Quality | null;
+  quality: StoredQuality | null;
   note: string;
-  time_points: number | null;
+  /** 家长给的分(0–5) */
+  base_points: number | null;
+  /** 质量加成(好 1 / 不好 0) */
   quality_points: number | null;
   total_points: number | null;
   scored_at: string | null;
@@ -141,7 +137,6 @@ export interface WalletSummary {
   used: number;
 }
 
-export type RuleInput = Partial<ScoreParams> & { name?: string };
 export type TaskStatusFilter = 'pending' | 'done' | 'missed' | 'claimed';
 
 const plain = <T>(row: T | undefined): T | undefined => (row ? ({ ...row } as T) : undefined);
@@ -271,30 +266,26 @@ export function ruleById(conn: Db, id: number): RuleRow | undefined {
 
 export function requireRule(conn: Db, id: number): RuleRow {
   const rule = ruleById(conn, id);
-  if (!rule) throw new CreditError('规则不存在', 404, 'not_found');
+  if (!rule) throw new CreditError('作业模板不存在', 404, 'not_found');
   return rule;
 }
 
-export function createRule(conn: Db, mac: string, input: RuleInput & { name: string; target_minutes: number }): RuleRow {
+export function createRule(conn: Db, mac: string, input: { name: string; target_minutes: number }): RuleRow {
   const sort = (one<{ n: number | null }>(conn, 'SELECT MAX(sort) AS n FROM credit_rules WHERE mac = ?', mac)?.n ?? 0) + 1;
-  const keys = PARAM_KEYS.filter((key) => input[key] !== undefined);
   run(conn,
-    `INSERT INTO credit_rules (mac, name, sort${keys.map((k) => `, ${k}`).join('')})
-     VALUES (?, ?, ?${keys.map(() => ', ?').join('')})`,
-    mac, input.name, sort, ...keys.map((key) => input[key]));
+    'INSERT INTO credit_rules (mac, name, sort, target_minutes) VALUES (?, ?, ?, ?)',
+    mac, input.name, sort, input.target_minutes);
   return ruleById(conn, lastId(conn))!;
 }
 
-export function updateRule(conn: Db, id: number, input: RuleInput): RuleRow {
+export function updateRule(conn: Db, id: number, input: { name?: string; target_minutes?: number }): RuleRow {
   requireRule(conn, id);
   const sets: string[] = [];
   const values: unknown[] = [];
   if (input.name !== undefined) { sets.push('name = ?'); values.push(input.name); }
-  for (const key of PARAM_KEYS) {
-    if (input[key] !== undefined) { sets.push(`${key} = ?`); values.push(input[key]); }
-  }
+  if (input.target_minutes !== undefined) { sets.push('target_minutes = ?'); values.push(input.target_minutes); }
   if (sets.length) {
-    // 只改规则本身。已经布置出去的作业各自带着快照,改这里不会动它们的分数
+    // 只改模板本身。已经布置出去的作业各自带着当时抄下的参考用时,改这里不会动它们
     run(conn, `UPDATE credit_rules SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`, ...values, id);
   }
   return ruleById(conn, id)!;
@@ -364,11 +355,11 @@ export function queryTasks(
   return { items, next: more && last ? `${last.day}_${last.id}` : null };
 }
 
-function insertTask(conn: Db, mac: string, day: string, ruleId: number | null, name: string, params: ScoreParams): number {
+/** 布置一项作业:把模板的参考用时抄进来,以后改模板不影响已经布置的 */
+function insertTask(conn: Db, mac: string, day: string, ruleId: number | null, name: string, targetMinutes: number): number {
   run(conn,
-    `INSERT INTO credit_tasks (mac, day, rule_id, name, ${PARAM_KEYS.join(', ')})
-     VALUES (?, ?, ?, ?, ${PARAM_KEYS.map(() => '?').join(', ')})`,
-    mac, day, ruleId, name, ...PARAM_KEYS.map((key) => params[key]));
+    'INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes) VALUES (?, ?, ?, ?, ?)',
+    mac, day, ruleId, name, targetMinutes);
   return lastId(conn);
 }
 
@@ -382,26 +373,17 @@ export function assignTasks(
       const rule = ruleById(conn, item.rule_id);
       if (!rule || rule.mac !== mac) throw new CreditError(`规则 ${item.rule_id} 不存在`, 404, 'not_found');
       if (rule.archived) throw new CreditError(`「${rule.name}」已停用,不能再布置`, 409, 'archived');
-      ids.push(insertTask(conn, mac, day, rule.id, rule.name, { ...pick(rule), target_minutes: item.target_minutes ?? rule.target_minutes }));
+      ids.push(insertTask(conn, mac, day, rule.id, rule.name, item.target_minutes ?? rule.target_minutes));
     }
     return ids.map((id) => taskById(conn, id)!);
   });
 }
 
-/** 不挂规则的临时作业:参数现填,没填的用默认值 */
+/** 不挂模板的临时作业:只用这一次的名字与参考用时 */
 export function createCustomTask(
-  conn: Db, mac: string, day: string, input: Partial<ScoreParams> & { name: string; target_minutes: number },
+  conn: Db, mac: string, day: string, input: { name: string; target_minutes: number },
 ): TaskRow {
-  const params: ScoreParams = { ...DEFAULT_PARAMS, ...definedOnly(input) } as ScoreParams;
-  return taskById(conn, insertTask(conn, mac, day, null, input.name, params))!;
-}
-
-function definedOnly<T extends object>(input: T): Partial<T> {
-  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as Partial<T>;
-}
-
-function pick(row: ScoreParams): ScoreParams {
-  return Object.fromEntries(PARAM_KEYS.map((key) => [key, row[key]])) as unknown as ScoreParams;
+  return taskById(conn, insertTask(conn, mac, day, null, input.name, input.target_minutes))!;
 }
 
 function pendingTask(conn: Db, id: number): TaskRow {
@@ -439,33 +421,46 @@ export function unclaimTask(conn: Db, id: number): TaskRow {
 }
 
 /** 只算不存:页面录入时实时预览 */
-export function previewTask(conn: Db, id: number, actualMinutes: number, quality: Quality): ScoreResult {
-  return scoreResult(pendingTask(conn, id), actualMinutes, quality);
+export function previewTask(conn: Db, id: number, points: number, quality: Quality): ScoreResult {
+  pendingTask(conn, id);
+  return gradeResult(points, quality);
 }
 
+/**
+ * 打一项作业:家长给的分 + 质量加成。分数记进流水(给 0 分也记,不然撤不了),
+ * 实际用时只填在作业行上,供界面上与参考用时对照。
+ */
 export function scoreTask(
-  conn: Db, id: number, actualMinutes: number, quality: Quality, note = '', by: Actor = ADMIN,
+  conn: Db, id: number,
+  input: { points: number; quality: Quality; actual_minutes: number | null; note?: string },
+  by: Actor = ADMIN,
 ): { task: TaskRow; score: ScoreResult; balance: number } {
   return tx(conn, () => {
     const task = pendingTask(conn, id);
-    const score = scoreResult(task, actualMinutes, quality);
+    const score = gradeResult(input.points, input.quality);
+    const note = (input.note ?? '').slice(0, 200);
     const ledgerId = addLedger(conn, task.mac, score.total, 'task', task.id, `${task.day} ${task.name}`, score.explain, by);
     run(conn,
       `UPDATE credit_tasks SET status = 'done', actual_minutes = ?, quality = ?, note = ?,
-         time_points = ?, quality_points = ?, total_points = ?, scored_at = datetime('now'), ledger_id = ?
+         base_points = ?, quality_points = ?, total_points = ?, scored_at = datetime('now'), ledger_id = ?
        WHERE id = ?`,
-      actualMinutes, quality, note.slice(0, 200), score.time_points, score.quality_points, score.total, ledgerId, id);
+      input.actual_minutes, input.quality, note, score.base_points, score.quality_points, score.total, ledgerId, id);
     return { task: taskById(conn, id)!, score, balance: balance(conn, task.mac) };
   });
 }
 
+/**
+ * 记「没完成」:记 0 分,不扣分。
+ * 流水里仍留一条 0 分的记录 —— 台账上说明这件事发生过,也让撤销(流水撤销)这条路继续可用,
+ * 撤销后作业回到待完成。余额不受影响。
+ */
 export function missTask(conn: Db, id: number, note = '', by: Actor = ADMIN): { task: TaskRow; score: ScoreResult; balance: number } {
   return tx(conn, () => {
     const task = pendingTask(conn, id);
-    const score = scoreMissed(task);
+    const score = missedResult();
     const ledgerId = addLedger(conn, task.mac, score.total, 'missed', task.id, `${task.day} ${task.name}`, score.explain, by);
     run(conn,
-      `UPDATE credit_tasks SET status = 'missed', note = ?, time_points = 0, quality_points = 0,
+      `UPDATE credit_tasks SET status = 'missed', note = ?, base_points = 0, quality_points = 0,
          total_points = ?, scored_at = datetime('now'), ledger_id = ?
        WHERE id = ?`,
       note.slice(0, 200), score.total, ledgerId, id);
@@ -678,7 +673,7 @@ export function revert(
       if (found) {
         run(conn,
           `UPDATE credit_tasks SET status = 'pending', actual_minutes = NULL, quality = NULL, note = '',
-             time_points = NULL, quality_points = NULL, total_points = NULL, scored_at = NULL, ledger_id = NULL
+             base_points = NULL, quality_points = NULL, total_points = NULL, scored_at = NULL, ledger_id = NULL
            WHERE id = ?`, found.id);
         task = taskById(conn, found.id);
       }
@@ -700,13 +695,16 @@ export interface CreditStats {
   from: string;
   to: string;
   balance: number;
-  /** 每天:挣的(作业与手动加分)、扣的(超时、差评、没完成、手动扣分)、花掉的(兑换)。撤销过的与撤销记录本身不计 */
+  /** 每天:挣的(作业与手动加分)、扣的(手动扣分,以及历史里旧公式算出的扣分)、花掉的(兑换)。撤销过的与撤销记录本身不计 */
   days: { day: string; earned: number; penalty: number; spent: number; net: number }[];
   totals: { earned: number; penalty: number; spent: number; net: number };
-  /** 各项作业:布置几次、完成几次、没完成几次、按时几次、平均用时与平均得分 */
+  /** 各项作业:布置几次、完成几次、没完成几次、参考用时内完成几次、平均用时与平均得分 */
   tasks: { name: string; assigned: number; done: number; missed: number; ontime: number; avg_minutes: number | null; avg_points: number | null }[];
   completion_rate: number | null;
+  /** 参考用时内完成的比例:参考用时只是对照,这个数也就只是个软指标 */
   ontime_rate: number | null;
+  /** 已打完分的作业平均得几分(给分 + 质量加成) */
+  avg_points: number | null;
   /** 各奖励兑换了几次、几份、多少(自然单位)、花了多少分。撤销过的不计 */
   redeemed: { reward_id: number; name: string; emoji: string; kind: RewardKind; unit: string; count: number; times: number; quantity: number; points: number }[];
   /** 各时间 / 零花钱账户这段时间进了多少、用了多少(自然单位)。撤销过的不计 */
@@ -782,7 +780,12 @@ export function stats(conn: Db, mac: string, from: string, to: string): CreditSt
   return {
     from, to, balance: balance(conn, mac), days, totals, tasks,
     completion_rate: finished ? Math.round((done / finished) * 1000) / 1000 : null,
+    // 「参考用时内完成」的比例:参考用时只作对照,这个数也只是个软指标
     ontime_rate: done ? Math.round((ontime / done) * 1000) / 1000 : (assigned ? 0 : null),
+    // 已打完分的作业平均得几分(给分 + 质量加成)
+    avg_points: one<{ n: number | null }>(conn,
+      "SELECT ROUND(AVG(total_points), 1) AS n FROM credit_tasks WHERE mac = ? AND status = 'done' AND day BETWEEN ? AND ?",
+      mac, from, to)?.n ?? null,
     redeemed, wallets,
   };
 }

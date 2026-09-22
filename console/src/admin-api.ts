@@ -492,11 +492,25 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
                 a.name AS agent_name,
                 l.source AS loc_source, l.lng AS loc_lng, l.lat AS loc_lat, l.radius AS loc_radius,
                 l.province AS loc_province, l.city AS loc_city, l.district AS loc_district, l.address AS loc_address,
-                l.last_error AS loc_error, l.located_at AS loc_at
+                l.last_error AS loc_error, l.located_at AS loc_at,
+                -- 家长 App 绑的是哪台硬件(孩子);硬件那行反过来能看到被哪台 App 绑
+                b.child_mac AS binding_mac, child.alias AS binding_alias, b.app_mac AS bound_app_mac, app.alias AS bound_app_alias
          FROM devices d LEFT JOIN agents a ON a.id = d.agent_id
          LEFT JOIN device_locations l ON l.mac = d.mac
+         LEFT JOIN child_bindings b ON b.app_mac = d.mac
+         LEFT JOIN devices child ON child.mac = b.child_mac
+         LEFT JOIN child_bindings ab ON ab.child_mac = d.mac
+         LEFT JOIN devices app ON app.mac = ab.app_mac
          ORDER BY d.last_connected_at DESC, d.created_at DESC`,
-      ),
+      ).map((row: any) => ({
+        ...row,
+        binding: row.binding_mac ? { mac: row.binding_mac, alias: row.binding_alias ?? '' } : null,
+        bound_app: row.bound_app_mac ? { mac: row.bound_app_mac, alias: row.bound_app_alias ?? '' } : null,
+        binding_mac: undefined,
+        binding_alias: undefined,
+        bound_app_mac: undefined,
+        bound_app_alias: undefined,
+      })),
       pending: all(
         conn,
         `SELECT p.id, p.mac, p.board, p.app_version, p.created_at, p.last_seen_at, p.expires_at,
@@ -552,7 +566,8 @@ export function adminApi(conn: Db, deps: AdminDeps = {}): Hono {
     const result = tx(conn, () => bindByCode(conn, { code, agentId: agentId ?? null, alias }));
     if (!result.ok) {
       if (result.status === 404) bindFailures.push(now);
-      return c.json({ error: result.error }, result.status);
+      // code 让页面能区分「现在只支持一个孩子」这类要换文案的情况
+      return c.json({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status);
     }
     return c.json({ ok: true, mac: result.mac });
   });

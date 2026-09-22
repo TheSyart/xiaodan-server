@@ -377,23 +377,27 @@ How emotion tags flow:
 
 ## Homework credits
 
-**Kept per device** (one device = one child). Credits are their own group in the console navigation: today's homework, rewards, rules,
-ledger, statistics and the open API. Unbinding a device deletes its credits.
+**Kept per hardware device** (one device = one child). Credits are their own group in the console navigation: today's homework, rewards,
+homework templates, ledger, statistics, the open API and money/time. Unbinding a device deletes its credits. **Only one child is
+supported for now**: with another hardware device already bound, binding a second one is refused (unbind the current one first), and the
+devices page warns when a legacy database holds more than one.
 
-- **Homework rules** (one set per device, values adjustable any time): a target duration; points for finishing on time; overtime counted
-  in steps of N minutes, each step costing some points, capped; points for each quality grade (excellent/good/fair/poor, may be
-  negative); points deducted for marking an assignment as not done.
-- **Scoring** (`console/src/credits/score.ts`, shared by the page preview and the stored result):
+- **Homework templates** (the old "homework rules", one set per device): a name plus a reference duration (`target_minutes`). The
+  reference duration is for the parent to compare against and **never enters the formula**; the old scoring parameters (on-time points,
+  overtime steps, four quality grades, missed penalty) were dropped in migration v16.
+- **Scoring** (`console/src/credits/score.ts`, shared by the page preview, the stored result and the agent tools):
   ```
-  time    = actual <= target ? on-time points : -min(cap, ceil((actual - target) / step) * per-step)
-  total   = time + quality            not done = -missed penalty
+  award   = the parent's own 0-5 points (actual time is only a reference)
+  quality = good +1 / poor +0
+  total   = award + quality (0-6)        not done = 0 points, no deduction
   ```
-  Rounding up means one minute over already costs a step. Every score carries a one-sentence explanation.
-- **Rules are snapshotted when homework is assigned**: every value is copied onto the task row, so changing a rule only affects homework
-  assigned afterwards and past scores never move. The target duration can also be overridden for a single assignment.
-- **Balance = sum of the ledger**; there is no stored balance. Penalties may push it below zero; **redeeming requires enough points**
-  (409 "N short" otherwise). The ledger is append-only: undoing appends an equal and opposite entry and marks the original; undoing a
-  homework score puts the task back to pending so it can be re-entered.
+  An award outside 0-5 is refused. Every score carries a one-sentence explanation ("给分 4;质量好 +1;合计 5").
+- **The reference duration is snapshotted when homework is assigned**: it is copied onto the task row, so changing a template only
+  affects homework assigned afterwards. It can also be overridden for a single assignment.
+- **Balance = sum of the ledger**; there is no stored balance. Manual deductions may push it below zero; **redeeming requires enough
+  points** (409 "N short" otherwise). The ledger is append-only: undoing appends an equal and opposite entry and marks the original;
+  undoing a homework score puts the task back to pending so it can be re-entered. Marking homework "not done" also writes a 0-point
+  entry (a truthful record, and what makes it undoable) — undoing it returns the task to pending.
 - **Rewards are exchanged in whole portions at a rate** (phase 4, migration v15): a reward costs `cost` points per portion and has a
   `kind` — `item` (a toy: redeemed and done), `time` (10 points = 5 minutes of games) or `money` (10 points = 5 yuan). `POST /redeem`
   takes `times` (1–100). Time and money go into **that reward's own balance account** (`credit_wallet`, one per reward: game minutes
@@ -419,6 +423,12 @@ ledger, statistics and the open API. Unbinding a device deletes its credits.
   - **Keys**: several, each named, read-only or writable, revocable on its own and tracking its last use, managed under "open API".
     Only the SHA-256 and the first 8 characters are stored; the plaintext is shown once. No active key → 404 for the whole group; a wrong
     key → 401; a read-only key writing → 403. Every ledger entry records which key made it.
+  - **Parent app binding**: on top of its device identity, the parent app binds **one hardware device (= one child)** on the server
+    (`credits/binding.ts`, table `child_bindings`): `GET /binding`, `PUT /binding {mac}` to bind or rebind, `DELETE /binding` to unbind —
+    app device identity only. After that, every other call from this app must pass the bound device's `mac`, or it gets 403
+    `not_bound_child`; calling before binding gets 409 `no_bound_child`; binding a second hardware device gets 409
+    `second_hardware_not_supported`. Named API keys are not restricted this way and keep passing `mac` explicitly. The devices page
+    shows which hardware each app is bound to and can unbind it for them.
   - **Parent app identity**: the parent app binds like a device (OTA with `board.type = "xiaodan-app"`, bind code on the devices page)
     and then calls `/open/v1/credits` with the same `Device-Id` + `Client-Id` headers instead of a key: verified and an app device →
     read/write, recorded under the device's name; a toy's identity → 403 `not_app_device`; wrong or unbound → 401. App devices are

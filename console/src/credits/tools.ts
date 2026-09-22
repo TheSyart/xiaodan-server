@@ -34,11 +34,16 @@ export function match<T extends { id: number; name: string }>(items: readonly T[
 
 function taskLine(task: TaskRow): string {
   if (task.status === 'done') {
-    return `- ${task.name}:已完成,用了 ${task.actual_minutes} 分钟、质量${QUALITY_LABEL[task.quality!]},得了 ${signed(task.total_points ?? 0)} 分`;
+    const used = task.actual_minutes === null ? '' : `用了 ${task.actual_minutes} 分钟,`;
+    // 新数据:家长给的分 + 质量加成;老数据里 base_points 就是旧公式算出的用时分
+    const detail = task.base_points === null
+      ? `得了 ${signed(task.total_points ?? 0)} 分`
+      : `家长给 ${task.base_points} 分${task.quality ? `、质量${QUALITY_LABEL[task.quality]}` : ''},得了 ${signed(task.total_points ?? 0)} 分`;
+    return `- ${task.name}:已完成,${used}${detail}`;
   }
   if (task.status === 'missed') return `- ${task.name}:记为没完成,${signed(task.total_points ?? 0)} 分`;
   if (task.claimed_at) return `- ${task.name}:你已经说做完了,等爸爸妈妈检查打分`;
-  return `- ${task.name}(编号 ${task.id}):还没做,规定 ${task.target_minutes} 分钟内完成能得 ${signed(task.ontime_points)} 分`;
+  return `- ${task.name}(编号 ${task.id}):还没做,参考用时 ${task.target_minutes} 分钟;做完由爸爸妈妈给你打分`;
 }
 
 const label = (reward: { emoji: string; name: string }) => `${reward.emoji ? `${reward.emoji} ` : ''}${reward.name}`;

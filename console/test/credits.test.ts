@@ -6,7 +6,7 @@ import { one, openMemoryDb, run, type Db } from '../src/db.ts';
 import { DEFAULT_AGENT_ID, seed } from '../src/seed.ts';
 import { createApp } from '../src/app.ts';
 import { Bridge } from '../src/agent/bridge.ts';
-import { scoreMissed, scoreResult, type ScoreParams } from '../src/credits/score.ts';
+import { gradeResult, missedResult, timeCompare, type Quality } from '../src/credits/score.ts';
 import { today } from '../src/credits/store.ts';
 
 const MAC = '4c:11:ae:31:7a:30';
@@ -19,11 +19,6 @@ class FakeBridge extends Bridge {
     super(() => 'http://engine:8003', () => 's', async () => new Response('{}'));
   }
 }
-
-const PARAMS: ScoreParams = {
-  target_minutes: 40, ontime_points: 5, overtime_step: 10, overtime_penalty: 1, overtime_cap: 5,
-  q_excellent: 5, q_good: 3, q_fair: 0, q_poor: -2, missed_penalty: 5,
-};
 
 beforeEach(() => {
   process.env['XIAODAN_AUTH_MODE'] = 'proxy';
@@ -57,42 +52,36 @@ async function assign(app: App, ruleId: number, target?: number) {
   const { data } = await api(app, 'POST', '/tasks', {
     mac: MAC, items: [{ rule_id: ruleId, ...(target ? { target_minutes: target } : {}) }],
   });
-  return data.items[0] as { id: number; day: string; target_minutes: number; ontime_points: number };
+  return data.items[0] as { id: number; day: string; target_minutes: number; name: string };
 }
 
 const balanceOf = () => one<{ n: number | null }>(conn, 'SELECT SUM(delta) AS n FROM credit_ledger WHERE mac = ?', MAC)?.n ?? 0;
 
 describe('计分公式', () => {
-  test('按时与提前都拿按时分;刚好压线算按时', () => {
-    assert.equal(scoreResult(PARAMS, 40, 'good').time_points, 5);
-    assert.equal(scoreResult(PARAMS, 25, 'good').time_points, 5);
-    assert.match(scoreResult(PARAMS, 40, 'good').explain, /刚好按时/u);
-    assert.match(scoreResult(PARAMS, 25, 'good').explain, /提前 15 分钟/u);
+  test('合计 = 家长给分(0~5) + 质量加成(好 1、不好 0),最高 6 分', () => {
+    assert.deepEqual(gradeResult(4, 'good'), {
+      base_points: 4, quality_points: 1, total: 5, explain: '给分 4;质量好 +1;合计 +5',
+    });
+    assert.equal(gradeResult(5, 'good').total, 6, '满分 5 分再加质量的 1 分');
+    assert.equal(gradeResult(0, 'poor').total, 0);
+    assert.equal(gradeResult(4, 'poor').total, 4, '质量不好不加分,但也不扣');
+    assert.equal(gradeResult(5, 'poor').total, 5);
+    assert.match(gradeResult(3, 'good').explain, /给分 3;质量好 \+1;合计 \+4/u);
   });
 
-  test('超时向上取整算档:超 1 分钟就是一档,超 10 分钟还是一档,超 11 分钟两档', () => {
-    assert.equal(scoreResult(PARAMS, 41, 'fair').time_points, -1);
-    assert.equal(scoreResult(PARAMS, 50, 'fair').time_points, -1);
-    assert.equal(scoreResult(PARAMS, 51, 'fair').time_points, -2);
+  test('给分越界(6、-1、小数)直接拒', () => {
+    for (const bad of [6, -1, 2.5]) assert.throws(() => gradeResult(bad, 'good'), /0~5/u);
   });
 
-  test('超时扣分到上限为止', () => {
-    const score = scoreResult(PARAMS, 200, 'fair');
-    assert.equal(score.time_points, -5);
-    assert.match(score.explain, /已到上限 5 分/u);
+  test('实际用时只跟参考用时对照,不参与算分', () => {
+    assert.match(timeCompare(55, 40), /多用 15 分钟/u);
+    assert.match(timeCompare(30, 40), /少用 10 分钟/u);
+    assert.match(timeCompare(40, 40), /正好/u);
+    assert.match(timeCompare(null, 40), /参考 40 分钟/u);
   });
 
-  test('质量四档各自计分,可以是负分;合计 = 用时 + 质量', () => {
-    const score = scoreResult(PARAMS, 55, 'good');
-    assert.deepEqual([score.time_points, score.quality_points, score.total], [-2, 3, 1]);
-    assert.equal(scoreResult(PARAMS, 30, 'poor').total, 3);
-    assert.equal(scoreResult(PARAMS, 90, 'poor').total, -7);
-    assert.match(score.explain, /超时 15 分钟.*质量良 \+3;合计 \+1/u);
-  });
-
-  test('没完成扣没完成分;设成 0 就不扣', () => {
-    assert.equal(scoreMissed(PARAMS).total, -5);
-    assert.equal(scoreMissed({ ...PARAMS, missed_penalty: 0 }).total, 0);
+  test('没完成记 0 分,不扣分', () => {
+    assert.deepEqual(missedResult(), { base_points: 0, quality_points: 0, total: 0, explain: '没完成,记 0 分' });
   });
 
   test('「今天」按北京时间:UTC 16:30 已经是北京的第二天', () => {
@@ -108,39 +97,49 @@ describe('作业与打分', () => {
     const task = await assign(app, rule.id);
     assert.equal(task.day, '2026-09-22', '不传日期就是北京时间的今天');
 
-    const preview = await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 55, quality: 'good', preview: true });
-    assert.equal(preview.data.score.total, 1);
+    const preview = await api(app, 'POST', `/tasks/${task.id}/result`, { points: 4, quality: 'good', actual_minutes: 55, preview: true });
+    assert.equal(preview.data.score.total, 5);
+    assert.deepEqual(
+      [preview.data.score.base_points, preview.data.score.quality_points],
+      [4, 1],
+      '分数就是给分 + 质量加成',
+    );
     assert.equal(balanceOf(), 0, '预览不落库');
 
-    const scored = await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 55, quality: 'good', note: '字写得工整' });
+    const scored = await api(app, 'POST', `/tasks/${task.id}/result`, { points: 4, quality: 'good', actual_minutes: 55, note: '字写得工整' });
     assert.equal(scored.status, 200);
     assert.equal(scored.data.task.status, 'done');
-    assert.equal(scored.data.task.total_points, 1);
-    assert.equal(scored.data.balance, 1);
-    assert.equal(balanceOf(), 1);
+    assert.equal(scored.data.task.base_points, 4);
+    assert.equal(scored.data.task.actual_minutes, 55, '实际用时记在作业上,只作对照');
+    assert.equal(scored.data.task.total_points, 5);
+    assert.equal(scored.data.balance, 5);
+    assert.equal(balanceOf(), 5);
 
-    const again = await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 30, quality: 'excellent' });
+    const again = await api(app, 'POST', `/tasks/${task.id}/result`, { points: 3, quality: 'poor' });
     assert.equal(again.status, 409, '打过分的不能直接重录');
+
+    const notes = one<{ note: string }>(conn, 'SELECT note FROM credit_ledger WHERE mac = ?', MAC)!;
+    assert.match(notes.note, /给分 4;质量好 \+1;合计 \+5/u, '流水里记着这个分怎么来的');
 
     const list = await api(app, 'GET', `/tasks?mac=${COMPACT}`);
     assert.equal(list.data.summary.done, 1);
-    assert.equal(list.data.summary.points, 1);
+    assert.equal(list.data.summary.points, 5);
   });
 
-  test('改规则只影响以后布置的作业,已打分的历史一分不变', async () => {
+  test('改模板只影响以后布置的作业:已布置的参考用时与打过的分都不动', async () => {
     const app = newApp();
     const rule = await mathRule(app);
     const first = await assign(app, rule.id);
-    await api(app, 'POST', `/tasks/${first.id}/result`, { actual_minutes: 30, quality: 'fair' });
+    await api(app, 'POST', `/tasks/${first.id}/result`, { points: 4, quality: 'good' });
     assert.equal(balanceOf(), 5);
 
-    await api(app, 'PUT', `/rules/${rule.id}`, { ontime_points: 8 });
+    await api(app, 'PUT', `/rules/${rule.id}`, { target_minutes: 60 });
     const history = await api(app, 'GET', `/tasks/${first.id}`);
     assert.equal(history.data.item.total_points, 5, '历史分数不动');
-    assert.equal(history.data.item.ontime_points, 5, '快照里还是当时的数值');
+    assert.equal(history.data.item.target_minutes, 40, '快照里还是当时抄下的参考用时');
 
     const second = await assign(app, rule.id);
-    assert.equal(second.ontime_points, 8, '新布置的用新数值');
+    assert.equal(second.target_minutes, 60, '新布置的用新的参考用时');
   });
 
   test('布置时可以临时改用时,还没打分时能改能删', async () => {
@@ -154,22 +153,33 @@ describe('作业与打分', () => {
     assert.equal((await api(app, 'GET', `/tasks/${task.id}`)).status, 404);
   });
 
-  test('没完成扣分,余额可以扣成负数', async () => {
+  test('没完成记 0 分、不扣分;流水里留一条 0 分记录,撤销后回到待完成', async () => {
     const app = newApp();
     const rule = await mathRule(app);
     const task = await assign(app, rule.id);
     const missed = await api(app, 'POST', `/tasks/${task.id}/missed`, { note: '拖到睡觉都没写' });
     assert.equal(missed.data.task.status, 'missed');
-    assert.equal(missed.data.balance, -5);
+    assert.equal(missed.data.task.total_points, 0);
+    assert.equal(missed.data.balance, 0, '不扣分');
+    assert.equal(missed.data.score.total, 0);
+    assert.equal(balanceOf(), 0);
+
+    const entry = one<{ delta: number; kind: string; note: string }>(conn, 'SELECT delta, kind, note FROM credit_ledger')!;
+    assert.deepEqual([entry.delta, entry.kind], [0, 'missed'], '账上留一条 0 分记录,说明这件事发生过');
+    assert.match(entry.note, /没完成,记 0 分/u);
+
+    const reverted = await api(app, 'POST', `/ledger/${missed.data.task.ledger_id}/revert`);
+    assert.equal(reverted.data.task.status, 'pending', '撤销后作业回到待完成');
+    assert.equal(reverted.data.balance, 0);
   });
 
   test('撤销打分:作业回到待完成、分数退回,可以重新录入;同一笔不能撤两次', async () => {
     const app = newApp();
     const rule = await mathRule(app);
     const task = await assign(app, rule.id);
-    const scored = await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 30, quality: 'excellent' });
+    const scored = await api(app, 'POST', `/tasks/${task.id}/result`, { points: 5, quality: 'good' });
     const ledgerId = scored.data.task.ledger_id as number;
-    assert.equal(balanceOf(), 10);
+    assert.equal(balanceOf(), 6, '5 分 + 质量好 1 分');
 
     const reverted = await api(app, 'POST', `/ledger/${ledgerId}/revert`);
     assert.equal(reverted.status, 200);
@@ -180,16 +190,9 @@ describe('作业与打分', () => {
     assert.equal((await api(app, 'POST', `/ledger/${ledgerId}/revert`)).status, 409, '已经撤销过');
     assert.equal((await api(app, 'POST', `/ledger/${reverted.data.ledger.id}/revert`)).status, 409, '撤销记录本身不能撤');
 
-    const rescored = await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 45, quality: 'good' });
+    const rescored = await api(app, 'POST', `/tasks/${task.id}/result`, { points: 3, quality: 'poor' });
     assert.equal(rescored.status, 200, '撤销后能重新录入');
-  });
-
-  test('规则示例预览:数值没保存也能算', async () => {
-    const app = newApp();
-    const { data, status } = await api(app, 'POST', '/rules/preview', { params: PARAMS, actual_minutes: 55, quality: 'good' });
-    assert.equal(status, 200);
-    assert.equal(data.score.total, 1);
-    assert.equal((await api(app, 'POST', '/rules/preview', { params: { ...PARAMS, overtime_step: 0 }, actual_minutes: 55, quality: 'good' })).status, 400);
+    assert.equal(rescored.data.task.total_points, 3, '质量不好就是给分本身');
   });
 
   test('用过的规则删除变归档,没用过的真删;归档的不能再布置', async () => {
@@ -206,18 +209,21 @@ describe('作业与打分', () => {
     assert.equal(blocked.status, 409);
   });
 
-  test('参数校验:越界的数值、写错的质量档、别的设备的规则', async () => {
+  test('参数校验:越界的给分、写错的质量、别的孩子的模板', async () => {
     const app = newApp();
     assert.equal((await api(app, 'POST', '/rules', { mac: MAC, name: '数学', target_minutes: 0 })).status, 400);
-    assert.equal((await api(app, 'POST', '/rules', { mac: MAC, name: '数学', target_minutes: 40, q_good: 999 })).status, 400);
+    assert.equal((await api(app, 'POST', '/rules', { mac: MAC, name: '数学', target_minutes: 601 })).status, 400);
     assert.equal((await api(app, 'POST', '/rules', { mac: 'zz', name: '数学', target_minutes: 40 })).status, 404);
     const rule = await mathRule(app);
     const task = await assign(app, rule.id);
-    assert.equal((await api(app, 'POST', `/tasks/${task.id}/result`, { actual_minutes: 30, quality: 'great' })).status, 400);
+    assert.equal((await api(app, 'POST', `/tasks/${task.id}/result`, { points: 6, quality: 'good' })).status, 400, '给分最多 5');
+    assert.equal((await api(app, 'POST', `/tasks/${task.id}/result`, { points: -1, quality: 'good' })).status, 400);
+    assert.equal((await api(app, 'POST', `/tasks/${task.id}/result`, { points: 3, quality: 'fair' })).status, 400, '质量只有好 / 不好');
+    assert.equal((await api(app, 'POST', `/tasks/${task.id}/result`, { points: 3 })).status, 400, '质量必填');
 
     run(conn, 'INSERT INTO devices (mac, agent_id) VALUES (?, ?)', 'aa:bb:cc:dd:ee:02', DEFAULT_AGENT_ID);
     const cross = await api(app, 'POST', '/tasks', { mac: 'aa:bb:cc:dd:ee:02', items: [{ rule_id: rule.id }] });
-    assert.equal(cross.status, 404, '不能拿别的孩子的规则布置');
+    assert.equal(cross.status, 404, '不能拿别的孩子的模板布置');
   });
 });
 
@@ -304,16 +310,16 @@ describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () =>
     const app = newApp();
     const rule = await mathRule(app);
     assert.equal((await api(app, 'GET', `/rules/${rule.id}`)).data.item.name, '数学作业');
-    const patched = await api(app, 'PATCH', `/rules/${rule.id}`, { q_good: 4 });
-    assert.equal(patched.data.item.q_good, 4);
-    assert.equal(patched.data.item.target_minutes, 40, '没传的字段不动');
+    const patched = await api(app, 'PATCH', `/rules/${rule.id}`, { target_minutes: 50 });
+    assert.equal(patched.data.item.target_minutes, 50);
+    assert.equal(patched.data.item.name, '数学作业', '没传的字段不动');
     const put = await api(app, 'PUT', `/rules/${rule.id}`, { name: '数学练习' });
-    assert.deepEqual([put.data.item.name, put.data.item.q_good], ['数学练习', 4]);
+    assert.deepEqual([put.data.item.name, put.data.item.target_minutes], ['数学练习', 50]);
 
     const missing = await api(app, 'GET', '/rules/9999');
     assert.equal(missing.status, 404);
     assert.equal(missing.data.code, 'not_found');
-    const invalid = await api(app, 'PATCH', `/rules/${rule.id}`, { q_good: 999 });
+    const invalid = await api(app, 'PATCH', `/rules/${rule.id}`, { target_minutes: 999 });
     assert.equal(invalid.data.code, 'invalid');
     const noDevice = await api(app, 'GET', '/rules?mac=aabbccddee99');
     assert.equal(noDevice.data.code, 'device_not_found');
@@ -341,17 +347,17 @@ describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () =>
 
   test('临时作业不挂规则、参数现填;按日期段与状态查历史并翻页', async () => {
     const app = newApp();
-    const custom = await api(app, 'POST', '/tasks/custom', { mac: MAC, day: '2026-09-20', name: '练钢琴', target_minutes: 30, ontime_points: 8 });
+    const custom = await api(app, 'POST', '/tasks/custom', { mac: MAC, day: '2026-09-20', name: '练钢琴', target_minutes: 30 });
     assert.equal(custom.data.item.rule_id, null);
-    assert.equal(custom.data.item.ontime_points, 8);
-    assert.equal(custom.data.item.q_good, 3, '没填的用默认');
+    assert.equal(custom.data.item.target_minutes, 30);
+    assert.equal(custom.data.item.name, '练钢琴');
 
     const rule = await mathRule(app);
     for (const day of ['2026-09-20', '2026-09-21', '2026-09-22']) {
       await api(app, 'POST', '/tasks', { mac: MAC, day, items: [{ rule_id: rule.id }] });
     }
     const t21 = (await api(app, 'GET', `/tasks?mac=${COMPACT}&day=2026-09-21`)).data.items[0];
-    await api(app, 'POST', `/tasks/${t21.id}/result`, { actual_minutes: 30, quality: 'good' });
+    await api(app, 'POST', `/tasks/${t21.id}/result`, { points: 4, quality: 'good', actual_minutes: 30 });
 
     const page1 = await api(app, 'GET', `/tasks?mac=${COMPACT}&from=2026-09-20&to=2026-09-22&limit=2`);
     assert.deepEqual(page1.data.items.map((t: any) => t.day), ['2026-09-22', '2026-09-21']);
@@ -393,15 +399,15 @@ describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () =>
     assert.equal((await api(app, 'GET', `/ledger?mac=${COMPACT}&from=2099-01-01`)).data.items.length, 0);
   });
 
-  test('统计:每天挣/扣/花与流水对得上,撤销过的不计;完成率与按时率', async () => {
+  test('统计:每天挣/花与流水对得上,撤销过的不计;完成率、参考用时内完成率与平均得分', async () => {
     const app = newApp();
     const rule = await mathRule(app);
     const a = await assign(app, rule.id);
     const b = await assign(app, rule.id);
     const c = await assign(app, rule.id);
-    await api(app, 'POST', `/tasks/${a.id}/result`, { actual_minutes: 30, quality: 'excellent' });   // +10
-    await api(app, 'POST', `/tasks/${b.id}/result`, { actual_minutes: 70, quality: 'poor' });        // -3 -2 = -5
-    await api(app, 'POST', `/tasks/${c.id}/missed`, {});                                              // -5
+    await api(app, 'POST', `/tasks/${a.id}/result`, { points: 4, quality: 'good', actual_minutes: 30 });  // +5,参考内
+    await api(app, 'POST', `/tasks/${b.id}/result`, { points: 1, quality: 'poor', actual_minutes: 70 });  // +1,超参考
+    await api(app, 'POST', `/tasks/${c.id}/missed`, {});                                                  // 0
     const wrong = await api(app, 'POST', '/adjust', { mac: MAC, delta: 50, reason: '手滑' });
     await api(app, 'POST', `/ledger/${wrong.data.ledger.id}/revert`);
 
@@ -409,12 +415,15 @@ describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () =>
     assert.equal(s.days.length, 7, '默认最近 7 天');
     const todayRow = s.days.at(-1);
     assert.equal(todayRow.day, '2026-09-22');
-    assert.deepEqual([todayRow.earned, todayRow.penalty, todayRow.spent], [10, 10, 0], '手滑那笔撤销了不计');
-    assert.equal(s.balance, 0);
+    assert.deepEqual([todayRow.earned, todayRow.penalty, todayRow.spent], [6, 0, 0], '手滑那笔撤销了不计;没完成不扣分');
+    assert.equal(s.balance, 6);
     assert.equal(s.tasks[0].assigned, 3);
-    assert.equal(s.tasks[0].ontime, 1);
+    assert.equal(s.tasks[0].done, 2);
+    assert.equal(s.tasks[0].missed, 1);
+    assert.equal(s.tasks[0].ontime, 1, '只有第一项在参考用时内');
     assert.equal(s.completion_rate, 0.667);
     assert.equal(s.ontime_rate, 0.5);
+    assert.equal(s.avg_points, 3, '两项得分的平均:(5 + 1) / 2');
     assert.equal((await api(app, 'GET', `/stats?mac=${COMPACT}&from=2026-09-23&to=2026-09-22`)).status, 400);
   });
 
@@ -422,7 +431,9 @@ describe('v1 接口:按 id 读、部分更新、恢复、排序、筛选', () =>
     const meta = (await api(newApp(), 'GET', '/meta')).data;
     assert.equal(meta.today, '2026-09-22');
     assert.deepEqual(meta.ranges.target_minutes, [1, 600]);
-    assert.equal(meta.qualities.length, 4);
+    assert.deepEqual(meta.ranges.points, [0, 5]);
+    assert.deepEqual(meta.qualities.map((q: any) => q.key), ['good', 'poor']);
+    assert.deepEqual(meta.legacy_qualities.map((q: any) => q.key), ['excellent', 'fair'], '历史行的两档也列出来');
   });
 });
 
@@ -637,6 +648,7 @@ describe('家长 App 用设备身份调外部接口', () => {
   const APP_MAC = '02:5a:00:00:00:01';
   const APP_SECRET = '0123456789abcdef'.repeat(4);
   const TOY_SECRET = 'fedcba9876543210'.repeat(4);
+  /** 建好一台家长 App 与玩具的设备行(哈希用控制台自己的算法) */
   const bindApp = async () => {
     const { hashClientId } = await import('../src/identity.ts');
     run(conn, 'INSERT INTO devices (mac, agent_id, alias, board, secret_hash) VALUES (?, ?, ?, ?, ?)',
@@ -646,25 +658,67 @@ describe('家长 App 用设备身份调外部接口', () => {
   const asDevice = (app: App, method: string, path: string, deviceId: string, clientId: string, body?: unknown) =>
     call(app, method, `${OPEN}${path}`, body, { 'device-id': deviceId, 'client-id': clientId });
 
-  test('已绑定的 App 不用建密钥就能读写,流水记 App 名;玩具的身份 403;身份不对 401', async () => {
+  test('App 要先绑定一台硬件才能动学分;绑了就能读写、流水记 App 名;解绑后又拦上', async () => {
     await bindApp();
     const app = newApp();
-    const children = await asDevice(app, 'GET', '/children', '025a00000001', APP_SECRET);
-    assert.equal(children.status, 200);
-    assert.deepEqual(children.data.items.map((c: any) => c.mac), [MAC], '孩子列表里没有 App 自己');
+
+    // 没绑硬件:读也拦,先看 /binding
+    const before = await asDevice(app, 'GET', `/tasks?mac=${COMPACT}`, APP_MAC, APP_SECRET);
+    assert.deepEqual([before.status, before.data.code], [409, 'no_bound_child']);
+    assert.equal((await asDevice(app, 'GET', '/binding', APP_MAC, APP_SECRET)).data.child, null);
+
+    const bound = await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: MAC });
+    assert.equal(bound.status, 200);
+    assert.deepEqual([bound.data.child.mac, bound.data.child.alias], [MAC, '乐乐的小单']);
+    assert.equal((await asDevice(app, 'GET', '/binding', '025a00000001', APP_SECRET)).data.child.mac, MAC);
 
     const added = await asDevice(app, 'POST', '/adjust', APP_MAC, APP_SECRET, { mac: COMPACT, delta: 4, reason: 'App 按钮' });
     assert.equal(added.status, 200);
     assert.deepEqual([added.data.ledger.source, added.data.ledger.actor], ['api', '妈妈的 App']);
 
-    const toy = await asDevice(app, 'GET', '/children', MAC, TOY_SECRET);
-    assert.deepEqual([toy.status, toy.data.code], [403, 'not_app_device']);
-    assert.equal((await asDevice(app, 'GET', '/children', APP_MAC, '13579bdf02468ace'.repeat(4))).status, 401);
-    assert.equal((await asDevice(app, 'GET', '/children', '02:5a:00:00:00:09', APP_SECRET)).status, 401);
-    assert.equal((await asDevice(app, 'GET', '/children', APP_MAC, 'not-hex')).status, 401);
+    // 绑了一台,就不能操作别台
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', 'aa:bb:cc:dd:ee:09', DEFAULT_AGENT_ID, '别人家的小单');
+    const other = await asDevice(app, 'GET', '/tasks?mac=aabbccddee09', APP_MAC, APP_SECRET);
+    assert.deepEqual([other.status, other.data.code], [403, 'not_bound_child']);
+
+    assert.equal((await asDevice(app, 'DELETE', '/binding', APP_MAC, APP_SECRET)).status, 200);
+    assert.equal((await asDevice(app, 'DELETE', '/binding', APP_MAC, APP_SECRET)).data.result, 'none', '没绑过也回 ok,重试无痛');
+    assert.equal((await asDevice(app, 'GET', `/tasks?mac=${COMPACT}`, APP_MAC, APP_SECRET)).status, 409, '解绑后又拦上');
   });
 
-  test('App 设备不算孩子:按它的 MAC 查学分 404;命名密钥照旧可用;设备身份也能防重复提交', async () => {
+  test('绑定只认硬件:玩具的身份 403;App 不能当孩子;一台硬件只被一台手机绑;多台硬件先清理', async () => {
+    await bindApp();
+    const { hashClientId } = await import('../src/identity.ts');
+    const app = newApp();
+
+    const toy = await asDevice(app, 'GET', '/binding', MAC, TOY_SECRET);
+    assert.deepEqual([toy.status, toy.data.code], [403, 'not_app_device']);
+    assert.equal((await asDevice(app, 'GET', '/binding', APP_MAC, '13579bdf02468ace'.repeat(4))).status, 401);
+    assert.equal((await asDevice(app, 'GET', '/binding', '02:5a:00:00:00:09', APP_SECRET)).status, 401);
+    assert.equal((await asDevice(app, 'GET', '/binding', APP_MAC, 'not-hex')).status, 401);
+
+    const self = await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: APP_MAC });
+    assert.deepEqual([self.status, self.data.code], [400, 'app_device_cannot_be_child']);
+    assert.equal((await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: '02:5a:00:00:00:77' })).status, 404);
+
+    // 两台手机抢同一台硬件
+    const OTHER_APP = '02:5a:00:00:00:02';
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias, board, secret_hash) VALUES (?, ?, ?, ?, ?)',
+      OTHER_APP, DEFAULT_AGENT_ID, '爸爸的手机', 'xiaodan-app', hashClientId(APP_SECRET));
+    assert.equal((await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: MAC })).status, 200);
+    const clash = await asDevice(app, 'PUT', '/binding', OTHER_APP, APP_SECRET, { mac: MAC });
+    assert.deepEqual([clash.status, clash.data.code], [409, 'child_already_bound']);
+
+    // 存量多台硬件:让家长先去控制台清理
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', 'aa:bb:cc:dd:ee:07', DEFAULT_AGENT_ID, '第二台');
+    const many = await asDevice(app, 'PUT', '/binding', OTHER_APP, APP_SECRET, { mac: MAC });
+    assert.deepEqual([many.status, many.data.code], [409, 'second_hardware_not_supported']);
+
+    // 换绑到自己已经绑的那台:幂等,不受多台影响
+    assert.equal((await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: MAC })).status, 200);
+  });
+
+  test('App 设备不算孩子:按它的 MAC 查学分 404;命名密钥照旧可用、不受绑定限制;设备身份也能防重复提交', async () => {
     await bindApp();
     const app = newApp();
     const asChild = await asDevice(app, 'GET', `/children/025a00000001`, APP_MAC, APP_SECRET);
@@ -672,9 +726,11 @@ describe('家长 App 用设备身份调外部接口', () => {
     const overview = (await api(app, 'GET', '/overview')).data;
     assert.ok(!JSON.stringify(overview).includes(APP_MAC), '页面概览的设备列表不含 App');
 
+    // 命名密钥(页面、脚本)照旧显式传 mac,不看绑定
     const { key } = await newKey(app, '快捷指令');
-    assert.equal((await open(app, 'GET', '/children', key)).status, 200);
+    assert.equal((await open(app, 'GET', `/tasks?mac=${COMPACT}`, key)).status, 200);
 
+    await asDevice(app, 'PUT', '/binding', APP_MAC, APP_SECRET, { mac: MAC });
     const body = { mac: COMPACT, delta: 2, reason: '重试' };
     const headers = { 'device-id': APP_MAC, 'client-id': APP_SECRET, 'idempotency-key': 'k1' };
     await call(app, 'POST', `${OPEN}/adjust`, body, headers);
@@ -715,23 +771,33 @@ describe('智能体的大人版学分工具', () => {
     assert.equal(new Set(both).size, 15);
   });
 
-  test('操作哪个孩子:玩具上默认它自己;App 上只有一个孩子就用他;多个孩子要问;App 不算孩子', async () => {
+  test('操作哪个孩子:玩具上就是它自己;App 上用它绑的那台;没绑或多台都如实说明', async () => {
     enable();
     addApp();
     const app = newApp();
     await api(app, 'POST', '/examples', { mac: MAC });
     const overview = await tool('credits_overview');
+
+    // App 还没绑硬件:提示家长去 App 里选一台
+    const unbound = await overview.run(agentCtx(APP_MAC), {});
+    assert.equal(unbound.ok, false);
+    assert.match(unbound.content, /还没绑定孩子/u);
+
+    // 绑上之后:用的就是那台
+    run(conn, 'INSERT INTO child_bindings (app_mac, child_mac) VALUES (?, ?)', APP_MAC, MAC);
     assert.match((await overview.run(agentCtx(APP_MAC), {})).content, /乐乐的小单 现在有 0 分/u);
+
+    // 没有设备上下文(网页试聊这类):只有一台硬件就用它
     assert.match((await overview.run(agentCtx(null), {})).content, /乐乐的小单/u);
 
+    // 存量多台:如实说明并请家长去控制台清理,不再「问是哪一个」
     run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', '4c:11:ae:31:7a:31', DEFAULT_AGENT_ID, '豆豆');
-    const ask = await overview.run(agentCtx(APP_MAC), {});
-    assert.equal(ask.ok, false);
-    assert.match(ask.content, /好几个孩子/u);
-    assert.doesNotMatch(ask.content, /妈妈的 App/u);
-    assert.match((await overview.run(agentCtx(APP_MAC), { child: '豆豆' })).content, /豆豆 现在有 0 分/u);
-    assert.match((await overview.run(agentCtx(MAC), {})).content, /乐乐的小单 现在有/u, '对着玩具说话默认就是它');
-    assert.equal((await overview.run(agentCtx(APP_MAC), { child: '妈妈的 App' })).ok, false);
+    const many = await overview.run(agentCtx(null), {});
+    assert.equal(many.ok, false);
+    assert.match(many.content, /现在只支持一个孩子/u);
+    assert.doesNotMatch(many.content, /妈妈的 App/u, 'App 不算孩子');
+    assert.match((await overview.run(agentCtx(MAC), {})).content, /乐乐的小单 现在有/u, '对着玩具说话不受影响');
+    assert.match((await overview.run(agentCtx(APP_MAC), {})).content, /乐乐的小单 现在有/u, 'App 用绑定的那台,不受多台影响');
   });
 
   test('布置:按规则名、可改用时;没规则带用时建临时作业;有一项对不上整批不布置', async () => {
@@ -758,21 +824,27 @@ describe('智能体的大人版学分工具', () => {
     await api(app, 'POST', '/examples', { mac: MAC });
     await (await tool('credits_assign')).run(agentCtx(), { tasks: [{ name: '语文' }, { name: '数学' }, { name: '英语' }] });
 
-    const scored = await (await tool('credits_score')).run(agentCtx(), { task: '数学', minutes: 45, quality: '良' });
+    // 家长没说给几分:先追问,不自己猜
+    const noPoints = await (await tool('credits_score')).run(agentCtx(), { task: '数学', quality: '好', minutes: 45 });
+    assert.equal(noPoints.ok, false);
+    assert.match(noPoints.content, /先问一句/u);
+
+    const scored = await (await tool('credits_score')).run(agentCtx(), { task: '数学', points: 4, quality: '好', minutes: 45 });
     assert.equal(scored.ok, true);
-    assert.match(scored.content, /超时 5 分钟.*合计 \+2/u);
-    const again = await (await tool('credits_score')).run(agentCtx(), { task: '数学', minutes: 45, quality: 'good' });
+    assert.match(scored.content, /给分 4;质量好 \+1;合计 \+5/u);
+    assert.match(scored.content, /实际用时 45 分钟\(参考 40\)/u, '实际用时只作对照');
+    const again = await (await tool('credits_score')).run(agentCtx(), { task: '数学', points: 3, quality: 'poor' });
     assert.equal(again.ok, false, '打过分的不能再打');
 
     const missed = await (await tool('credits_mark_missed')).run(agentCtx(), { task: '英语' });
-    assert.match(missed.content, /扣 5 分/u);
-    assert.equal(balanceOf(), -3);
+    assert.match(missed.content, /记 0 分/u);
+    assert.equal(balanceOf(), 5);
 
     const edit = await tool('credits_edit_task');
     const yuwen = (await api(app, 'GET', `/tasks?mac=${COMPACT}`)).data.items.find((t: any) => t.name === '语文作业');
     await api(app, 'POST', `/tasks/${yuwen.id}/claim`, { minutes: 30 });
     assert.match((await edit.run(agentCtx(), { task: '语文', action: 'reject_claim' })).content, /已驳回/u);
-    assert.match((await edit.run(agentCtx(), { task: '语文', action: 'update', minutes: 50 })).content, /规定 50 分钟/u);
+    assert.match((await edit.run(agentCtx(), { task: '语文', action: 'update', minutes: 50 })).content, /参考用时 50 分钟/u);
     assert.match((await edit.run(agentCtx(), { task: String(yuwen.id), action: 'delete' })).content, /已删除/u);
 
     const ledger = (await api(app, 'GET', `/ledger?mac=${COMPACT}`)).data.items;
@@ -797,7 +869,7 @@ describe('智能体的大人版学分工具', () => {
     assert.equal((await undo.run(agentCtx(), {})).ok, false, '没有能撤的了');
 
     await (await tool('credits_assign')).run(agentCtx(), { tasks: [{ name: '数学' }] });
-    await (await tool('credits_score')).run(agentCtx(), { task: '数学', minutes: 30, quality: '优' });
+    await (await tool('credits_score')).run(agentCtx(), { task: '数学', points: 5, quality: '好' });
     assert.match((await undo.run(agentCtx(), {})).content, /回到待完成/u);
     assert.equal((await api(app, 'GET', `/tasks?mac=${COMPACT}`)).data.items[0].status, 'pending');
   });
@@ -806,11 +878,11 @@ describe('智能体的大人版学分工具', () => {
     enable();
     const app = newApp();
     const rule = await tool('credits_manage_rule');
-    assert.equal((await rule.run(agentCtx(), { action: 'create', name: '钢琴' })).ok, false, '新建要规定用时');
-    assert.match((await rule.run(agentCtx(), { action: 'create', name: '钢琴', target_minutes: 30, q_poor: -5 })).content, /规定 30 分钟.*-5/u);
-    assert.equal((await rule.run(agentCtx(), { action: 'create', name: '钢琴', target_minutes: 30 })).ok, false, '不重名');
-    assert.equal((await rule.run(agentCtx(), { action: 'update', name: '钢琴', ontime_points: 999 })).ok, false, '越界');
-    assert.match((await rule.run(agentCtx(), { action: 'update', name: '钢琴', new_name: '钢琴练习', ontime_points: 8 })).content, /钢琴练习.*按时 \+8/u);
+    assert.equal((await rule.run(agentCtx(), { action: 'create', name: '钢琴' })).ok, false, '新建要参考用时');
+    assert.match((await rule.run(agentCtx(), { action: 'create', name: '钢琴', minutes: 30 })).content, /参考用时 30 分钟/u);
+    assert.equal((await rule.run(agentCtx(), { action: 'create', name: '钢琴', minutes: 30 })).ok, false, '不重名');
+    assert.equal((await rule.run(agentCtx(), { action: 'update', name: '钢琴', minutes: 999 })).ok, false, '越界');
+    assert.match((await rule.run(agentCtx(), { action: 'update', name: '钢琴', new_name: '钢琴练习', minutes: 45 })).content, /参考用时 45 分钟/u);
     await (await tool('credits_assign')).run(agentCtx(), { tasks: [{ name: '钢琴练习' }] });
     assert.match((await rule.run(agentCtx(), { action: 'delete', name: '钢琴练习' })).content, /停用/u);
     assert.match((await rule.run(agentCtx(), { action: 'restore', name: '钢琴练习' })).content, /已恢复/u);
@@ -981,6 +1053,11 @@ describe('按份兑换与时间 / 零花钱余额', () => {
     const r = await rewardsByName(app);
     await api(app, 'POST', '/adjust', { mac: MAC, delta: 10, reason: '攒的' });
     const headers = { 'device-id': APP_MAC, 'client-id': SECRET };
+    // 新的规矩:App 只能操作它在服务端绑定的那台硬件
+    assert.equal((await call(app, 'PUT', `${OPEN}/binding`, { mac: MAC }, headers)).status, 200);
+    run(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', 'aa:bb:cc:dd:ee:02', DEFAULT_AGENT_ID, '别人家的小单');
+    const cross = await call(app, 'POST', `${OPEN}/adjust`, { mac: 'aabbccddee02', delta: 1, reason: '越权' }, headers);
+    assert.deepEqual([cross.status, cross.data.code], [403, 'not_bound_child'], 'App 只能操作绑定的那台');
     const redeemed = await call(app, 'POST', `${OPEN}/redeem`, { mac: COMPACT, reward_id: r['零花钱'].id }, headers);
     assert.equal(redeemed.data.wallet.entry.actor, '妈妈的 App');
     const spent = await call(app, 'POST', `${OPEN}/wallets/use`, { mac: COMPACT, reward_id: r['零花钱'].id, amount: 2, reason: '买本子' }, headers);
@@ -991,6 +1068,14 @@ describe('按份兑换与时间 / 零花钱余额', () => {
       assert.ok(spec.paths[path], path);
     }
     assert.ok(spec.components.responses.Error.content['application/json'].schema.properties.code.enum.includes('insufficient_wallet'));
+    for (const path of ['/binding', '/rules', '/tasks/{id}/result']) assert.ok(spec.paths[path], path);
+    assert.equal(spec.paths['/rules/preview'], undefined, '试算接口随旧模型一起没了');
+    const codes = spec.components.responses.Error.content['application/json'].schema.properties.code.enum as string[];
+    for (const code of ['no_bound_child', 'not_bound_child', 'second_hardware_not_supported', 'app_device_cannot_be_child']) {
+      assert.ok(codes.includes(code), code);
+    }
+    assert.equal(spec.paths['/tasks/{id}/result'].post.requestBody.content['application/json'].schema.properties.points.maximum, 5);
+    assert.equal(spec.paths['/tasks/{id}/result'].post.requestBody.content['application/json'].schema.properties.quality.enum.join(','), 'good,poor');
     assert.deepEqual(spec.paths['/redeem'].post.requestBody.content['application/json'].schema.properties.times.maximum, 100);
   });
 });

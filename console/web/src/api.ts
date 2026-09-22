@@ -251,6 +251,8 @@ export interface Device {
   loc_address: string | null;
   loc_error: string | null;
   loc_at: string | null;
+  /** 家长 App 绑定的那台硬件;只有 App 设备有(服务端补这个字段) */
+  binding?: { mac: string; alias: string } | null;
 }
 
 /** 角色模板:一键建出配好人设、工具、技能与音色的智能体 */
@@ -580,27 +582,22 @@ export interface VocabProgress {
 
 // ---- 学分奖惩 ----
 
-export type CreditQuality = 'excellent' | 'good' | 'fair' | 'poor';
+/** 家长给的质量,两档:好 +1 / 不好 +0。旧的 excellent(优)/ fair(中)只有历史数据里还有 */
+export type CreditQuality = 'good' | 'poor';
 
-/** 规则上的数值;布置作业时整份抄进作业的快照 */
+/** 作业模板上的数值;布置作业时抄进作业的快照。参考时效只在界面上与实际用时对比,不参与算分 */
 export interface CreditParams {
   target_minutes: number;
-  ontime_points: number;
-  overtime_step: number;
-  overtime_penalty: number;
-  overtime_cap: number;
-  q_excellent: number;
-  q_good: number;
-  q_fair: number;
-  q_poor: number;
-  missed_penalty: number;
 }
 
 export interface CreditRule extends CreditParams {
   id: number;
   mac: string;
   name: string;
+  sort: number;
   archived: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CreditTask extends CreditParams {
@@ -613,7 +610,9 @@ export interface CreditTask extends CreditParams {
   actual_minutes: number | null;
   quality: CreditQuality | null;
   note: string;
-  time_points: number | null;
+  /** 家长手填的自主分(0–5) */
+  base_points: number | null;
+  /** 质量加成:好 +1 / 不好 +0 */
   quality_points: number | null;
   total_points: number | null;
   scored_at: string | null;
@@ -622,11 +621,15 @@ export interface CreditTask extends CreditParams {
   claimed_at: string | null;
   claim_note: string;
   claimed_minutes: number | null;
+  created_at: string;
 }
 
 export interface CreditScore {
-  time_points: number;
+  /** 家长手填的自主分(0–5) */
+  base_points: number;
+  /** 质量加成:好 +1 / 不好 +0 */
   quality_points: number;
+  /** base_points + quality_points */
   total: number;
   explain: string;
 }
@@ -734,7 +737,8 @@ export interface CreditStats {
   totals: { earned: number; penalty: number; spent: number; net: number };
   tasks: { name: string; assigned: number; done: number; missed: number; ontime: number; avg_minutes: number | null; avg_points: number | null }[];
   completion_rate: number | null;
-  ontime_rate: number | null;
+  /** 整段时间的平均得分(每项已打分的作业算一次);服务端没给时页面按各项作业自己算 */
+  avg_points?: number | null;
   redeemed: { reward_id: number; name: string; emoji: string; kind: CreditRewardKind; unit: string; count: number; times: number; quantity: number; points: number }[];
   wallets: { reward_id: number; name: string; emoji: string; kind: CreditRewardKind; unit: string; redeemed: number; used: number }[];
 }

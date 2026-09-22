@@ -1,26 +1,25 @@
 // 智能体的大人版学分工具:给家长用,完全权限——布置作业、打分、记没完成、改作业、驳回申报、
-// 加减分、代兑换、撤销、增删改规则与奖励、看历史,都能用说话完成。
+// 加减分、代兑换、撤销、增删改作业模板与奖励、看历史,都能用说话完成。
 //
 // 它就是一个普通工具:开在哪个角色上就在哪儿生效,代码不另做拦截。开在孩子玩具的角色上,
 // 对着玩具说话的人就都有这些权限(控制台工具目录里写明了)——孩子的玩具请开儿童版 credits。
 // 删除、撤销、大额加减分前先跟家长确认,只写在函数说明里,靠模型遵守。
 //
 // 业务逻辑全部复用 store.ts,和页面、外部接口是同一套;流水记 source='agent'、actor=角色名。
-// 家长 App 自己也是一台设备(board = xiaodan-app),它不是孩子,所以「操作哪个孩子」要另外定:
-// 填了 child 就按名字 / MAC 找;没填时当前设备是玩具就用它,只有一个孩子就用那一个,否则让模型问。
+// 孩子由硬件定义(一台硬件一个孩子),现在只支持一台,所以「操作哪个孩子」不再是参数,由 currentChild 定。
+// 打分是家长自己给分(0–5)+ 质量好/不好,参考用时只作对照。
 
 import { CONSOLE_TOOLS } from '../agent/registry.ts';
 import type { AgentTool, ToolContext, ToolResult } from '../agent/types.ts';
-import { canonicalMac } from '../identity.ts';
+import { boundChild } from './binding.ts';
 import { childDevice, childDevices } from './devices.ts';
-import { QUALITIES, QUALITY_LABEL, type Quality } from './score.ts';
-import { PARAM_DESCRIPTIONS, RULE_RANGES } from './schemas.ts';
+import { QUALITY_CHOICES, QUALITY_CHOICE_LABEL, QUALITY_LABEL, type Quality } from './score.ts';
 import {
-  CreditError, PARAM_KEYS, adjust, assignTasks, balance, createCustomTask, createReward, createRule, deleteReward, deleteRule,
+  CreditError, adjust, assignTasks, balance, createCustomTask, createReward, createRule, deleteReward, deleteRule,
   deleteTask, ledgerById, ledgerPage, listRewards, listRules, listTasks, missTask, queryTasks, redeem, restoreReward,
   restoreRule, revert, scoreTask, shiftDay, stats, taskById, today, unclaimTask, updateReward, updateRule, updateTask,
   walletBalance, walletById, walletRows, walletSummary,
-  type Actor, type LedgerRow, type RewardRow, type RuleInput, type RuleRow, type TaskRow,
+  type Actor, type LedgerRow, type RewardRow, type RuleRow, type TaskRow,
 } from './store.ts';
 import { match, norm, redeemTimes, rewardRate, signed, walletLine } from './tools.ts';
 import { formatQty, KIND_LABEL, REWARD_KINDS, toBase, UNIT, type RewardKind } from './units.ts';
@@ -32,7 +31,6 @@ interface Child { mac: string; alias: string }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/u;
 const CONFIRM = '删除、撤销,或者一次加减 50 分及以上之前,先跟家长复述一遍要做什么、得到确认再调用。';
-const QUALITY_WORDS: Record<string, Quality> = { 优: 'excellent', 良: 'good', 中: 'fair', 差: 'poor' };
 
 const str = (value: unknown) => (typeof value === 'string' ? value.trim() : typeof value === 'number' ? String(value) : '');
 const intArg = (value: unknown): number | undefined => {
@@ -43,21 +41,24 @@ const childName = (child: Child) => child.alias || child.mac;
 const fail = (content: string): ToolResult => ({ ok: false, content });
 
 function ruleLine(rule: RuleRow): string {
-  return `- ${rule.name}(编号 ${rule.id}${rule.archived ? ',已停用' : ''}):规定 ${rule.target_minutes} 分钟,按时 ${signed(rule.ontime_points)},`
-    + `超时每 ${rule.overtime_step} 分钟扣 ${rule.overtime_penalty} 最多扣 ${rule.overtime_cap},`
-    + `质量优/良/中/差 ${signed(rule.q_excellent)}/${signed(rule.q_good)}/${signed(rule.q_fair)}/${signed(rule.q_poor)},没完成扣 ${rule.missed_penalty}`;
+  return `- ${rule.name}(编号 ${rule.id}${rule.archived ? ',已停用' : ''}):参考用时 ${rule.target_minutes} 分钟`;
 }
 
 function taskLine(task: TaskRow): string {
   const head = `- ${task.name}(编号 ${task.id},${task.day})`;
   if (task.status === 'done') {
-    return `${head}:已打分,用时 ${task.actual_minutes} 分钟、质量${QUALITY_LABEL[task.quality!]},${signed(task.total_points ?? 0)} 分`;
+    const used = task.actual_minutes === null ? '' : `实际 ${task.actual_minutes} 分钟(参考 ${task.target_minutes})、`;
+    // 新数据:家长给的分 + 质量加成;老数据里 base_points 就是旧公式算出的用时分
+    const detail = task.base_points === null
+      ? `${signed(task.total_points ?? 0)} 分`
+      : `家长给 ${task.base_points} 分${task.quality ? `、质量${QUALITY_LABEL[task.quality]}` : ''},合计 ${signed(task.total_points ?? 0)} 分`;
+    return `${head}:已打分,${used}${detail}`;
   }
   if (task.status === 'missed') return `${head}:记为没完成,${signed(task.total_points ?? 0)} 分`;
   const claim = task.claimed_at
     ? `,孩子说做完了${task.claimed_minutes !== null ? `(说用了 ${task.claimed_minutes} 分钟)` : ''}${task.claim_note ? `「${task.claim_note}」` : ''},等你检查打分`
     : '';
-  return `${head}:待完成,规定 ${task.target_minutes} 分钟${claim}`;
+  return `${head}:待完成,参考用时 ${task.target_minutes} 分钟${claim}`;
 }
 
 function rewardLine(reward: RewardRow): string {
@@ -79,35 +80,24 @@ function ledgerLine(row: LedgerRow): string {
     + `${row.reverted_by ? ',已撤销' : ''},之后余额 ${row.balance_after ?? '?'}`;
 }
 
+/** 家长嘴里的质量说法 → 好 / 不好。优、良算好,中、差算不好(宽容老说法)。 */
+const QUALITY_WORDS: Record<string, Quality> = {
+  好: 'good', 不错: 'good', 认真: 'good', 工整: 'good', 优: 'good', 良: 'good',
+  不好: 'poor', 马虎: 'poor', 潦草: 'poor', 差: 'poor', 中: 'poor',
+};
+
 function parseQuality(value: unknown): Quality | undefined {
   const text = str(value).toLowerCase();
-  if ((QUALITIES as readonly string[]).includes(text)) return text as Quality;
-  return QUALITY_WORDS[text.slice(0, 1)];
+  if ((QUALITY_CHOICES as readonly string[]).includes(text)) return text as Quality;
+  return QUALITY_WORDS[text] ?? QUALITY_WORDS[text.slice(0, 1)];
 }
 
-/** 规则数值参数:按 schemas.ts 的取值范围校验,出错返回说明 */
-function ruleParams(args: Record<string, unknown>): RuleInput | string {
-  const input: RuleInput = {};
-  for (const key of PARAM_KEYS) {
-    if (args[key] === undefined || args[key] === null || args[key] === '') continue;
-    const n = intArg(args[key]);
-    const [min, max] = RULE_RANGES[key];
-    if (n === undefined || n < min || n > max) return `${PARAM_DESCRIPTIONS[key]}(${key})要是 ${min}~${max} 的整数`;
-    input[key] = n;
-  }
-  return input;
+/** 给分:0–5 的整数 */
+function parsePoints(value: unknown): number | undefined {
+  const n = intArg(value);
+  return n !== undefined && n >= 0 && n <= 5 ? n : undefined;
 }
 
-const RULE_PARAM_PROPS = Object.fromEntries(PARAM_KEYS.map((key) => [key, {
-  type: 'integer', minimum: RULE_RANGES[key][0], maximum: RULE_RANGES[key][1], description: PARAM_DESCRIPTIONS[key],
-}]));
-
-const CHILD_PROP = {
-  child: {
-    type: 'string',
-    description: '操作哪个孩子:孩子的称呼 / 设备名或 MAC。家里只有一个孩子、或正对着孩子的玩具说话时可以不填',
-  },
-};
 const DAY_PROP = { day: { type: 'string', description: '日期 YYYY-MM-DD(北京时间),不填就是今天' } };
 const TASK_PROP = { task: { type: 'string', description: '作业名(比如「数学」)或 credits_overview 里给出的编号' } };
 
@@ -116,28 +106,25 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
   const conn = ctx.deps.conn;
   const by = (toolCtx: ToolContext): Actor => ({ source: 'agent', actor: toolCtx.agent.name });
 
-  /** 定下要操作的孩子;定不下来就返回给模型的说明 */
-  function resolveChild(toolCtx: ToolContext, args: Record<string, unknown>): Child | ToolResult {
-    const children = childDevices(conn);
-    if (!children.length) return fail('还没有绑定任何孩子的设备,学分没法记。告诉家长先在控制台绑定孩子的小单。');
-    const query = str(args['child']);
-    if (query) {
-      const mac = canonicalMac(query);
-      const byMac = mac ? children.find((c) => c.mac === mac) : undefined;
-      if (byMac) return byMac;
-      const q = norm(query);
-      const exact = children.filter((c) => norm(c.alias) === q);
-      const found = exact.length ? exact : children.filter((c) => c.alias && (norm(c.alias).includes(q) || q.includes(norm(c.alias))));
-      if (found.length === 1) return found[0]!;
-      const names = children.map(childName).join('、');
-      return fail(found.length
-        ? `「${query}」对上了好几个孩子:${found.map(childName).join('、')}。问家长是哪一个。`
-        : `没有叫「${query}」的孩子。现有的孩子(设备):${names}。问家长是哪一个。`);
-    }
+  /**
+   * 这次要操作的那台硬件(孩子)。孩子由硬件定义,顺序是:
+   *   1. 正对着孩子的玩具说话 → 就是它;
+   *   2. 家长 App 说话 → 用它在服务端绑定的那台;没绑就先让家长去 App 里选一台;
+   *   3. 没有设备(网页试聊这类)→ 只有一台硬件就用它,多于一台就如实说明并请家长去控制台清理。
+   * 现在只支持一个孩子,所以不再有「问是哪个孩子」这一路。
+   */
+  function currentChild(toolCtx: ToolContext): Child | ToolResult {
     const here = toolCtx.device.mac ? childDevice(conn, toolCtx.device.mac) : undefined;
     if (here) return here;
+    if (toolCtx.device.mac) {
+      const bound = boundChild(conn, toolCtx.device.mac);
+      if (bound) return bound;
+      return fail('这台家长 App 还没绑定孩子:让家长在 App 的学分页选一台硬件(一台硬件就是一个孩子)。');
+    }
+    const children = childDevices(conn);
+    if (!children.length) return fail('还没有绑定任何硬件,学分没法记。告诉家长先在控制台「设备」页绑定孩子的小单。');
     if (children.length === 1) return children[0]!;
-    return fail(`家里有好几个孩子:${children.map(childName).join('、')}。问家长是给哪个孩子,再把名字填进 child 重新调用。`);
+    return fail(`现在只支持一个孩子,但服务端有不止一台硬件:${children.map(childName).join('、')}。请家长先在控制台设备页把多余的解绑。`);
   }
 
   function dayArg(args: Record<string, unknown>): string | ToolResult {
@@ -197,9 +184,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       '家长查看孩子的学分:余额、某天每项作业(编号、状态、孩子有没有说做完)、所有待检查的申报、作业规则、奖励清单(兑换比例)、'
       + '零花钱与游戏 / 电视时间的余额。'
       + '操作前拿不准作业、规则、奖励叫什么时先调这个。',
-    parameters: { type: 'object', properties: { ...CHILD_PROP, ...DAY_PROP } },
+    parameters: { type: 'object', properties: { ...DAY_PROP } },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const day = dayArg(args);
       if (isResult(day)) return day;
@@ -228,7 +215,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP, ...DAY_PROP,
+        ...DAY_PROP,
         tasks: {
           type: 'array',
           minItems: 1,
@@ -246,7 +233,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       required: ['tasks'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const day = dayArg(args);
       if (isResult(day)) return day;
@@ -285,33 +272,45 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     label: '作业打分',
     hint: '正在打分',
     description:
-      '家长检查完作业后录入结果并算分(「数学用了 45 分钟,质量良」)。按布置时的规则快照计分,返回得分和怎么算的。'
-      + '孩子说做完了只是申报,打分要家长说出实际用时和质量;家长没说全就先问。',
+      '家长检查完作业后录入结果(「数学用了 45 分钟,给 4 分,质量好」)。分数是家长自己给的:0~5 分,'
+      + '再加上质量(好 +1、不好 +0)算出合计,参考用时只作对照。'
+      + '孩子说做完了只是申报;家长没给分就不要自己猜,先问一句「这项给几分?0 到 5」。',
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP, ...TASK_PROP, ...DAY_PROP,
-        minutes: { type: 'integer', minimum: 0, maximum: 1440, description: '实际用了多少分钟' },
-        quality: { type: 'string', enum: [...QUALITIES, '优', '良', '中', '差'], description: '质量:优/良/中/差' },
+        ...TASK_PROP, ...DAY_PROP,
+        points: { type: 'integer', minimum: 0, maximum: 5, description: '家长给的分,0~5。家长没说就先问,不要自己估' },
+        quality: { type: 'string', enum: [...QUALITY_CHOICES, '好', '不好'], description: '质量:好(+1)或不好(+0)' },
+        minutes: { type: 'integer', minimum: 0, maximum: 1440, description: '实际用了多少分钟。选填,只跟参考用时对照,不影响分数' },
         note: { type: 'string', description: '备注,可不填' },
       },
-      required: ['task', 'minutes', 'quality'],
+      required: ['task', 'points', 'quality'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const day = dayArg(args);
       if (isResult(day)) return day;
-      const minutes = intArg(args['minutes']);
-      if (minutes === undefined || minutes < 0 || minutes > 1440) return fail('实际用时要是 0~1440 的整数分钟,问家长用了多久。');
+      const points = parsePoints(args['points']);
+      if (points === undefined) return fail('分数要家长自己给:0~5 的整数。家长没说就先问一句,不要自己猜。');
       const quality = parseQuality(args['quality']);
-      if (!quality) return fail('质量要是优、良、中、差之一,问家长。');
+      if (!quality) return fail(`质量只有两档:${QUALITY_CHOICE_LABEL.good}或${QUALITY_CHOICE_LABEL.poor},问家长。`);
+      const rawMinutes = args['minutes'];
+      const minutes = rawMinutes === undefined || rawMinutes === null || rawMinutes === ''
+        ? null
+        : intArg(rawMinutes);
+      if (minutes === undefined || (minutes !== null && (minutes < 0 || minutes > 1440))) {
+        return fail('实际用时要是 0~1440 的整数分钟(可以不填),问家长用了多久。');
+      }
       const task = findTask(child, day, str(args['task']), (t) => t.status === 'pending');
       if (isResult(task)) return task;
-      const result = scoreTask(conn, task.id, minutes, quality, str(args['note']).slice(0, 200), by(toolCtx));
+      const result = scoreTask(conn, task.id, {
+        points, quality, actual_minutes: minutes, note: str(args['note']).slice(0, 200),
+      }, by(toolCtx));
+      const used = minutes === null ? '' : `实际用时 ${minutes} 分钟(参考 ${task.target_minutes})。`;
       return {
         ok: true,
-        content: `「${task.name}」打分完成:${result.score.explain}。${childName(child)}现在有 ${result.balance} 分。`
+        content: `「${task.name}」记好了:${result.score.explain}。${used}${childName(child)}现在有 ${result.balance} 分。`
           + `(流水 ${result.task.ledger_id},打错了可以撤销)`,
       };
     },
@@ -322,9 +321,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     label: '记没完成',
     hint: '正在记录',
     description: '把一项作业记为没完成,按规则扣分(「英语今天没做」)。',
-    parameters: { type: 'object', properties: { ...CHILD_PROP, ...TASK_PROP, ...DAY_PROP, note: { type: 'string', description: '备注,可不填' } }, required: ['task'] },
+    parameters: { type: 'object', properties: { ...TASK_PROP, ...DAY_PROP, note: { type: 'string', description: '备注,可不填' } }, required: ['task'] },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const day = dayArg(args);
       if (isResult(day)) return day;
@@ -345,7 +344,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP, ...TASK_PROP, ...DAY_PROP,
+        ...TASK_PROP, ...DAY_PROP,
         action: { type: 'string', enum: ['update', 'delete', 'reject_claim'] },
         name: { type: 'string', description: 'update:新名字' },
         minutes: { type: 'integer', minimum: 1, maximum: 600, description: 'update:新的规定用时' },
@@ -354,7 +353,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       required: ['task', 'action'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const day = dayArg(args);
       if (isResult(day)) return day;
@@ -392,14 +391,13 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP,
         points: { type: 'integer', minimum: -1000, maximum: 1000, description: '加分正数、扣分负数,不能是 0' },
         reason: { type: 'string', description: '原因,会记进流水' },
       },
       required: ['points', 'reason'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const points = intArg(args['points']);
       if (points === undefined || points === 0 || points < -1000 || points > 1000) return fail('分数要是 -1000~1000 之间、不为 0 的整数。');
@@ -419,7 +417,6 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP,
         reward: { type: 'string', description: '奖励名或编号' },
         amount: { type: 'number', description: '换多少:时间填分钟数,零花钱填元;要凑成整份' },
         times: { type: 'integer', minimum: 1, maximum: 100, description: '换几份;和 amount 二选一,都不填就是一份' },
@@ -428,7 +425,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       required: ['reward'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const reward = findNamed(listRewards(conn, child.mac), str(args['reward']), '奖励', rewardLine);
       if (isResult(reward)) return reward;
@@ -450,9 +447,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     description:
       '撤销一笔流水(打分、没完成、兑换、加减分):追加一笔反向记录,原记录保留;撤销打分后作业回到待完成,可以重新打分。'
       + '不填 entry 就撤销这个孩子最近一笔还没撤销过的。' + CONFIRM,
-    parameters: { type: 'object', properties: { ...CHILD_PROP, entry: { type: 'integer', description: '流水编号(credits_history 里的「流水 N」),不填 = 最近一笔' } } },
+    parameters: { type: 'object', properties: { entry: { type: 'integer', description: '流水编号(credits_history 里的「流水 N」),不填 = 最近一笔' } } },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const entryId = intArg(args['entry']);
       let target: LedgerRow | undefined;
@@ -475,47 +472,53 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
 
   const manageRule = tool({
     name: 'credits_manage_rule',
-    label: '管理作业规则',
-    hint: '正在修改规则',
+    label: '管理作业模板',
+    hint: '正在修改模板',
     description:
-      '新建 / 修改 / 删除 / 恢复作业规则。规则定了规定用时和各项得分扣分;改规则只影响以后布置的作业,已布置的不变。'
-      + '删除时布置过的规则改为停用(可恢复)。新建至少要名字和规定用时,其余数值不填用默认。' + CONFIRM,
+      '新建 / 修改 / 删除 / 恢复常用作业模板。模板只有名字与参考用时 —— 参考用时是用来跟实际用时对照的,'
+      + '不影响分数(分数是每次打完由家长自己给)。改模板只影响以后布置的作业,已经布置的那次参考用时不变。'
+      + '删除时布置过的模板改为停用(可恢复)。新建至少要有名字和参考用时。' + CONFIRM,
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP,
         action: { type: 'string', enum: ['create', 'update', 'delete', 'restore'] },
-        name: { type: 'string', description: '规则名(新建时是新名字;其他操作用来找规则,也可以填编号)' },
+        name: { type: 'string', description: '模板名(新建时是新名字;其他操作用来找模板,也可以填编号)' },
         new_name: { type: 'string', description: 'update:改成的新名字' },
-        ...RULE_PARAM_PROPS,
+        minutes: { type: 'integer', minimum: 1, maximum: 600, description: '参考用时(分钟)' },
       },
       required: ['action', 'name'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const action = str(args['action']);
       const name = str(args['name']);
-      const params = ruleParams(args);
-      if (typeof params === 'string') return fail(params);
+      const rawMinutes = args['minutes'];
+      const minutes = rawMinutes === undefined || rawMinutes === null || rawMinutes === ''
+        ? undefined
+        : intArg(rawMinutes);
+      if (minutes !== undefined && (minutes < 1 || minutes > 600)) return fail('参考用时要是 1~600 的整数分钟。');
       if (action === 'create') {
-        if (!name) return fail('新规则要有名字。');
-        if (params.target_minutes === undefined) return fail(`新建「${name}」要说明规定几分钟。`);
-        if (listRules(conn, child.mac).some((r) => norm(r.name) === norm(name))) return fail(`已经有「${name}」这条规则了,要改就用 update。`);
-        const rule = createRule(conn, child.mac, { ...params, name: name.slice(0, 40), target_minutes: params.target_minutes });
-        return { ok: true, content: `已新建规则:\n${ruleLine(rule)}` };
+        if (!name) return fail('新模板要有名字。');
+        if (minutes === undefined) return fail(`新建「${name}」要说明参考用时几分钟。`);
+        if (listRules(conn, child.mac).some((r) => norm(r.name) === norm(name))) return fail(`已经有「${name}」这个模板了,要改就用 update。`);
+        const rule = createRule(conn, child.mac, { name: name.slice(0, 40), target_minutes: minutes });
+        return { ok: true, content: `已新建作业模板:\n${ruleLine(rule)}` };
       }
-      const rule = findNamed(listRules(conn, child.mac, action === 'restore'), name, action === 'restore' ? '规则(含已停用)' : '规则', ruleLine);
+      const rule = findNamed(listRules(conn, child.mac, action === 'restore'), name, action === 'restore' ? '模板(含已停用)' : '模板', ruleLine);
       if (isResult(rule)) return rule;
       if (action === 'delete') {
         const result = deleteRule(conn, rule.id);
-        return { ok: true, content: result === 'archived' ? `「${rule.name}」布置过,已改为停用(以后可以恢复)。` : `已删除规则「${rule.name}」。` };
+        return { ok: true, content: result === 'archived' ? `「${rule.name}」布置过,已改为停用(以后可以恢复)。` : `已删除模板「${rule.name}」。` };
       }
       if (action === 'restore') return { ok: true, content: `已恢复:\n${ruleLine(restoreRule(conn, rule.id))}` };
       if (action !== 'update') return fail('action 要是 create、update、delete、restore 之一。');
       const newName = str(args['new_name']);
-      if (!newName && !Object.keys(params).length) return fail('要说明改什么。');
-      const updated = updateRule(conn, rule.id, { ...params, ...(newName ? { name: newName.slice(0, 40) } : {}) });
+      if (!newName && minutes === undefined) return fail('要说明改什么(名字或参考用时)。');
+      const updated = updateRule(conn, rule.id, {
+        ...(newName ? { name: newName.slice(0, 40) } : {}),
+        ...(minutes === undefined ? {} : { target_minutes: minutes }),
+      });
       return { ok: true, content: `已修改(只影响以后布置的作业):\n${ruleLine(updated)}` };
     },
   });
@@ -531,7 +534,6 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP,
         action: { type: 'string', enum: ['create', 'update', 'delete', 'restore'] },
         name: { type: 'string', description: '奖励名(新建时是新名字;其他操作用来找奖励,也可以填编号)' },
         new_name: { type: 'string', description: 'update:改成的新名字' },
@@ -543,7 +545,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       required: ['action', 'name'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const action = str(args['action']);
       const name = str(args['name']);
@@ -598,7 +600,6 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     parameters: {
       type: 'object',
       properties: {
-        ...CHILD_PROP,
         action: { type: 'string', enum: ['status', 'use', 'adjust', 'undo'] },
         reward: { type: 'string', description: '哪个账户:奖励名(「零花钱」「玩游戏」)或编号;只有一个账户时可以不填' },
         amount: { type: 'number', description: 'use:用掉多少(分钟 / 元,大于 0);adjust:加减多少' },
@@ -608,7 +609,7 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
       required: ['action'],
     },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const action = str(args['action']);
       const accounts = listRewards(conn, child.mac, true)
@@ -663,9 +664,9 @@ CONSOLE_TOOLS.set(CREDITS_PARENT_PLUGIN, (ctx) => {
     label: '学分历史',
     hint: '正在看学分记录',
     description: '最近几天的学分统计(挣了、扣了、花了多少,完成率、按时率,各项作业表现,各奖励换了多少、零花钱和时间用掉多少)和最近的流水(带编号,撤销时用)。',
-    parameters: { type: 'object', properties: { ...CHILD_PROP, days: { type: 'integer', minimum: 1, maximum: 366, description: '看最近几天,默认 7' } } },
+    parameters: { type: 'object', properties: { days: { type: 'integer', minimum: 1, maximum: 366, description: '看最近几天,默认 7' } } },
     async run(toolCtx, args) {
-      const child = resolveChild(toolCtx, args);
+      const child = currentChild(toolCtx);
       if (isResult(child)) return child;
       const days = Math.min(366, Math.max(1, intArg(args['days']) ?? 7));
       const to = today(now());

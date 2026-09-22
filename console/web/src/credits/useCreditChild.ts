@@ -1,4 +1,5 @@
-// 学分各子页共用的「当前是哪个孩子」。一台设备就是一个孩子。
+// 学分各子页共用的「当前是哪个孩子」。一台硬件设备就是一个孩子;家长 App 自己也占一条设备,
+// 但不算孩子,不会出现在这个列表里。
 //
 // 模块级的单例:在「今日作业」选了乐乐,切到「兑换奖励」还是乐乐。选择记在 localStorage
 // (读写都包 try/catch——隐私模式、被清掉的站点数据下取不到就退回第一台,页面照常能用)。
@@ -30,7 +31,7 @@ watch(mac, (value) => {
   }
 });
 
-/** 重新拉孩子列表(余额、今天完成情况、待确认申报数);改了分数的操作之后都调一下 */
+/** 重新拉硬件设备(孩子)列表(余额、今天完成情况、待确认申报数);改了分数的操作之后都调一下 */
 async function refresh(): Promise<void> {
   try {
     const data = await api.get<{ items: CreditChild[]; today: string }>('/credits/children');
@@ -59,7 +60,10 @@ export function useCreditChild() {
 
 export const signed = (n: number | null | undefined) => (n == null ? '' : n > 0 ? `+${n}` : String(n));
 
-export const QUALITY = [
-  { key: 'excellent', label: '优' }, { key: 'good', label: '良' }, { key: 'fair', label: '中' }, { key: 'poor', label: '差' },
-] as const;
-export const qualityLabel = (key: string | null) => QUALITY.find((q) => q.key === key)?.label ?? '';
+/** 录入时可选的完成质量:好 +1 / 不好 +0 */
+export const QUALITY = [{ key: 'good', label: '好' }, { key: 'poor', label: '不好' }] as const;
+
+/** 旧的四档只在历史数据里出现,页面上照旧显示中文 */
+const QUALITY_HISTORY: Record<string, string> = { excellent: '优', fair: '中' };
+export const qualityLabel = (key: string | null) =>
+  key ? QUALITY.find((q) => q.key === key)?.label ?? QUALITY_HISTORY[key] ?? '' : '';

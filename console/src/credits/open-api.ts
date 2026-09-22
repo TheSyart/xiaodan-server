@@ -18,7 +18,8 @@ import type { Db } from '../db.ts';
 import { one, run } from '../db.ts';
 import { verifyAppDevice } from '../identity.ts';
 import type { AppDeviceCheck } from '../identity.ts';
-import { anyActiveKey, findKey, requestKey, setRequestKey, type ApiKey } from './open-key.ts';
+import { anyActiveKey, appDeviceOf, findKey, requestKey, setAppDevice, setRequestKey, type ApiKey } from './open-key.ts';
+import { boundChild } from './binding.ts';
 import { buildOpenApi } from './openapi.ts';
 import { creditRoutes } from './routes.ts';
 
@@ -44,6 +45,11 @@ export function mountOpenCredits(app: Hono, conn: Db, now: () => Date): void {
     now,
     basePath: OPEN_BASE,
     actorOf: (c) => ({ source: 'api', actor: requestKey(c.req.raw)?.name ?? '' }),
+    // 家长 App 的设备身份:带上它绑定的孩子,学分路由据此把 mac 卡在这一台上
+    appCaller: (c) => {
+      const mac = appDeviceOf(c.req.raw);
+      return mac ? { mac, childMac: boundChild(conn, mac)?.mac ?? null } : undefined;
+    },
   }));
 }
 
@@ -65,6 +71,7 @@ function keyGuard(conn: Db, now: () => Date): MiddlewareHandler {
       const check = verifyAppDevice(conn, deviceId, clientId);
       if (!check.ok) return c.json({ error: check.error, code: check.code }, check.status);
       setRequestKey(c.req.raw, appKeyOf(check));
+      setAppDevice(c.req.raw, check.mac);
       return next();
     }
     if (!anyActiveKey(conn)) {

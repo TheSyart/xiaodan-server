@@ -87,13 +87,13 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: I
     ],
   },
   {
-    // 学分:一台设备一个孩子。作业规则 → 每天布置 → 录入算分 → 兑换奖励;开放接口给 App 用
+    // 学分:一台硬件设备一个孩子。作业模板 → 每天布置 → 录入给分 → 兑换奖励;开放接口给 App 用
     title: '学分',
     items: [
       { path: '/credits/tasks', label: '今日作业', icon: 'calendar' },
       { path: '/credits/rewards', label: '兑换奖励', icon: 'gift' },
       { path: '/credits/wallets', label: '钱与时间', icon: 'wallet' },
-      { path: '/credits/rules', label: '作业规则', icon: 'sliders' },
+      { path: '/credits/rules', label: '作业模板', icon: 'sliders' },
       { path: '/credits/ledger', label: '流水', icon: 'clock' },
       { path: '/credits/stats', label: '统计', icon: 'chart' },
       { path: '/credits/api', label: '开放接口', icon: 'key' },

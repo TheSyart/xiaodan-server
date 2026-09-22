@@ -432,15 +432,14 @@ test('v13:学分四张表就位,CHECK 挡住非法值,删设备连学分一起�
   assert.ok(indexes(conn, 'credit_ledger').includes('idx_credit_ledger_mac'));
 
   exec(conn, "INSERT INTO credit_rules (mac, name, target_minutes) VALUES (?, '数学', 40)", MAC);
-  const rule = one<{ ontime_points: number; overtime_step: number; q_poor: number; missed_penalty: number }>(
+  const rule = one<{ name: string; target_minutes: number; sort: number; archived: number }>(
     conn, 'SELECT * FROM credit_rules')!;
-  assert.deepEqual([rule.ontime_points, rule.overtime_step, rule.q_poor, rule.missed_penalty], [5, 10, -2, 5], '默认值');
+  assert.deepEqual([rule.name, rule.target_minutes, rule.sort, rule.archived], ['数学', 40, 0, 0]);
   exec(conn, "INSERT INTO credit_rewards (mac, name, cost) VALUES (?, '看电视', 20)", MAC);
   exec(conn, "INSERT INTO credit_ledger (mac, delta, kind) VALUES (?, 5, 'adjust')", MAC);
   exec(conn,
-    `INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes, ontime_points, overtime_step, overtime_penalty,
-       overtime_cap, q_excellent, q_good, q_fair, q_poor, missed_penalty)
-     VALUES (?, '2026-09-22', 1, '数学', 40, 5, 10, 1, 5, 5, 3, 0, -2, 5)`, MAC);
+    `INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes)
+     VALUES (?, '2026-09-22', 1, '数学', 40)`, MAC);
 
   assert.throws(() => exec(conn, "INSERT INTO credit_rewards (mac, name, cost) VALUES (?, '白送', 0)", MAC), '兑换至少 1 分');
   assert.throws(() => exec(conn, "INSERT INTO credit_rules (mac, name, target_minutes) VALUES (?, '太长', 601)", MAC));
@@ -521,6 +520,77 @@ test('v15:老奖励变成物品 × 1、老流水 times 为空;账户流水表与
   exec(conn, "INSERT INTO credit_wallet (mac, reward_id, qty, kind, title) VALUES (?, 1, 500, 'redeem', '💰 零花钱')", MAC);
   exec(conn, 'DELETE FROM devices WHERE mac = ?', MAC);
   assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_wallet')!.n, 0, '账户流水随设备删除');
+});
+
+test('v16:规则瘦成作业模板、结果列改名 base_points、历史合计一分不变;新增 App ↔ 硬件绑定表', () => {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(SCHEMA_V0);
+  runMigrations(conn, upTo(15));
+  seed(conn);
+  const MAC = '4c:11:ae:31:7a:30';
+  const APP = '02:5a:00:00:00:01';
+  exec(conn, 'INSERT INTO devices (mac, agent_id, alias) VALUES (?, ?, ?)', MAC, DEFAULT_AGENT_ID, '初号机');
+  exec(conn, "INSERT INTO devices (mac, agent_id, alias, board) VALUES (?, ?, ?, 'xiaodan-app')", APP, DEFAULT_AGENT_ID, '妈妈的 App');
+  exec(conn, "INSERT INTO credit_rules (mac, name, target_minutes) VALUES (?, '口算', 10)", MAC);
+  // 旧模型打过分:超时扣成负分 + 质量「优」
+  exec(conn,
+    `INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes, ontime_points, overtime_step, overtime_penalty,
+       overtime_cap, q_excellent, q_good, q_fair, q_poor, missed_penalty, status, actual_minutes, quality, note,
+       time_points, quality_points, total_points, scored_at, ledger_id)
+     VALUES (?, '2026-09-20', 1, '口算', 10, 5, 10, 1, 5, 5, 3, 0, -2, 5, 'done', 45, 'excellent', '', -4, 5, 1,
+             datetime('now'), 9)`, MAC);
+  // 旧模型的「没完成」:那 -5 分来自 missed_penalty,不是「给分 + 质量」
+  exec(conn,
+    `INSERT INTO credit_tasks (mac, day, rule_id, name, target_minutes, ontime_points, overtime_step, overtime_penalty,
+       overtime_cap, q_excellent, q_good, q_fair, q_poor, missed_penalty, status, note, time_points, quality_points,
+       total_points, scored_at)
+     VALUES (?, '2026-09-21', 1, '口算', 10, 5, 10, 1, 5, 5, 3, 0, -2, 5, 'missed', '', 0, 0, -5, datetime('now'))`, MAC);
+  exec(conn, "INSERT INTO credit_ledger (mac, delta, kind, title, note) VALUES (?, 1, 'task', '2026-09-20 口算', '超时 35 分钟,按每 10 分钟扣 1 分扣 4 分;质量优 +5;合计 +1')", MAC);
+
+  runMigrations(conn);
+
+  assert.equal(schemaVersion(conn), 16);
+  const ruleCols = columns(conn, 'credit_rules');
+  for (const gone of ['ontime_points', 'overtime_step', 'overtime_penalty', 'overtime_cap', 'q_excellent', 'q_good', 'q_fair', 'q_poor', 'missed_penalty']) {
+    assert.ok(!ruleCols.includes(gone), `credit_rules 不再有 ${gone}`);
+  }
+  assert.ok(ruleCols.includes('target_minutes'), '参考用时留着');
+  const taskCols = columns(conn, 'credit_tasks');
+  for (const gone of ['ontime_points', 'q_fair', 'missed_penalty', 'time_points']) {
+    assert.ok(!taskCols.includes(gone), `credit_tasks 不再有 ${gone}`);
+  }
+  for (const kept of ['base_points', 'quality_points', 'total_points', 'target_minutes', 'claimed_minutes']) {
+    assert.ok(taskCols.includes(kept), `credit_tasks 还有 ${kept}`);
+  }
+  assert.ok(indexes(conn, 'credit_tasks').includes('idx_credit_tasks_day'), '索引跟着重建');
+  assert.ok(indexes(conn, 'credit_rules').includes('idx_credit_rules_mac'));
+
+  const done = one<{ rule_id: number; base_points: number; quality_points: number; total_points: number; quality: string; actual_minutes: number }>(
+    conn, 'SELECT rule_id, base_points, quality_points, total_points, quality, actual_minutes FROM credit_tasks WHERE id = 1')!;
+  assert.deepEqual({ ...done }, {
+    rule_id: 1, base_points: -4, quality_points: 5, total_points: 1, quality: 'excellent', actual_minutes: 45,
+  }, '已完成的旧账原样:用时分搬到 base_points,合计仍是 1,旧的「优」也还在');
+  assert.equal(done.base_points + done.quality_points, done.total_points, '新式的结果列加起来就是合计');
+
+  const missed = one<{ base_points: number | null; quality_points: number | null; total_points: number }>(
+    conn, 'SELECT base_points, quality_points, total_points FROM credit_tasks WHERE id = 2')!;
+  assert.deepEqual({ ...missed }, { base_points: null, quality_points: null, total_points: -5 }, '旧「没完成」只留历史合计');
+
+  const ledger = one<{ delta: number; title: string; note: string }>(conn, 'SELECT delta, title, note FROM credit_ledger')!;
+  assert.equal(ledger.delta, 1);
+  assert.match(ledger.note, /质量优 \+5/u, '历史流水的文案一个字不改');
+
+  assert.ok(tableExists(conn, 'child_bindings'));
+  exec(conn, 'INSERT INTO child_bindings (app_mac, child_mac) VALUES (?, ?)', APP, MAC);
+  exec(conn, "INSERT INTO devices (mac, agent_id, alias, board) VALUES ('02:5a:00:00:00:02', ?, '第二台手机', 'xiaodan-app')", DEFAULT_AGENT_ID);
+  assert.throws(
+    () => exec(conn, "INSERT INTO child_bindings (app_mac, child_mac) VALUES ('02:5a:00:00:00:02', ?)", MAC),
+    '同一台硬件不能被两台 App 绑',
+  );
+  exec(conn, 'DELETE FROM devices WHERE mac = ?', MAC);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM child_bindings')!.n, 0, '解绑硬件时绑定关系一起消失');
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_rules')!.n, 0);
+  assert.equal(one<{ n: number }>(conn, 'SELECT COUNT(*) AS n FROM credit_tasks')!.n, 0);
 });
 
 describe('关外键执行的迁移', () => {

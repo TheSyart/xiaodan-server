@@ -105,6 +105,26 @@ async function unbind(device: Device) {
   }
 }
 
+/** 解除家长 App 与它绑定的那台硬件:传的是这台 App 的 MAC,设备记录本身不动 */
+async function unbindChild(device: Device) {
+  const bound = device.binding;
+  if (!bound) return;
+  const ok = await confirmDialog({
+    title: `解除「${deviceName(device)}」与「${bound.alias || bound.mac}」的绑定?`,
+    message: '解除后这台家长 App 不能再按那个孩子用学分接口,要重新绑定才能用。设备本身不受影响。',
+    confirmText: '解除绑定',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api.del(`/credits/binding?mac=${urlMac(device.mac)}`);
+    toast('已解除绑定');
+    await load();
+  } catch (e) {
+    toastError(e);
+  }
+}
+
 async function dismissPending(item: PendingDevice) {
   const ok = await confirmDialog({
     title: `清除 ${item.mac} 的等待记录?`,
@@ -281,6 +301,10 @@ const stats = computed<{ label: string; value: number; icon: IconName; tone: str
 
 const hasLegacy = computed(() => devices.value.some((device) => device.identity === 'legacy'));
 const sharedMac = computed(() => pending.value.some((item) => item.same_mac_count > 1));
+/** 硬件设备(孩子);家长 App 自己不算孩子 */
+const hardwareDevices = computed(() => devices.value.filter((device) => device.board !== 'xiaodan-app'));
+/** 现在只允许一台硬件:存量里有多台时页面上不静默 */
+const tooManyHardware = computed(() => hardwareDevices.value.length > 1);
 </script>
 
 <template>
@@ -297,6 +321,13 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
     <div class="callout-body">
       <strong>加载失败。</strong>{{ loadError }}
       <div class="callout-actions"><button class="btn btn-sm" type="button" @click="load(true)">重试</button></div>
+    </div>
+  </div>
+
+  <div v-if="tooManyHardware" class="callout warn" role="alert">
+    <AppIcon name="alert" :size="18" />
+    <div class="callout-body">
+      <strong>有 {{ hardwareDevices.length }} 台硬件设备。</strong>现在只支持一个孩子,请在下方解绑多余的,只留一台。
     </div>
   </div>
 
@@ -342,6 +373,10 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
           <AppIcon name="alert" :size="18" />
           <div class="callout-body">还没有智能体,请先到<router-link to="/agents">智能体</router-link>页面创建一个。</div>
         </div>
+        <div v-if="!loading && hardwareDevices.length > 0" class="callout warn" style="margin: 0">
+          <AppIcon name="alert" :size="18" />
+          <div class="callout-body">现在只支持一个孩子,先解绑现有那台。</div>
+        </div>
         <div class="field">
           <span class="field-label">绑定码</span>
           <CodeInput v-model="code" :invalid="!!bindError" :disabled="binding" @update:model-value="bindError = ''" />
@@ -362,7 +397,7 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
           </label>
         </div>
         <div class="row">
-          <button class="btn btn-primary" type="submit" :disabled="binding || agents.length === 0" :aria-busy="binding">
+          <button class="btn btn-primary" type="submit" :disabled="binding || agents.length === 0 || hardwareDevices.length > 0" :aria-busy="binding">
             <AppIcon name="link" :size="16" /><span>绑定设备</span>
           </button>
         </div>
@@ -475,6 +510,10 @@ const sharedMac = computed(() => pending.value.some((item) => item.same_mac_coun
               <div class="row" style="gap: 6px">
                 <span class="cell-main">{{ device.alias || '未命名设备' }}</span>
                 <span v-if="device.board === 'xiaodan-app'" class="tag" title="手机上的家长 App,不计学分">家长 App</span>
+                <template v-if="device.board === 'xiaodan-app' && device.binding">
+                  <span class="tag ok" :title="`绑定的是 ${device.binding.mac}`">已绑:{{ device.binding.alias || device.binding.mac }}</span>
+                  <button class="btn btn-ghost btn-sm" type="button" @click="unbindChild(device)">解绑</button>
+                </template>
               </div>
               <div class="row" style="gap: 2px; margin-top: 3px">
                 <span class="chip-mono">{{ device.mac }}</span>

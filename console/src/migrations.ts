@@ -14,6 +14,7 @@ import { migrateMemoryAndLocation } from './migrations/v12-memory-and-location.t
 import { migrateCredits } from './migrations/v13-credits.ts';
 import { migrateCreditsApi } from './migrations/v14-credits-api.ts';
 import { migrateCreditsWallet } from './migrations/v15-credits-wallet.ts';
+import { migrateCreditsTemplates } from './migrations/v16-credits-templates.ts';
 
 export interface Migration {
   version: number;
@@ -385,5 +386,13 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'credits-wallet',
     // 学分四期:奖励按比例整份兑换(kind / amount)、兑换记份数、时间与钱的余额账户流水。只加表加列。见迁移文件开头
     up: migrateCreditsWallet,
+  },
+  {
+    version: 16,
+    name: 'credits-templates',
+    disableForeignKeys: true,
+    // 学分五期:规则变常用作业模板(删 9 个分数参数)、作业结果列 time_points 改名 base_points、
+    // 新增家长 App ↔ 硬件的绑定表。重建了 credit_rules 与 credit_tasks,所以要关外键。见迁移文件开头
+    up: migrateCreditsTemplates,
   },
 ];

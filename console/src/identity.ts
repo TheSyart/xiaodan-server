@@ -266,7 +266,10 @@ export function recordIdentityEvent(
   );
 }
 
-export type BindResult = { ok: true; mac: string } | { ok: false; status: 400 | 404 | 409; error: string };
+export type BindResult =
+  | { ok: true; mac: string }
+  /** code 只在「现在只支持一个孩子」这类需要前端分支处理的场景给出 */
+  | { ok: false; status: 400 | 404 | 409; error: string; code?: 'single_child_only' };
 
 /**
  * 家长 App 该用哪个智能体:先认角色模板建出来的「家长」(role_template = 'parent'),
@@ -296,6 +299,9 @@ export function defaultAgentForBoard(conn: Db, board: string): string | undefine
  * 身份机制上线前就已绑定的旧行没有哈希,这里原地写入哈希;别名为空、未指定智能体时保留原值,
  * 用户不必先解绑再绑。新设备未指定智能体时绑到默认智能体(家长 App 绑到家长智能体)。
  * 已经带哈希的设备行不允许被覆盖,必须先解绑。
+ *
+ * 现在只支持一个孩子:已经有另一台硬件(非家长 App)时,不再允许绑第二台 —— 学分按硬件记,
+ * 两台会让家长分不清账。要换设备先解绑现有的那台。
  */
 export function bindByCode(conn: Db, bind: { code: string; agentId: string | null; alias: string }): BindResult {
   const pending = one<{ mac: string; secret_hash: string; board: string; app_version: string }>(
@@ -308,6 +314,24 @@ export function bindByCode(conn: Db, bind: { code: string; agentId: string | nul
   const device = one<{ secret_hash: string | null }>(conn, 'SELECT secret_hash FROM devices WHERE mac = ?', pending.mac);
   if (device && device.secret_hash !== null) {
     return { ok: false, status: 409, error: '这台设备已经绑定过了,请先解绑' };
+  }
+
+  if (pending.board !== APP_BOARD) {
+    const other = one<{ mac: string; alias: string }>(
+      conn,
+      'SELECT mac, alias FROM devices WHERE board != ? AND mac != ? LIMIT 1',
+      APP_BOARD,
+      pending.mac,
+    );
+    if (other) {
+      const name = other.alias || other.mac;
+      return {
+        ok: false,
+        status: 409,
+        code: 'single_child_only',
+        error: `现在只支持一个孩子:已经绑了「${name}」。要换设备,先在设备页把它解绑。`,
+      };
+    }
   }
 
   if (device) {

@@ -7,8 +7,8 @@ import PageHeader from '../PageHeader.vue';
 import SkeletonRows from '../SkeletonRows.vue';
 import { signed, useCreditChild } from '../../credits/useCreditChild';
 
-// 学分各子页的页头:标题、孩子选择器、余额、待确认的申报提醒。
-// 没有设备时整页只显示「去绑定设备」,子页内容靠默认插槽,只有选中了孩子才渲染。
+// 学分各子页的页头:标题、硬件设备(孩子)选择器、余额、待确认的申报提醒。
+// 没有设备时整页只显示「去绑定设备」,子页内容靠默认插槽,只有选中了硬件设备(孩子)才渲染。
 
 defineProps<{ title: string; description: string }>();
 
@@ -20,7 +20,7 @@ onMounted(refresh);
   <PageHeader :title="title" :description="description">
     <template #actions>
       <slot name="actions" />
-      <select v-if="children.length > 1" v-model="mac" class="select" style="height: 32px; width: auto" aria-label="选择孩子">
+      <select v-if="children.length > 1" v-model="mac" class="select" style="height: 32px; width: auto" aria-label="选择硬件设备(孩子)">
         <option v-for="item in children" :key="item.mac" :value="item.mac">{{ item.alias || item.mac }}</option>
       </select>
     </template>
@@ -33,7 +33,7 @@ onMounted(refresh);
   <div v-if="!loaded" class="card"><SkeletonRows :rows="3" /></div>
 
   <section v-else-if="!child" class="card">
-    <EmptyState title="还没有绑定设备" description="学分按设备记账,一台设备就是一个孩子。先绑定一台设备。">
+    <EmptyState title="还没有绑定设备" description="学分按硬件设备(孩子)记账。先绑定一台设备。">
       <RouterLink class="btn btn-primary" to="/devices"><AppIcon name="device" :size="16" /><span>去绑定设备</span></RouterLink>
     </EmptyState>
   </section>

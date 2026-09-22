@@ -33,7 +33,7 @@ const archived = computed(() => rewards.value.filter((r) => r.archived));
 async function addExamples() {
   try {
     const result = await api.post<{ rules: number; rewards: number }>('/credits/examples', { mac: mac.value });
-    toast(`已添加 ${result.rewards} 个奖励、${result.rules} 条规则,可以再按自家情况改`);
+    toast(`已添加 ${result.rewards} 个奖励、${result.rules} 条模板,可以再按自家情况改`);
     await load();
   } catch (e) {
     toastError(e);

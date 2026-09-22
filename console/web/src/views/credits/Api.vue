@@ -75,19 +75,22 @@ async function copy(text: string) {
 }
 
 const ENDPOINTS: [string, string, string][] = [
-  ['GET', '/children', '所有孩子与余额、今天完成情况、待确认申报数'],
-  ['GET', '/rules?mac=', '作业规则;POST 新建、PATCH /rules/{id} 修改、DELETE 删除、POST /rules/{id}/restore 恢复、POST /rules/reorder 排序'],
+  ['GET', '/children', '所有硬件设备(孩子)与余额、今天完成情况、待确认申报数'],
+  ['GET', '/binding', '家长 App 绑定的那台硬件;仅家长 App 设备身份可用'],
+  ['PUT', '/binding', '绑定一台硬件(体 {"mac":"…"});仅家长 App 设备身份可用'],
+  ['DELETE', '/binding', '解除绑定;仅家长 App 设备身份可用'],
+  ['GET', '/rules?mac=', '作业模板(名字 + 参考用时);POST 新建、PATCH /rules/{id} 修改、DELETE 删除、POST /rules/{id}/restore 恢复、POST /rules/reorder 排序'],
   ['GET', '/tasks?mac=&day=', '某天的作业;带 from/to/status 查历史'],
-  ['POST', '/tasks', '按规则布置;POST /tasks/custom 临时作业'],
-  ['POST', '/tasks/{id}/result', '录入用时与质量算分(preview=true 只算)'],
-  ['POST', '/tasks/{id}/missed', '记为没完成'],
+  ['POST', '/tasks', '按模板布置;POST /tasks/custom 临时作业'],
+  ['POST', '/tasks/{id}/result', '录入用时、家长给分与质量算分(preview=true 只算)'],
+  ['POST', '/tasks/{id}/missed', '记为没完成,记 0 分'],
   ['POST', '/tasks/{id}/claim', '孩子报完成(不加分);DELETE 驳回'],
-  ['GET', '/rewards?mac=', '奖励;增删改恢复排序同规则'],
+  ['GET', '/rewards?mac=', '奖励;增删改恢复排序同模板'],
   ['POST', '/redeem', '兑换(不够分回 409 insufficient_balance)'],
   ['POST', '/adjust', '手动加减分'],
   ['GET', '/ledger?mac=', '流水;POST /ledger/{id}/revert 撤销'],
   ['GET', '/stats?mac=&from=&to=', '统计'],
-  ['GET', '/meta', '取值范围、质量档位、服务器今天'],
+  ['GET', '/meta', '取值范围、质量档位(好 / 不好)、服务器今天'],
 ];
 
 const curl = computed(() => {
@@ -95,15 +98,16 @@ const curl = computed(() => {
   const m = mac.value ? urlMac(mac.value) : '<设备MAC>';
   const base = `${origin}${BASE}`;
   return [
-    '# 所有孩子与余额',
+    '# 所有硬件设备(孩子)与余额',
     `curl -H "Authorization: Bearer ${key}" "${base}/children"`,
     '',
     '# 今天的作业',
     `curl -H "Authorization: Bearer ${key}" "${base}/tasks?mac=${m}"`,
     '',
-    '# 录入一项作业的结果;Idempotency-Key 让重试不会重复记分',
+    '# 录入一项作业的结果;points 是家长自己给的分(0–5),quality 只有 good / poor;',
+    '# Idempotency-Key 让重试不会重复记分',
     `curl -X POST -H "Authorization: Bearer ${key}" -H "content-type: application/json" \\`,
-    `  -H "Idempotency-Key: $(uuidgen)" -d '{"actual_minutes":45,"quality":"good"}' "${base}/tasks/<id>/result"`,
+    `  -H "Idempotency-Key: $(uuidgen)" -d '{"actual_minutes":45,"points":4,"quality":"good"}' "${base}/tasks/<id>/result"`,
     '',
     '# 兑换奖励',
     `curl -X POST -H "Authorization: Bearer ${key}" -H "content-type: application/json" \\`,
@@ -179,6 +183,7 @@ const curl = computed(() => {
     </div>
     <ul class="field-hint conventions">
       <li>鉴权:<code>Authorization: Bearer &lt;密钥&gt;</code>。只读密钥做写操作回 403 <code>read_only_key</code>。</li>
+      <li>家长 App 也可以不建密钥,用它自己的设备身份(<code>Device-Id</code> + <code>Client-Id</code>,board = xiaodan-app)调这些接口;这时 <code>mac</code> 必须是它绑定过的那台硬件,否则回 403 <code>not_bound_child</code>,还没绑定回 409 <code>no_bound_child</code>,想绑第二台回 409 <code>second_hardware_not_supported</code>。用密钥的脚本、快捷指令不受这条限制,一律显式传 <code>mac</code>。</li>
       <li>修改同时认 PATCH 和 PUT,都是部分更新;错误体 <code>{"error": "中文说明", "code": "代码"}</code>。</li>
       <li>列表返回 <code>{items, next}</code>,把 <code>next</code> 当作 <code>before</code> 传回去取下一页。</li>
       <li>写操作带 <code>Idempotency-Key</code>(1~100 个字符):网络抖动重试时回放第一次的结果,不会重复记分、重复扣分。</li>

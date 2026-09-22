@@ -7,7 +7,7 @@ import CreditHeader from '../../components/credits/CreditHeader.vue';
 import { useCreditChild } from '../../credits/useCreditChild';
 import { toastError } from '../../ui';
 
-// 统计:每天挣了多少、扣了多少、花了多少,各项作业的完成率与按时率。撤销过的不计。
+// 统计:每天挣了多少、扣了多少、花了多少,各项作业的完成情况与平均得分。撤销过的不计。
 //
 // 图:每天一根,基线以上是挣的,以下依次叠扣的和花的——三者对余额的方向一目了然。
 // 颜色按身份分三类,用 dataviz 的校验脚本验过:浅色直接用站点的 sky / sun / violet;
@@ -47,6 +47,21 @@ function shift(day: string, days: number): string {
 const percent = (value: number | null) => (value == null ? '—' : `${Math.round(value * 100)}%`);
 const shortDay = (day: string) => `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`;
 
+/**
+ * 平均得分:优先用接口返回的整体均值;字段还没到位时,按各项作业的已判定数加权自己算
+ * (每项已打分的作业算一次,和接口那边「每项作业的 AVG(合计)」是同一个口径)。
+ */
+const avgPoints = computed<number | null>(() => {
+  const value = data.value;
+  if (!value) return null;
+  if (value.avg_points != null) return value.avg_points;
+  const scored = value.tasks.filter((t) => t.avg_points != null);
+  const weight = scored.reduce((n, t) => n + t.done + t.missed, 0);
+  if (!weight) return null;
+  const sum = scored.reduce((n, t) => n + (t.avg_points ?? 0) * (t.done + t.missed), 0);
+  return Math.round((sum / weight) * 10) / 10;
+});
+
 /** 上下两半共用一个刻度:以最高的一根(挣的,或扣+花)为满格 */
 const scale = computed(() => {
   const days = data.value?.days ?? [];
@@ -59,7 +74,7 @@ const showLabel = (index: number, total: number) => total <= 10 || index % 5 ===
 </script>
 
 <template>
-  <CreditHeader title="统计" description="每天挣了多少、扣了多少、花了多少,各项作业的完成率与按时率。撤销过的不计。">
+  <CreditHeader title="统计" description="每天挣了多少、扣了多少、花了多少,各项作业的完成情况与平均得分。撤销过的不计。">
     <template #actions>
       <button class="btn btn-sm" :class="range === 7 ? 'btn-primary' : 'btn-ghost'" type="button" @click="range = 7">最近 7 天</button>
       <button class="btn btn-sm" :class="range === 30 ? 'btn-primary' : 'btn-ghost'" type="button" @click="range = 30">最近 30 天</button>
@@ -71,7 +86,7 @@ const showLabel = (index: number, total: number) => total <= 10 || index % 5 ===
         <div class="stat"><div><div class="stat-value">-{{ data.totals.penalty }}</div><div class="stat-label">扣的</div></div></div>
         <div class="stat"><div><div class="stat-value">-{{ data.totals.spent }}</div><div class="stat-label">花掉的</div></div></div>
         <div class="stat"><div><div class="stat-value">{{ percent(data.completion_rate) }}</div><div class="stat-label">完成率(完成 / 已判定)</div></div></div>
-        <div class="stat"><div><div class="stat-value">{{ percent(data.ontime_rate) }}</div><div class="stat-label">按时率(按时 / 完成)</div></div></div>
+        <div class="stat"><div><div class="stat-value">{{ avgPoints == null ? '—' : avgPoints }}</div><div class="stat-label">平均得分(每项已打分的作业)</div></div></div>
       </div>
 
       <section class="card">

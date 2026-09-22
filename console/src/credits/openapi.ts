@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 import {
-  adjustBody, examplesBody, redeemBody, reorderBody, rewardCreate, rewardUpdate, ruleCreate, rulePreview, ruleUpdate,
+  adjustBody, bindingBody, examplesBody, redeemBody, reorderBody, rewardCreate, rewardUpdate, ruleCreate, ruleUpdate,
   taskAssign, taskClaim, taskCustom, taskMissed, taskResult, taskUpdate, TASK_STATUSES, LEDGER_KINDS,
   WALLET_KINDS, walletAdjustBody, walletUseBody,
 } from './schemas.ts';
@@ -36,14 +36,28 @@ export const ENDPOINTS: Endpoint[] = [
   { method: 'get', path: '/children/:mac', tag: '孩子', summary: '一个孩子的详情' },
   { method: 'post', path: '/examples', tag: '杂项', summary: '空设备一键建示例规则与奖励(已有的不重复建)', body: examplesBody },
 
-  { method: 'get', path: '/rules', tag: '规则', summary: '作业规则列表', query: [MAC_Q, { name: 'archived', description: '1 = 连已停用的一起列' }] },
-  { method: 'post', path: '/rules', tag: '规则', summary: '新建规则(没填的数值用默认)', body: ruleCreate },
-  { method: 'post', path: '/rules/preview', tag: '规则', summary: '按给定数值试算得分,不保存', body: rulePreview },
-  { method: 'post', path: '/rules/reorder', tag: '规则', summary: '按给定顺序重排', body: reorderBody },
-  { method: 'get', path: '/rules/:id', tag: '规则', summary: '读取一条规则' },
-  { method: 'patch', path: '/rules/:id', tag: '规则', summary: '改规则(只影响以后布置的作业)', body: ruleUpdate },
-  { method: 'delete', path: '/rules/:id', tag: '规则', summary: '删除;布置过的规则改为停用,返回 result=archived' },
-  { method: 'post', path: '/rules/:id/restore', tag: '规则', summary: '恢复已停用的规则' },
+  {
+    method: 'get', path: '/binding', tag: '家长 App',
+    summary: '这台家长 App 绑定的硬件(=孩子):{child} 为 null 表示还没绑。只有 App 设备身份能用',
+  },
+  {
+    method: 'put', path: '/binding', tag: '家长 App',
+    summary: '绑定 / 换绑一台硬件。目标必须是硬件设备(board ≠ xiaodan-app);现在只支持一个孩子',
+    body: bindingBody,
+  },
+  { method: 'delete', path: '/binding', tag: '家长 App', summary: '解绑(没绑过也返回 ok)' },
+
+  {
+    method: 'get', path: '/rules', tag: '作业模板',
+    summary: '作业模板列表(只有名字与参考用时;参考用时用来跟实际用时对照,不影响分数)',
+    query: [MAC_Q, { name: 'archived', description: '1 = 连已停用的一起列' }],
+  },
+  { method: 'post', path: '/rules', tag: '作业模板', summary: '新建作业模板:名字 + 参考用时', body: ruleCreate },
+  { method: 'post', path: '/rules/reorder', tag: '作业模板', summary: '按给定顺序重排', body: reorderBody },
+  { method: 'get', path: '/rules/:id', tag: '作业模板', summary: '读取一个模板' },
+  { method: 'patch', path: '/rules/:id', tag: '作业模板', summary: '改模板(只影响以后布置的作业)', body: ruleUpdate },
+  { method: 'delete', path: '/rules/:id', tag: '作业模板', summary: '删除;布置过的模板改为停用,返回 result=archived' },
+  { method: 'post', path: '/rules/:id/restore', tag: '作业模板', summary: '恢复已停用的模板' },
 
   {
     method: 'get', path: '/tasks', tag: '作业',
@@ -51,13 +65,13 @@ export const ENDPOINTS: Endpoint[] = [
     query: [MAC_Q, { name: 'day', description: 'YYYY-MM-DD' }, { name: 'from', description: 'YYYY-MM-DD' },
       { name: 'to', description: 'YYYY-MM-DD' }, { name: 'status', description: 'claimed = 孩子已报完成、等家长检查', enum: TASK_STATUSES }, ...CURSOR],
   },
-  { method: 'post', path: '/tasks', tag: '作业', summary: '按规则布置(可一次多项;规则数值抄进作业快照)', body: taskAssign },
-  { method: 'post', path: '/tasks/custom', tag: '作业', summary: '布置一项不挂规则的临时作业', body: taskCustom },
+  { method: 'post', path: '/tasks', tag: '作业', summary: '按模板布置(可一次多项;参考用时抄进这天的作业)', body: taskAssign },
+  { method: 'post', path: '/tasks/custom', tag: '作业', summary: '布置一项不挂模板的临时作业', body: taskCustom },
   { method: 'get', path: '/tasks/:id', tag: '作业', summary: '读取一项作业' },
-  { method: 'patch', path: '/tasks/:id', tag: '作业', summary: '改还没打分的作业(名称、规定用时、日期)', body: taskUpdate },
+  { method: 'patch', path: '/tasks/:id', tag: '作业', summary: '改还没打分的作业(名称、参考用时、日期)', body: taskUpdate },
   { method: 'delete', path: '/tasks/:id', tag: '作业', summary: '删除还没打分的作业' },
-  { method: 'post', path: '/tasks/:id/result', tag: '作业', summary: '录入实际用时与质量并算分;preview=true 只算不存', body: taskResult },
-  { method: 'post', path: '/tasks/:id/missed', tag: '作业', summary: '记为没完成(按快照扣分)', body: taskMissed },
+  { method: 'post', path: '/tasks/:id/result', tag: '作业', summary: '录入结果:家长给分 0~5 + 质量(好 +1 / 不好 +0);preview=true 只算不存', body: taskResult },
+  { method: 'post', path: '/tasks/:id/missed', tag: '作业', summary: '记为没完成:记 0 分,不扣分(流水里留一条 0 分记录,撤销后回到待完成)', body: taskMissed },
   { method: 'post', path: '/tasks/:id/claim', tag: '作业', summary: '孩子报完成:只记申报,不加分', body: taskClaim },
   { method: 'delete', path: '/tasks/:id/claim', tag: '作业', summary: '驳回孩子的申报' },
 
@@ -106,13 +120,15 @@ export const ENDPOINTS: Endpoint[] = [
   },
 
   {
-    method: 'get', path: '/stats', tag: '统计', summary: '每天挣/扣/花的分、各作业完成率按时率与平均用时;默认最近 7 天,最长一年',
+    method: 'get', path: '/stats', tag: '统计', summary: '每天挣/扣/花的分、各作业完成率与参考用时内完成率、平均用时与平均得分;默认最近 7 天,最长一年',
     query: [MAC_Q, { name: 'from', description: 'YYYY-MM-DD' }, { name: 'to', description: 'YYYY-MM-DD,默认今天' }],
   },
 ];
 
 const ERROR_CODES = ['invalid', 'not_found', 'device_not_found', 'already_scored', 'archived', 'insufficient_balance',
-  'insufficient_wallet', 'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized', 'not_app_device'];
+  'insufficient_wallet', 'already_reverted', 'not_revertible', 'read_only_key', 'idempotency_key_reused', 'unauthorized',
+  'not_app_device', 'no_bound_child', 'not_bound_child', 'app_device_cannot_be_child', 'child_already_bound',
+  'second_hardware_not_supported'];
 
 const toOpenApiPath = (path: string) => path.replace(/:(\w+)/gu, '{$1}');
 
@@ -159,7 +175,8 @@ export function buildOpenApi(basePath: string): Record<string, unknown> {
       title: '小单学分接口',
       version: '1',
       description: [
-        '作业规则 → 每天布置 → 录入用时与质量算分 → 分数兑换奖励。按设备记账,一台设备就是一个孩子。',
+        '常用作业模板 → 每天布置 → 录入实际用时,家长给分 0~5、质量好 +1/不好 +0 → 分数兑换奖励。'
+        + '按硬件记账:一台硬件就是一个孩子(现在只支持一台)。',
         '',
         '约定:',
         '- 鉴权两种:① `Authorization: Bearer <密钥>`,密钥在控制台「学分 → 开放接口」创建,分只读与可写,只读密钥做写操作回 403 read_only_key;'
@@ -169,7 +186,12 @@ export function buildOpenApi(basePath: string): Record<string, unknown> {
         '- 列表返回 `{items, next}`,把 next 作为 before 传回去取下一页。',
         '- 写操作可带 `Idempotency-Key` 请求头(1~100 字符):同一把密钥、同一个值 24 小时内重复提交,直接回放第一次的结果,不会重复扣分。',
         '- MAC 冒号、连字符、12 位紧凑写法都认;拼进 URL 请用紧凑写法。',
-        '- 规则的数值在布置作业时抄进作业快照:改规则不影响已布置的作业和已算过的分。',
+        '- 计分只有一条公式:合计 = 家长给分(0~5) + 质量加成(好 1、不好 0),最高 6 分。参考用时(target_minutes)只是给家长对照的,'
+        + '不参与计算;标记「没完成」记 0 分、不扣分,计划里会留一条 0 分的流水,撤销它作业就回到待完成。',
+        '- 模板的参考用时在布置时抄进那天的作业:改模板不影响已经布置过的作业。',
+        '- 家长 App 的设备身份还要先在服务端绑定一台硬件(GET/PUT/DELETE /binding)。绑好之后,这台 App 调其它接口时 mac 必须是它绑定的那台,'
+        + '否则 403 not_bound_child;还没绑就调会得到 409 no_bound_child。命名的接口密钥不受这条限制,照旧显式传 mac。',
+        '- 现在只支持一个孩子:绑定第二台硬件会失败(设备绑定接口回 code=single_child_only,App 绑定回 409 second_hardware_not_supported)。',
         '- 余额是流水之和,可以因为惩罚变成负数;兑换必须够分。撤销是追加一条反向流水,原记录保留。',
         '- 奖励按整份兑换:cost 分换一份。kind=time 的一份是 amount 分钟、kind=money 的一份是 amount 元,兑换后进这个奖励自己的余额账户;'
         + '用掉 / 花掉时记一笔,不能超过余额。数额一律自然单位:时间整数分钟,钱是元、最多两位小数。',

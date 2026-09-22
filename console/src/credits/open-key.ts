@@ -88,3 +88,14 @@ export function setRequestKey(request: Request, key: ApiKey): void {
 export function requestKey(request: Request): ApiKey | undefined {
   return requestKeys.get(request);
 }
+
+/** 这次请求带的是家长 App 的设备身份:留着 mac,学分路由据此判断「只能操作绑定的那台孩子」 */
+const appDevices = new WeakMap<Request, string>();
+
+export function setAppDevice(request: Request, mac: string): void {
+  appDevices.set(request, mac);
+}
+
+export function appDeviceOf(request: Request): string | undefined {
+  return appDevices.get(request);
+}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { api, urlMac, type CreditParams, type CreditQuality, type CreditRule, type CreditScore, type CreditTask } from '../../api';
+import { api, urlMac, type CreditQuality, type CreditRule, type CreditScore, type CreditTask } from '../../api';
 import AppIcon from '../../components/AppIcon.vue';
 import EmptyState from '../../components/EmptyState.vue';
 import ModalDialog from '../../components/ModalDialog.vue';
@@ -9,7 +9,7 @@ import { QUALITY, qualityLabel, signed, useCreditChild } from '../../credits/use
 import { confirmDialog, formatTime, toast, toastError } from '../../ui';
 
 // 今日作业:布置、录入结果(边输边预览得分)、记没完成、撤销;孩子通过智能体报了完成的,在这里检查打分。
-// 计分公式只在后端一处,这里的预览都是调接口算的。
+// 合计 = 家长给分 + 质量加成(好 +1 / 不好 +0),只在后端算,这里的预览是调接口算的。
 
 const { mac, today, refresh } = useCreditChild();
 const q = () => `?mac=${urlMac(mac.value)}`;
@@ -60,8 +60,6 @@ const STATUS: Record<CreditTask['status'], { text: string; tone: string }> = {
   missed: { text: '没完成', tone: 'warn' },
 };
 const statusOf = (t: CreditTask) => (t.status === 'pending' && t.claimed_at ? { text: '孩子说做完了', tone: 'warn' } : STATUS[t.status]);
-const overtimeText = (r: CreditParams) =>
-  r.overtime_penalty ? `超时每 ${r.overtime_step} 分钟 -${r.overtime_penalty},最多 -${r.overtime_cap}` : '超时不扣分';
 
 // ---- 布置 ----
 
@@ -90,12 +88,15 @@ async function assign() {
 }
 
 const customOpen = ref(false);
-const customForm = ref({ name: '', target_minutes: 30, ontime_points: 5, missed_penalty: 5 });
+const customForm = ref({ name: '', target_minutes: 30 });
 async function addCustom() {
   try {
-    await api.post('/credits/tasks/custom', { mac: mac.value, day: day.value || today.value, ...customForm.value, name: customForm.value.name.trim() });
+    await api.post('/credits/tasks/custom', {
+      mac: mac.value, day: day.value || today.value,
+      name: customForm.value.name.trim(), target_minutes: customForm.value.target_minutes,
+    });
     customOpen.value = false;
-    customForm.value = { name: '', target_minutes: 30, ontime_points: 5, missed_penalty: 5 };
+    customForm.value = { name: '', target_minutes: 30 };
     await afterMoney();
   } catch (e) {
     toastError(e);
@@ -105,37 +106,42 @@ async function addCustom() {
 // ---- 录入结果 ----
 
 const resultTask = ref<CreditTask | null>(null);
-const resultForm = ref({ minutes: 0, quality: 'good' as CreditQuality, note: '' });
+/** 给分的默认值:0–5 里取一个中间偏上的,家长按这次的表现改 */
+const DEFAULT_POINTS = 4;
+const resultForm = ref({ minutes: 0, points: DEFAULT_POINTS, quality: 'good' as CreditQuality, note: '' });
 const resultPreview = ref<CreditScore | null>(null);
 const saving = ref(false);
 function openResult(task: CreditTask) {
   resultTask.value = task;
   // 孩子报了用时就预填他报的,家长核对后改
-  resultForm.value = { minutes: task.claimed_minutes ?? task.target_minutes, quality: 'good', note: '' };
+  resultForm.value = { minutes: task.claimed_minutes ?? task.target_minutes, points: DEFAULT_POINTS, quality: 'good', note: '' };
   void previewResult();
 }
 let previewSeq = 0;
 async function previewResult() {
   const task = resultTask.value;
-  if (!task || !Number.isInteger(resultForm.value.minutes) || resultForm.value.minutes < 0) return;
+  const { minutes, points } = resultForm.value;
+  if (!task || !Number.isInteger(minutes) || minutes < 0) return;
+  if (!Number.isInteger(points) || points < 0 || points > 5) return;   // 给分只收 0–5 的整数
   const seq = ++previewSeq;
   try {
     const data = await api.post<{ score: CreditScore }>(`/credits/tasks/${task.id}/result`, {
-      actual_minutes: resultForm.value.minutes, quality: resultForm.value.quality, preview: true,
+      actual_minutes: minutes, points, quality: resultForm.value.quality, preview: true,
     });
     if (seq === previewSeq) resultPreview.value = data.score;
   } catch {
-    if (seq === previewSeq) resultPreview.value = null;
+    if (seq === previewSeq) resultPreview.value = null;   // 数值越界时先不显示,保存时会报具体原因
   }
 }
-watch(() => [resultForm.value.minutes, resultForm.value.quality], () => void previewResult());
+watch(() => [resultForm.value.minutes, resultForm.value.points, resultForm.value.quality], () => void previewResult());
 async function saveResult() {
   const task = resultTask.value;
   if (!task) return;
   saving.value = true;
   try {
     const data = await api.post<{ score: CreditScore }>(`/credits/tasks/${task.id}/result`, {
-      actual_minutes: resultForm.value.minutes, quality: resultForm.value.quality, note: resultForm.value.note.trim(),
+      actual_minutes: resultForm.value.minutes, points: resultForm.value.points,
+      quality: resultForm.value.quality, note: resultForm.value.note.trim(),
     });
     toast(`${task.name}:${signed(data.score.total)} 分`);
     resultTask.value = null;
@@ -148,8 +154,7 @@ async function saveResult() {
 }
 
 async function markMissed(task: CreditTask) {
-  const penalty = task.missed_penalty ? `,扣 ${task.missed_penalty} 分` : '';
-  if (!(await confirmDialog({ title: `「${task.name}」没完成?`, message: `记为没完成${penalty}。之后可以在流水里撤销。`, confirmText: '记为没完成', danger: true }))) return;
+  if (!(await confirmDialog({ title: `「${task.name}」没完成?`, message: '记为没完成,这次记 0 分。之后可以在流水里撤销。', confirmText: '记为没完成', danger: true }))) return;
   try {
     await api.post(`/credits/tasks/${task.id}/missed`, {});
     await afterMoney();
@@ -193,7 +198,7 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
 </script>
 
 <template>
-  <CreditHeader title="今日作业" description="布置作业,孩子做完后录入实际用时和质量,按这项作业布置时的规则算分。孩子对小单说「做完了」的,会在这里等你检查。">
+  <CreditHeader title="今日作业" description="布置作业;孩子做完后录入实际用时、你给的分和完成质量,相加就是这次得分(没完成记 0 分)。孩子对小单说「做完了」的,会在这里等你检查。">
     <div v-if="otherClaims.length" class="callout warn">
       <AppIcon name="info" :size="18" />
       <div class="callout-body">
@@ -221,25 +226,26 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
         </div>
       </div>
       <EmptyState v-if="tasks.length === 0" :title="view === 'day' ? '这一天还没有布置作业' : '最近 14 天没有作业'"
-        :description="rules.length ? '点「布置作业」从规则里挑,或加一项临时作业。' : '先去「作业规则」建几条规则,或加一项临时作业。'" />
+        :description="rules.length ? '点「布置作业」从模板里挑,或加一项临时作业。' : '先去「作业模板」建几条,或加一项临时作业。'" />
       <div v-else class="table-wrap">
         <table class="table">
-          <thead><tr><th v-if="view === 'recent'">日期</th><th>作业</th><th>规定用时</th><th>状态</th><th>结果</th><th>得分</th><th></th></tr></thead>
+          <thead><tr><th v-if="view === 'recent'">日期</th><th>作业</th><th>参考时效</th><th>实际用时</th><th>给分</th><th>质量</th><th>合计</th><th>状态</th><th></th></tr></thead>
           <tbody>
             <tr v-for="t in tasks" :key="t.id">
               <td v-if="view === 'recent'" class="nowrap mono">{{ t.day }}</td>
-              <td class="cell-main">{{ t.name }}<span v-if="!t.rule_id" class="cell-sub"> · 临时</span></td>
-              <td class="nowrap">{{ t.target_minutes }} 分钟</td>
-              <td><span class="tag dot" :class="statusOf(t).tone">{{ statusOf(t).text }}</span></td>
-              <td>
-                <template v-if="t.status === 'done'">用时 {{ t.actual_minutes }} 分钟 · 质量{{ qualityLabel(t.quality) }}</template>
-                <template v-else-if="t.claimed_at">
-                  {{ formatTime(t.claimed_at) }} 报的<template v-if="t.claimed_minutes != null">,说用了 {{ t.claimed_minutes }} 分钟</template>
-                  <span v-if="t.claim_note" class="cell-sub"> · 「{{ t.claim_note }}」</span>
-                </template>
-                <span v-if="t.note" class="cell-sub"> · {{ t.note }}</span>
+              <td class="cell-main">
+                {{ t.name }}<span v-if="!t.rule_id" class="cell-sub"> · 临时</span>
+                <div v-if="t.claimed_at && t.status !== 'done'" class="cell-sub">
+                  {{ formatTime(t.claimed_at) }} 报的<template v-if="t.claimed_minutes != null">,说用了 {{ t.claimed_minutes }} 分钟</template><template v-if="t.claim_note">:「{{ t.claim_note }}」</template>
+                </div>
+                <div v-if="t.note" class="cell-sub">{{ t.note }}</div>
               </td>
+              <td class="nowrap">{{ t.target_minutes }} 分钟</td>
+              <td class="nowrap">{{ t.status === 'done' ? `${t.actual_minutes} 分钟` : '—' }}</td>
+              <td class="nowrap">{{ t.status === 'done' ? t.base_points : '—' }}</td>
+              <td class="nowrap">{{ t.status === 'done' ? qualityLabel(t.quality) : '—' }}</td>
               <td class="nowrap points" :class="{ negative: (t.total_points ?? 0) < 0 }">{{ signed(t.total_points) }}</td>
+              <td><span class="tag dot" :class="statusOf(t).tone">{{ statusOf(t).text }}</span></td>
               <td class="actions">
                 <template v-if="t.status === 'pending'">
                   <button class="btn btn-primary btn-sm" type="button" @click="openResult(t)"><AppIcon name="pencil" :size="14" /><span>{{ t.claimed_at ? '检查打分' : '录入结果' }}</span></button>
@@ -266,7 +272,7 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
           <span class="muted">分钟</span>
         </span>
       </label>
-      <p class="field-hint">用时默认取规则上的,今天特殊可以临时改,只影响这一次。</p>
+      <p class="field-hint">参考用时默认取模板上的,今天特殊可以临时改,只影响这一次。</p>
     </div>
     <template #footer>
       <button class="btn" type="button" @click="assignOpen = false">取消</button>
@@ -277,11 +283,9 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
   <ModalDialog :open="customOpen" title="临时作业" @close="customOpen = false">
     <div class="form-grid">
       <label class="field"><span class="field-label">作业名称</span><input v-model="customForm.name" class="input" type="text" maxlength="40" placeholder="练钢琴" /></label>
-      <label class="field"><span class="field-label">规定用时(分钟)</span><input v-model.number="customForm.target_minutes" class="input" type="number" min="1" max="600" /></label>
-      <label class="field"><span class="field-label">按时完成得分</span><input v-model.number="customForm.ontime_points" class="input" type="number" min="-100" max="100" /></label>
-      <label class="field"><span class="field-label">没完成扣几分</span><input v-model.number="customForm.missed_penalty" class="input" type="number" min="0" max="100" /></label>
+      <label class="field"><span class="field-label">参考用时(分钟)</span><input v-model.number="customForm.target_minutes" class="input" type="number" min="1" max="600" /></label>
     </div>
-    <p class="field-hint">不挂规则,只用这一次。超时与质量的分值用默认的(超时每 10 分钟 -1、最多 -5;优良中差 +5/+3/0/-2)。</p>
+    <p class="field-hint">不挂模板,只用这一次。分在录入结果时给。</p>
     <template #footer>
       <button class="btn" type="button" @click="customOpen = false">取消</button>
       <button class="btn btn-primary" type="button" @click="addCustom">布置</button>
@@ -297,7 +301,12 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
       <label class="field">
         <span class="field-label">实际用时(分钟)</span>
         <input v-model.number="resultForm.minutes" class="input" type="number" min="0" max="1440" />
-        <span class="field-hint">规定 {{ resultTask.target_minutes }} 分钟;{{ overtimeText(resultTask) }}</span>
+        <span class="field-hint">参考用时 {{ resultTask.target_minutes }} 分钟,只作对比,不参与算分</span>
+      </label>
+      <label class="field">
+        <span class="field-label">给分(0–5)</span>
+        <input v-model.number="resultForm.points" class="input" type="number" min="0" max="5" step="1" />
+        <span class="field-hint">这次作业你自己给几分</span>
       </label>
       <div class="field">
         <span class="field-label">完成质量</span>
@@ -305,9 +314,10 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
           <button v-for="item in QUALITY" :key="item.key" type="button" class="btn btn-sm"
             :class="resultForm.quality === item.key ? 'btn-primary' : ''" :aria-pressed="resultForm.quality === item.key"
             @click="resultForm.quality = item.key">
-            {{ item.label }} {{ signed(resultTask[`q_${item.key}` as keyof CreditParams]) }}
+            {{ item.label }}
           </button>
         </div>
+        <span class="field-hint">好 +1,不好 +0</span>
       </div>
       <label class="field">
         <span class="field-label">备注(可选)</span>
@@ -315,7 +325,10 @@ const otherClaims = computed(() => claims.value.filter((t) => !tasks.value.some(
       </label>
       <div v-if="resultPreview" class="callout" :class="resultPreview.total >= 0 ? 'ok' : 'warn'">
         <AppIcon name="medal" :size="18" />
-        <div class="callout-body"><strong>{{ signed(resultPreview.total) }} 分</strong> · {{ resultPreview.explain }}</div>
+        <div class="callout-body">
+          <strong>给分 {{ resultPreview.base_points }} + 质量 {{ resultPreview.quality_points }} = 合计 {{ resultPreview.total }} 分</strong>
+          <span class="muted"> · {{ resultPreview.explain }}</span>
+        </div>
       </div>
     </div>
     <template #footer>
